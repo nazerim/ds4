@@ -16,11 +16,36 @@ TOKENS=384000
 MTP_MODEL="gguf/DeepSeek-V4-Flash-DSpark-support.gguf"
 MTP_DRAFT=1
 MTP_MARGIN=3
+MAX_LOG_ROTATIONS=10
+
+# Debug mode: set DEBUG=1 to enable verbose output
+if [ "${DEBUG:-0}" = "1" ]; then
+  set -x
+fi
+
+rotate_logs() {
+  if [ -f "$LOG_FILE" ]; then
+    local ts
+    ts=$(date +%Y%m%d-%H%M%S)
+    cp "$LOG_FILE" "$LOG_DIR/ds4.log.$ts"
+    echo "Rotated previous log to $LOG_DIR/ds4.log.$ts"
+  fi
+
+  # Keep only the last MAX_LOG_ROTATIONS rotated logs
+  local old_logs
+  old_logs=$(ls -1t "$LOG_DIR"/ds4.log.* 2>/dev/null || true)
+  if [ -n "$old_logs" ]; then
+    echo "$old_logs" | tail -n +$((MAX_LOG_ROTATIONS + 1)) | while IFS= read -r f; do
+      rm -f "$f"
+    done
+  fi
+}
 
 start_server() {
   local enable_mtp="${1:-}"
 
   if [ -f "$PID_FILE" ]; then
+    local pid
     pid=$(cat "$PID_FILE")
     if kill -0 "$pid" 2>/dev/null; then
       echo "ds4-server is already running (PID: $pid)"
@@ -33,12 +58,13 @@ start_server() {
   # Ensure KV cache and log directories exist
   mkdir -p "$KV_DIR" "$LOG_DIR"
 
-  # Rotate previous log if it exists
-  if [ -f "$LOG_FILE" ]; then
-    local ts
-    ts=$(date +%Y%m%d-%H%M%S)
-    cp "$LOG_FILE" "$LOG_DIR/ds4.log.$ts"
-    echo "Rotated previous log to $LOG_DIR/ds4.log.$ts"
+  # Rotate and clean up old logs
+  rotate_logs
+
+  # Validate MTP model exists if requested
+  if [ "$enable_mtp" = "mtp" ] && [ ! -f "$MTP_MODEL" ]; then
+    echo "Error: MTP model not found: $MTP_MODEL"
+    return 1
   fi
 
   echo "Starting ds4-server on port $PORT (ctx: $CTX)..."
@@ -53,17 +79,19 @@ start_server() {
     MTP_ARGS+=(--mtp "$MTP_MODEL" --dspark --mtp-draft "$MTP_DRAFT" --mtp-margin "$MTP_MARGIN")
   fi
 
+  # Use ${arr[@]+"${arr[@]}"} to safely expand empty arrays on old bash
   $SERVER_CMD \
     --ctx "$CTX" \
     --tokens "$TOKENS" \
     --port "$PORT" \
     --kv-disk-dir "$KV_DIR" \
     --kv-disk-space-mb "$KV_SIZE" \
-    "${MTP_ARGS[@]}" \
+    ${MTP_ARGS[@]+"${MTP_ARGS[@]}"} \
     > "$LOG_FILE" 2>&1 &
 
   local pid=$!
-  echo "$pid" > "$PID_FILE"
+  # Atomic PID file write
+  echo "$pid" > "${PID_FILE}.tmp" && mv "${PID_FILE}.tmp" "$PID_FILE"
   echo "ds4-server started (PID: $pid)"
 
   # Verify the process actually started
@@ -78,9 +106,10 @@ start_server() {
 stop_server() {
   if [ ! -f "$PID_FILE" ]; then
     echo "No PID file found. Is ds4-server running?"
-    return 1
+    return 0
   fi
 
+  local pid
   pid=$(cat "$PID_FILE")
   if kill -0 "$pid" 2>/dev/null; then
     echo "Stopping ds4-server (PID: $pid)..."
@@ -98,7 +127,7 @@ stop_server() {
 
     # Force kill if still running
     if kill -0 "$pid" 2>/dev/null; then
-      echo "Force killing ds4-server (PID: $pid)..."
+      echo "Warning: Force killing ds4-server (PID: $pid) — KV cache may be corrupted"
       kill -9 "$pid" 2>/dev/null || true
     fi
 
@@ -108,10 +137,12 @@ stop_server() {
     echo "Process $pid not running. Cleaning up PID file."
     rm -f "$PID_FILE"
   fi
+  return 0
 }
 
 status_server() {
   if [ -f "$PID_FILE" ]; then
+    local pid
     pid=$(cat "$PID_FILE")
     if kill -0 "$pid" 2>/dev/null; then
       echo "ds4-server is running (PID: $pid)"
@@ -137,10 +168,10 @@ case "${1:-}" in
     stop_server
     ;;
   restart)
-    stop_server && start_server
+    stop_server; start_server
     ;;
   restart-mtp)
-    stop_server && start_server mtp
+    stop_server; start_server mtp
     ;;
   status)
     status_server
@@ -160,6 +191,9 @@ case "${1:-}" in
     echo "MTP tuning (edit script variables):"
     echo "  MTP_DRAFT  - Max autoregressive draft tokens (default: 1)"
     echo "  MTP_MARGIN - Verifier confidence margin (default: 3)"
+    echo ""
+    echo "Environment:"
+    echo "  DEBUG=1    - Enable verbose output"
     exit 1
     ;;
 esac
