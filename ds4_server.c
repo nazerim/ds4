@@ -11369,6 +11369,18 @@ decode_again:
     dsml_decode_tracker dsml_tracker;
     dsml_decode_tracker_init(&dsml_tracker);
 
+    /* When tools are not active for this request, resolve the DSML control
+     * token id so we can suppress it at sampling time.  This prevents the
+     * model from emitting tool-call markup during summary/compaction turns
+     * where the client has explicitly requested no tool use. */
+    int dsml_token_id = -1;
+    if (j->req.kind == REQ_CHAT && !j->req.has_tools) {
+        ds4_tokens dt = {0};
+        ds4_tokenize_rendered_chat(s->engine, DS4_DSML, &dt);
+        if (dt.len == 1) dsml_token_id = dt.v[0];
+        ds4_tokens_free(&dt);
+    }
+
     server_generation_enter(s);
     while (!g_stop_requested && completion < max_tokens &&
            ds4_session_pos(slot->session) < ds4_session_ctx(slot->session)) {
@@ -11395,8 +11407,14 @@ decode_again:
         if (in_tool_call && !dsml_decode_state_uses_payload_sampling(dsml_state)) {
             temperature = 0.0f;
         }
-        int token = ds4_session_sample(slot->session, temperature, top_k,
+        int token;
+        if (dsml_token_id >= 0) {
+            token = ds4_session_sample_excluding(slot->session, temperature, top_k,
+                                                 top_p, min_p, &rng, dsml_token_id);
+        } else {
+            token = ds4_session_sample(slot->session, temperature, top_k,
                                        top_p, min_p, &rng);
+        }
         if (ds4_token_is_stop_for_think_mode(s->engine,
                                              token,
                                              j->req.think_mode)) {
@@ -11421,6 +11439,16 @@ decode_again:
             if (ntok < 0) {
                 finish = "error";
                 break;
+            }
+            /* Post-filter: remove any DSML tokens that leaked through
+             * speculative decoding when tools are not active. */
+            if (dsml_token_id >= 0) {
+                int write = 0;
+                for (int ri = 0; ri < ntok; ri++) {
+                    if (toks[ri] != dsml_token_id)
+                        toks[write++] = toks[ri];
+                }
+                ntok = write;
             }
         } else {
             if (server_eval_token(s, slot, token, err, sizeof(err)) != 0) {
