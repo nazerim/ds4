@@ -6,7 +6,7 @@ set -euo pipefail
 
 SERVER_CMD="./ds4-server"
 PID_FILE="./ds4-server.pid"
-CTX=100000
+CTX=256000
 PORT=8001
 KV_DIR="/tmp/ds4-kv"
 KV_SIZE=32768
@@ -16,6 +16,7 @@ TOKENS=384000
 MTP_MODEL="gguf/DeepSeek-V4-Flash-DSpark-support.gguf"
 MTP_DRAFT=1
 MTP_MARGIN=3
+DSPARK_CONFIDENCE=0.9
 MAX_LOG_ROTATIONS=10
 
 # Debug mode: set DEBUG=1 to enable verbose output
@@ -73,10 +74,16 @@ start_server() {
   fi
   echo "Logging to $LOG_FILE"
 
+  # Env var overrides (set before running the script)
+  MTP_DRAFT="${MTP_DRAFT:-1}"
+  MTP_MARGIN="${MTP_MARGIN:-3}"
+  DSPARK_CONFIDENCE="${DSPARK_CONFIDENCE:-0.9}"
+
   # Build MTP arguments
   MTP_ARGS=()
   if [ "$enable_mtp" = "mtp" ]; then
     MTP_ARGS+=(--mtp "$MTP_MODEL" --dspark --mtp-draft "$MTP_DRAFT" --mtp-margin "$MTP_MARGIN")
+    MTP_ARGS+=(--dspark-confidence "$DSPARK_CONFIDENCE")
   fi
 
   # Use ${arr[@]+"${arr[@]}"} to safely expand empty arrays on old bash
@@ -188,12 +195,13 @@ case "${1:-}" in
     echo "  status      - Check if ds4-server is running"
     echo ""
     echo "MTP model: $MTP_MODEL"
-    echo "MTP tuning (edit script variables):"
-    echo "  MTP_DRAFT  - Max autoregressive draft tokens (default: 1)"
-    echo "  MTP_MARGIN - Verifier confidence margin (default: 3)"
+    echo "MTP/DSpark tuning (script variables or env overrides):"
+    echo "  MTP_DRAFT           - Max autoregressive draft tokens (default: 1)"
+    echo "  MTP_MARGIN          - Verifier confidence margin (default: 3)"
+    echo "  DSPARK_CONFIDENCE   - DSpark confidence threshold 0..1 (default: 0.9)"
     echo ""
     echo "Environment:"
-    echo "  DEBUG=1    - Enable verbose output"
+    echo "  DEBUG=1             - Enable verbose output"
     exit 1
     ;;
 esac
