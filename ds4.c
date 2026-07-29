@@ -58666,6 +58666,23 @@ int ds4_session_sample(ds4_session *s, float temperature, int top_k, float top_p
                               top_p, min_p, rng, s->sample_probs);
 }
 
+int ds4_session_sample_excluding(ds4_session *s, float temperature, int top_k,
+                                 float top_p, float min_p, uint64_t *rng,
+                                 int excluded_id) {
+    if (!s || !s->logits) return -1;
+    float original = DS4_NEG_INF;
+    if (excluded_id >= 0 && (uint32_t)excluded_id < DS4_N_VOCAB) {
+        original = s->logits[excluded_id];
+        s->logits[excluded_id] = DS4_NEG_INF;
+    }
+    int token = sample_top_p_min_p(s->logits, DS4_N_VOCAB, temperature, top_k,
+                                    top_p, min_p, rng, s->sample_probs);
+    if (excluded_id >= 0 && (uint32_t)excluded_id < DS4_N_VOCAB) {
+        s->logits[excluded_id] = original;
+    }
+    return token;
+}
+
 int ds4_session_top_logprobs(ds4_session *s, ds4_token_score *out, int k) {
     if (!s || !out || k <= 0) return 0;
     if (k > (int)DS4_N_VOCAB) k = (int)DS4_N_VOCAB;

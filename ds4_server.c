@@ -11563,11 +11563,11 @@ decode_again:
                      * call on the executable side.
                      *
                      * The injected close is fed to the session state via
-                     * server_eval_token AND appended to the output buffer so the
-                     * final parser can split reasoning from executable tool calls
-                     * at the " response" boundary.  Without it, the parser sees
-                     * tool calls without a preceding close marker and treats them
-                     * as reasoning content, breaking the agent loop. */
+                    * server_eval_token AND appended to the output buffer so the
+                    * final parser can split reasoning from executable tool calls
+                    * at the " response" boundary.  Without it, the parser sees
+                    * tool calls without a preceding close marker and treats them
+                    * as reasoning content, breaking the agent loop. */
                     const int recovered = think_tool_recovery_enabled ?
                         chat_think_tool_recovery(s, slot, &text, &thinking,
                                                   &think_recovery_scan_from,
