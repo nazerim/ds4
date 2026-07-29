@@ -10025,7 +10025,7 @@ static void log_decode_progress(req_kind kind, int prompt_tokens, int completion
 
 typedef struct {
     bool inside;
-    char tail[8]; /* Long enough for "</think>". */
+    char tail[10]; /* Long enough for " response" (9 chars + null). */
     int tail_len;
 } thinking_state;
 
@@ -10051,7 +10051,13 @@ static thinking_state thinking_state_from_prompt(const request *r) {
     thinking_state st = {0};
     if (r && r->prompt_text) {
         thinking_state_feed(&st, r->prompt_text, strlen(r->prompt_text));
-    } else if (r && ds4_think_mode_enabled(r->think_mode)) {
+    } else if (r && ds4_think_mode_enabled(r->think_mode) &&
+               r->model_syntax == SERVER_MODEL_SYNTAX_DEEPSEEK) {
+        /* DeepSeek-syntax prompts pre-emit " thinking" at the end of the
+         * rendered prompt, so when continuing from session state with no
+         * prompt_text, we must start inside=true.  GLM prompts do not
+         * pre-emit thinking tags, so we start inside=false and let
+         * thinking_state_feed track the actual generated delimiters. */
         st.inside = true;
     }
     return st;
@@ -10084,14 +10090,15 @@ static int server_eval_token(server *s, server_slot *slot, int token,
                              char *err, size_t errlen);
 
 static int chat_think_tool_recovery(server *s,
-                                    server_slot *slot,
-                                    buf *text,
-                                    thinking_state *thinking,
-                                    size_t *scan_from,
-                                    int *completion,
-                                    int max_tokens,
-                                    char *err,
-                                    size_t errlen) {
+                                     server_slot *slot,
+                                     buf *text,
+                                     thinking_state *thinking,
+                                     size_t *scan_from,
+                                     int *completion,
+                                     int max_tokens,
+                                     bool append_to_output,
+                                     char *err,
+                                     size_t errlen) {
     if (!thinking->inside || !text->ptr) return 0;
     if (*scan_from > text->len) *scan_from = text->len;
     if (!find_any_tool_start(text->ptr + *scan_from)) {
@@ -10106,7 +10113,7 @@ static int chat_think_tool_recovery(server *s,
     ds4_tokenize_rendered_chat(s->engine, inject, &toks);
 
     const int room = ds4_session_ctx(slot->session) -
-                     ds4_session_pos(slot->session);
+                      ds4_session_pos(slot->session);
     if (toks.len <= 0 ||
         toks.len >= room ||
         *completion + toks.len >= max_tokens) {
@@ -10125,7 +10132,9 @@ static int chat_think_tool_recovery(server *s,
         }
         (*completion)++;
     }
-    buf_append(text, inject, inject_len);
+    if (append_to_output) {
+        buf_append(text, inject, inject_len);
+    }
     thinking_state_feed(thinking, inject, inject_len);
     *scan_from = text->len;
     ds4_tokens_free(&toks);
@@ -11541,18 +11550,26 @@ decode_again:
             free(piece);
 
             if (j->req.kind == REQ_CHAT && j->req.has_tools) {
-                if (thinking_gates_tool_markers && thinking.inside) {
-                    /* A DSML block inside reasoning is not executable.  This is
-                     * the live guard: do not let a quoted or mistaken marker in
-                     * <think> stop decoding as a real tool call.  A complete
-                     * stanza opening, however, almost always means the model
-                     * forgot to close its thinking; recover by forcing the
-                     * close so the model restarts the call on the executable
-                     * side. */
+                if (thinking_gates_tool_markers &&
+                    j->req.model_syntax == SERVER_MODEL_SYNTAX_DEEPSEEK &&
+                    thinking.inside) {
+                    /* Only DeepSeek-syntax models emit " thinking" / " response"
+                     * delimiters.  For those models, a DSML block inside
+                     * reasoning is not executable.  This is the live guard: do
+                     * not let a quoted or mistaken marker in <think> stop decoding
+                     * as a real tool call.  A complete stanza opening, however,
+                     * almost always means the model forgot to close its thinking;
+                     * recover by forcing the close so the model restarts the
+                     * call on the executable side.
+                     *
+                     * The injected close is fed to the session state via
+                     * server_eval_token but NOT appended to the output buffer —
+                     * the client should not see spurious " response" markers. */
                     const int recovered = think_tool_recovery_enabled ?
                         chat_think_tool_recovery(s, slot, &text, &thinking,
                                                  &think_recovery_scan_from,
                                                  &completion, max_tokens,
+                                                 false,
                                                  err, sizeof(err)) : 0;
                     if (recovered < 0) {
                         finish = "error";
