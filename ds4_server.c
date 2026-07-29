@@ -10053,13 +10053,6 @@ static thinking_state thinking_state_from_prompt(const request *r) {
         thinking_state_feed(&st, r->prompt_text, strlen(r->prompt_text));
     } else if (r && ds4_think_mode_enabled(r->think_mode) &&
                r->model_syntax == SERVER_MODEL_SYNTAX_DEEPSEEK) {
-        /* DeepSeek-syntax prompts pre-emit "<think>"</think>
-
-Hmm, wait. I need to be more careful. Let me check what the actual prompt suffix looks like.</think>
-
-<｜DSML｜tool_calls>
-<｜DSML｜invoke name="bash">
-<｜DSML｜parameter name="command" string="true">cd /Users/naz/Projects/ds4 && grep -n 'DS4_DSML\|<think\|<\|think\|THINK_PREFIX\|prompt_suffix\|chat_template\|DS4_CHAT' ds4_server.c ds4.c ds4.h 2>/dev/null | head -20
         st.inside = true;
     }
     return st;
