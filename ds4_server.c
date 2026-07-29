@@ -10025,7 +10025,7 @@ static void log_decode_progress(req_kind kind, int prompt_tokens, int completion
 
 typedef struct {
     bool inside;
-    char tail[10]; /* Long enough for " response" (9 chars + null). */
+    char tail[10]; /* Long enough for " response" (10 chars + null). */
     int tail_len;
 } thinking_state;
 
@@ -11563,8 +11563,8 @@ decode_again:
                      * call on the executable side.
                      *
                      * The injected close is fed to the session state via
-                    * server_eval_token AND appended to the output buffer so the
-                    * final parser can split reasoning from executable tool calls
+                     * server_eval_token AND appended to the output buffer so the
+                     * final parser can split reasoning from executable tool calls
                     * at the " response" boundary.  Without it, the parser sees
                     * tool calls without a preceding close marker and treats them
                     * as reasoning content, breaking the agent loop. */
