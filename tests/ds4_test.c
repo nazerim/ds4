@@ -6314,6 +6314,7 @@ static void test_think_tool_recovery(void) {
     int completion = 0;
     int rec = 0;
     int triggered_at = -1;
+    size_t inject_at = 0;
     for (int i = 0; i < toks.len; i++) {
         TEST_ASSERT(ds4_session_eval(session, toks.v[i], err, sizeof(err)) == 0);
         size_t piece_len = 0;
@@ -6323,7 +6324,7 @@ static void test_think_tool_recovery(void) {
         free(piece);
         TEST_ASSERT(thinking.inside);
         rec = chat_think_tool_recovery(&srv, &slot, &text, &thinking, &scan_from,
-                                       &completion, 512, err, sizeof(err));
+                                        &completion, 512, true, &inject_at, err, sizeof(err));
         TEST_ASSERT(rec >= 0);
         if (rec == 1) {
             triggered_at = i;
@@ -6334,6 +6335,11 @@ static void test_think_tool_recovery(void) {
             "ds4-test: think-tool-recovery trigger=%d/%d injected_tokens=%d\n",
             triggered_at, toks.len, completion);
     TEST_ASSERT(rec == 1);
+    TEST_ASSERT(inject_at > 0);
+    TEST_ASSERT(inject_at < text.len);
+    const char *pre_inject = text.ptr;
+    const char *marker_in_pre = strstr(pre_inject, DS4_TOOL_CALLS_START);
+    TEST_ASSERT(marker_in_pre == NULL || (size_t)(marker_in_pre - pre_inject) >= inject_at);
     TEST_ASSERT(triggered_at == toks.len - 1);
     ds4_tokens_free(&toks);
     buf_free(&forced);
@@ -6689,6 +6695,28 @@ static void test_dspark_verify_depth(void) {
     ds4_engine_close(engine);
     test_restore_env("DS4_DSPARK_SCHEDULER", saved_scheduler);
 }
+
+static void test_dsml_token_suppression_excludes_id(void) {
+    ds4_engine *engine = test_get_engine(false);
+    if (!engine) return;
+    int dsml_id = ds4_engine_dsml_id(engine);
+    if (dsml_id < 0) { test_close_engine(false); return; }
+    ds4_session *session = NULL;
+    TEST_ASSERT(ds4_session_create(&session, engine, 512) == 0);
+    ds4_tokens prompt = {0};
+    ds4_chat_begin(engine, &prompt);
+    ds4_tokenize_text(engine, "hello", &prompt);
+    char err[256] = {0};
+    TEST_ASSERT(ds4_session_sync(session, &prompt, err, sizeof(err)) == 0);
+    ds4_tokens_free(&prompt);
+    uint64_t rng = 42;
+    for (int i = 0; i < 100; i++) {
+        int token = ds4_session_sample_excluding(session, 0.8f, 0, 1.0f, 0.0f, &rng, dsml_id);
+        TEST_ASSERT(token != dsml_id);
+    }
+    ds4_session_free(session);
+    test_close_engine(false);
+}
 #endif
 
 static void test_server_unit_group(void) {
@@ -6718,6 +6746,7 @@ static const ds4_test_entry test_entries[] = {
     {"--streaming-decode-prefill-correctness", "streaming-decode-prefill-correctness", "streaming decode-style cold prefill drift and repeatability", test_streaming_decode_prefill_correctness},
     {"--mtp-verify-depth", "mtp-verify-depth", "MTP speculative verify commits autoregressive-identical tokens at draft depth > 2", test_mtp_verify_depth},
     {"--dspark-verify-depth", "dspark-verify-depth", "DSpark speculative verify commits autoregressive-identical tokens at draft depth > 2", test_dspark_verify_depth},
+    {"--dsml-token-suppression", "dsml-token-suppression", "ds4_session_sample_excluding never returns the excluded DSML token id", test_dsml_token_suppression_excludes_id},
 #endif
     {"--server", "server", "server parser/rendering/cache unit tests", test_server_unit_group},
 };

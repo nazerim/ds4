@@ -36669,6 +36669,10 @@ int ds4_token_eos(ds4_engine *e) {
     return e->vocab.eos_id;
 }
 
+int ds4_engine_dsml_id(ds4_engine *e) {
+    return e ? e->vocab.dsml_id : -1;
+}
+
 bool ds4_token_is_stop(ds4_engine *e, int token) {
     return e ? vocab_token_is_generation_stop(&e->vocab, token) : false;
 }

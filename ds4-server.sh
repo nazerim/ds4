@@ -16,7 +16,7 @@ TOKENS=384000
 MTP_MODEL="gguf/DeepSeek-V4-Flash-DSpark-support.gguf"
 MTP_DRAFT=1
 MTP_MARGIN=3
-DSPARK_CONFIDENCE=0.9
+DSPARK_CONFIDENCE=0.6
 MAX_LOG_ROTATIONS=10
 
 # Debug mode: set DEBUG=1 to enable verbose output

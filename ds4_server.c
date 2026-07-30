@@ -4867,7 +4867,51 @@ static bool parse_deepseek_generated_message_ex(const char *text,
             split_reasoning_content(text, content_len, content_out, reasoning_out);
             return true;
         }
-        if (strncmp(p, invoke_start, strlen(invoke_start)) != 0) return false;
+        if (strncmp(p, invoke_start, strlen(invoke_start)) != 0) {
+            /* Model may emit bare parameters directly under tool_calls without
+             * an invoke wrapper (observed after think-tool recovery).  Collect
+             * consecutive parameters into a synthetic tool call. */
+            if (strncmp(p, param_start, strlen(param_start)) == 0) {
+                buf bare_args = {0};
+                while (true) {
+                    p = skip_ascii_ws(p);
+                    if (strncmp(p, param_start, strlen(param_start)) != 0) break;
+                    const char *te = strchr(p, '>');
+                    if (!te) { buf_free(&bare_args); return false; }
+                    char *t = xstrndup(p, (size_t)(te - p + 1));
+                    char *pn = dsml_attr(t, "name");
+                    char *ps = dsml_attr(t, "string");
+                    free(t);
+                    if (!pn) { buf_free(&bare_args); free(ps); return false; }
+                    const char *vs = te + 1;
+                    const char *ve = strstr(vs, param_end);
+                    if (!ve) { free(pn); free(ps); buf_free(&bare_args); return false; }
+                    char *rv = xstrndup(vs, (size_t)(ve - vs));
+                    const char *tp = ps ? ps : "true";
+                    char *val = !strcmp(tp, "true") ?
+                        dsml_unescape_text(rv) : xstrdup(rv);
+                    tool_call_json_args_add(&bare_args, pn, val, tp);
+                    free(pn); free(ps); free(rv); free(val);
+                    p = ve + strlen(param_end);
+                }
+                tool_call tc = {0};
+                tc.name = xstrdup("unknown");
+                buf wrapped = {0};
+                buf_putc(&wrapped, '{');
+                buf_puts(&wrapped, bare_args.ptr ? bare_args.ptr : "");
+                buf_putc(&wrapped, '}');
+                tc.arguments = buf_take(&wrapped);
+                tool_calls_push(calls, tc);
+                buf_free(&bare_args);
+                /* Consume any orphaned </｜DSML｜invoke> closing tag */
+                p = skip_ascii_ws(p);
+                if (!strncmp(p, invoke_end, strlen(invoke_end))) {
+                    p += strlen(invoke_end);
+                }
+                continue;
+            }
+            return false;
+        }
         const char *tag_end = strchr(p, '>');
         if (!tag_end) return false;
         char *tag = xstrndup(p, (size_t)(tag_end - p + 1));
@@ -5189,6 +5233,18 @@ static bool try_repair_dsml(const char *s, size_t len, buf *out) {
     for (size_t i = 0; i < ios - ioe; i++) buf_puts(out, ie);
     for (size_t i = 0; i < tos - toe; i++) buf_puts(out, te);
     return true;
+}
+
+static void strip_dsml_keep_prefix(buf *text) {
+    if (!text || !text->ptr) return;
+    const char *think_end = find_last_substr(text->ptr, "</think>");
+    const char *from = think_end ? think_end + strlen("</think>") : text->ptr;
+    const char *mk = find_any_tool_start(from);
+    if (!mk) return;
+    text->len = (size_t)(mk - text->ptr);
+    text->ptr[text->len] = '\0';
+    while (text->len && isspace((unsigned char)text->ptr[text->len - 1]))
+        text->ptr[--text->len] = '\0';
 }
 
 static const char *tool_parse_failure_recovery_finish(const char *finish) {
@@ -7500,6 +7556,15 @@ typedef struct {
     bool sent_text;
     anthropic_tool_stream tool;
 } anthropic_stream;
+
+static void clamp_live_stream_positions(size_t *plain, openai_stream *openai,
+                                        anthropic_stream *anthropic,
+                                        responses_stream *responses, size_t limit) {
+    if (*plain > limit) *plain = limit;
+    if (openai->emit_pos > limit) openai->emit_pos = limit;
+    if (anthropic->emit_pos > limit) anthropic->emit_pos = limit;
+    if (responses->emit_pos > limit) responses->emit_pos = limit;
+}
 
 static bool anthropic_sse_start_live(int fd, const request *r, const char *id,
                                      int prompt_tokens, anthropic_stream *st) {
@@ -10092,11 +10157,13 @@ static int chat_think_tool_recovery(server *s,
                                      int *completion,
                                      int max_tokens,
                                      bool append_to_output,
+                                     size_t *inject_at,
                                      char *err,
                                      size_t errlen) {
     if (!thinking->inside || !text->ptr) return 0;
     if (*scan_from > text->len) *scan_from = text->len;
-    if (!find_any_tool_start(text->ptr + *scan_from)) {
+    const char *marker = find_any_tool_start(text->ptr + *scan_from);
+    if (!marker) {
         const size_t hold = 80; /* > longest stanza opening */
         *scan_from = text->len > hold ? text->len - hold : 0;
         return 0;
@@ -10128,7 +10195,11 @@ static int chat_think_tool_recovery(server *s,
         (*completion)++;
     }
     if (append_to_output) {
+        size_t marker_off = (size_t)(marker - text->ptr);
+        text->len = marker_off;
+        text->ptr[text->len] = '\0';
         buf_append(text, inject, inject_len);
+        if (inject_at) *inject_at = marker_off;
     }
     thinking_state_feed(thinking, inject, inject_len);
     *scan_from = text->len;
@@ -11338,10 +11409,21 @@ static void generate_job(server *s, server_slot *slot, job *j) {
         }
     }
 
-    bool dsml_recovery_attempted = false;
+    int dsml_recovery_attempts = 0;
+    bool post_recovery_validation_pending = false;
     uint64_t rng = j->req.seed ? j->req.seed :
         (((uint64_t)time(NULL) << 32) ^ (response_seq << 1) ^
          (uint64_t)(uintptr_t)j);
+
+    int dsml_token_id = -1;
+    if (j->req.kind == REQ_CHAT && !j->req.has_tools) {
+        dsml_token_id = ds4_engine_dsml_id(s->engine);
+        if (dsml_token_id < 0) {
+            server_log(DS4_LOG_WARNING, "ds4-server: DSML token not found in vocab; suppression disabled");
+            trace_event(s, trace_id, "DSML token not found in vocab; suppression disabled");
+        }
+    }
+
 decode_again:
     ;
     buf text = {0};
@@ -11372,18 +11454,6 @@ decode_again:
         getenv("DS4_SERVER_DISABLE_THINK_TOOL_RECOVERY") == NULL;
     dsml_decode_tracker dsml_tracker;
     dsml_decode_tracker_init(&dsml_tracker);
-
-    /* When tools are not active for this request, resolve the DSML control
-     * token id so we can suppress it at sampling time.  This prevents the
-     * model from emitting tool-call markup during summary/compaction turns
-     * where the client has explicitly requested no tool use. */
-    int dsml_token_id = -1;
-    if (j->req.kind == REQ_CHAT && !j->req.has_tools) {
-        ds4_tokens dt = {0};
-        ds4_tokenize_rendered_chat(s->engine, DS4_DSML, &dt);
-        if (dt.len == 1) dsml_token_id = dt.v[0];
-        ds4_tokens_free(&dt);
-    }
 
     server_generation_enter(s);
     while (!g_stop_requested && completion < max_tokens &&
@@ -11429,6 +11499,7 @@ decode_again:
         int toks[17];
         int ntok = 0;
         if (!s->batched_mode && temperature <= 0.0f &&
+            dsml_token_id < 0 &&
             ds4_engine_mtp_draft_tokens(s->engine) > 1 &&
             getenv("DS4_MTP_SPEC_DISABLE") == NULL)
         {
@@ -11443,16 +11514,6 @@ decode_again:
             if (ntok < 0) {
                 finish = "error";
                 break;
-            }
-            /* Post-filter: remove any DSML tokens that leaked through
-             * speculative decoding when tools are not active. */
-            if (dsml_token_id >= 0) {
-                int write = 0;
-                for (int ri = 0; ri < ntok; ri++) {
-                    if (toks[ri] != dsml_token_id)
-                        toks[write++] = toks[ri];
-                }
-                ntok = write;
             }
         } else {
             if (server_eval_token(s, slot, token, err, sizeof(err)) != 0) {
@@ -11563,11 +11624,12 @@ decode_again:
                     * at the " response" boundary.  Without it, the parser sees
                     * tool calls without a preceding close marker and treats them
                     * as reasoning content, breaking the agent loop. */
+                    size_t recovery_inject_at = text.len;
                     const int recovered = think_tool_recovery_enabled ?
                         chat_think_tool_recovery(s, slot, &text, &thinking,
                                                   &think_recovery_scan_from,
                                                   &completion, max_tokens,
-                                                  true,
+                                                  true, &recovery_inject_at,
                                                   err, sizeof(err)) : 0;
                     if (recovered < 0) {
                         finish = "error";
@@ -11585,6 +11647,10 @@ decode_again:
                         trace_event(s, trace_id,
                                     "think tool recovery after %d generated tokens",
                                     completion);
+                        post_recovery_validation_pending = true;
+                        clamp_live_stream_positions(&plain_stream_pos, &openai_live,
+                                                    &anthropic_live, &responses_live,
+                                                    recovery_inject_at);
                         dsml_decode_tracker_update(&dsml_tracker, text.ptr, text.len);
                         tool_scan_waiting_for_think_close = true;
                     } else {
@@ -11660,6 +11726,58 @@ decode_again:
             }
 
             if (j->req.kind == REQ_CHAT && j->req.has_tools && saw_tool_end) {
+                char *trial_content = NULL;
+                char *trial_reasoning = NULL;
+                tool_calls trial_calls = {0};
+                if (post_recovery_validation_pending) {
+                    bool trial_ok = parse_generated_message_ex_for_syntax(
+                        j->req.model_syntax, text.ptr ? text.ptr : "",
+                        ds4_think_mode_enabled(j->req.think_mode),
+                        &trial_content, &trial_reasoning, &trial_calls);
+                    if (!trial_ok) {
+                        if (!j->req.stream && dsml_recovery_attempts < 2) {
+                            int recovery_tokens = 0;
+                            char recovery_err[160] = {0};
+                            if (continue_after_invalid_dsml(s, slot, &j->req, &thinking,
+                                                            "post-recovery invalid tool call",
+                                                            &recovery_tokens,
+                                                            recovery_err,
+                                                            sizeof(recovery_err)))
+                            {
+                                dsml_recovery_attempts++;
+                                server_log(DS4_LOG_GENERATION,
+                                    "ds4-server: chat ctx=%s%s%s post-recovery tool-error continuation appended %d tokens",
+                                    ctx_span,
+                                    req_flags[0] ? " " : "",
+                                    req_flags,
+                                    recovery_tokens);
+                                trace_event(s, trace_id,
+                                    "post-recovery tool-error continuation appended %d tokens",
+                                    recovery_tokens);
+                                free(trial_content);
+                                free(trial_reasoning);
+                                tool_calls_free(&trial_calls);
+                                buf_free(&text);
+                                post_recovery_validation_pending = false;
+                                goto decode_again;
+                            }
+                        }
+                        strip_dsml_keep_prefix(&text);
+                        clamp_live_stream_positions(&plain_stream_pos, &openai_live,
+                            &anthropic_live, &responses_live, text.len);
+                        finish = "stop";
+                        err[0] = '\0';
+                        trace_event(s, trace_id,
+                            "post-recovery invalid tool call; fell back to assistant text");
+                        post_recovery_validation_pending = false;
+                        saw_tool_start = false;
+                    } else {
+                        post_recovery_validation_pending = false;
+                    }
+                    free(trial_content);
+                    free(trial_reasoning);
+                    tool_calls_free(&trial_calls);
+                }
                 finish = "tool_calls";
                 stop_decode = true;
                 break;
@@ -11711,7 +11829,7 @@ decode_again:
             tool_calls_free(&test_calls);
         }
         if (!completed_truncation) {
-            if (!j->req.stream && !dsml_recovery_attempted) {
+            if (!j->req.stream && dsml_recovery_attempts < 2) {
                 int recovery_tokens = 0;
                 char recovery_err[160] = {0};
                 server_log(DS4_LOG_WARNING,
@@ -11727,7 +11845,7 @@ decode_again:
                                                 recovery_err,
                                                 sizeof(recovery_err)))
                 {
-                    dsml_recovery_attempted = true;
+                    dsml_recovery_attempts++;
                     server_log(DS4_LOG_GENERATION,
                                "ds4-server: chat ctx=%s%s%s tool-error continuation appended %d tokens",
                                ctx_span,
@@ -11745,8 +11863,14 @@ decode_again:
                 snprintf(err, sizeof(err), "invalid tool call recovery failed: %s",
                          recovery_err[0] ? recovery_err : "unknown error");
             } else {
-                finish = "error";
-                snprintf(err, sizeof(err), "unterminated tool call");
+                strip_dsml_keep_prefix(&text);
+                clamp_live_stream_positions(&plain_stream_pos, &openai_live,
+                                            &anthropic_live, &responses_live, text.len);
+                saw_tool_start = false;
+                finish = "stop";
+                err[0] = '\0';
+                trace_event(s, trace_id,
+                            "unterminated tool call; fell back to assistant text");
             }
         }
         buf_free(&repaired);
@@ -11794,7 +11918,7 @@ decode_again:
              * Semantic repair is intentionally avoided: if the parser cannot
              * execute the block, feed the model a tool error and the protocol
              * reminder so it owns the corrected next action. */
-            if (!j->req.stream && !dsml_recovery_attempted) {
+            if (!j->req.stream && dsml_recovery_attempts < 2) {
                 int recovery_tokens = 0;
                 char recovery_err[160] = {0};
                 const char *detail = err[0] ? err : "invalid tool call";
@@ -11804,6 +11928,8 @@ decode_again:
                            req_flags[0] ? " " : "",
                            req_flags);
                 trace_event(s, trace_id,
+                            post_recovery_validation_pending ?
+                            "post-recovery invalid tool call; continuing with model-visible tool error" :
                             "invalid tool call; continuing with model-visible tool error");
                 if (continue_after_invalid_dsml(s, slot, &j->req, &thinking,
                                                 detail,
@@ -11811,7 +11937,7 @@ decode_again:
                                                 recovery_err,
                                                 sizeof(recovery_err)))
                 {
-                    dsml_recovery_attempted = true;
+                    dsml_recovery_attempts++;
                     server_log(DS4_LOG_GENERATION,
                                "ds4-server: chat ctx=%s%s%s tool-error continuation appended %d tokens",
                                ctx_span,
@@ -11825,11 +11951,35 @@ decode_again:
                     free(parsed_reasoning);
                     tool_calls_free(&parsed_calls);
                     buf_free(&text);
+                    post_recovery_validation_pending = false;
                     goto decode_again;
                 }
                 final_finish = "error";
                 snprintf(err, sizeof(err), "invalid tool call recovery failed: %s",
                          recovery_err[0] ? recovery_err : "unknown error");
+            } else {
+                strip_dsml_keep_prefix(&text);
+                clamp_live_stream_positions(&plain_stream_pos, &openai_live,
+                                            &anthropic_live, &responses_live, text.len);
+                free(parsed_content);
+                free(parsed_reasoning);
+                tool_calls_free(&parsed_calls);
+                parsed_content = NULL;
+                parsed_reasoning = NULL;
+                final_finish = "stop";
+                err[0] = '\0';
+                recovered_tool_parse_failure = false;
+                if (parse_generated_message_ex_for_syntax(
+                        j->req.model_syntax, text.ptr ? text.ptr : "",
+                        ds4_think_mode_enabled(j->req.think_mode),
+                        &parsed_content, &parsed_reasoning, &parsed_calls)) {
+                    parsed_ok = true;
+                }
+                if (!parsed_content)
+                    parsed_content = xstrdup(text.ptr ? text.ptr : "");
+                trace_event(s, trace_id,
+                            "invalid tool call; fell back to assistant text");
+                post_recovery_validation_pending = false;
             }
             if (!parsed_ok) {
                 /* Print raw DSML snippet for debugging */
@@ -17454,6 +17604,139 @@ static void test_thinking_canonical_non_thinking_mode_noop(void) {
     chat_msgs_free(&msgs);
 }
 
+static void test_dsml_bare_parameters_parse_as_unknown_call(void) {
+    const char *dsml = "\n\n" DS4_TOOL_CALLS_START "\n"
+        DS4_PARAM_START " name=\"bash\" string=\"false\">" DS4_PARAM_END "\n"
+        DS4_PARAM_START " name=\"command\" string=\"true\">ls -la" DS4_PARAM_END "\n"
+        DS4_TOOL_CALLS_END;
+    char *content = NULL;
+    char *reasoning = NULL;
+    tool_calls calls = {0};
+    bool ok = parse_generated_message_ex(dsml, false, &content, &reasoning, &calls);
+    TEST_ASSERT(ok);
+    TEST_ASSERT(calls.len == 1);
+    TEST_ASSERT(calls.v[0].name && !strcmp(calls.v[0].name, "unknown"));
+    TEST_ASSERT(calls.v[0].arguments);
+    TEST_ASSERT(strstr(calls.v[0].arguments, "\"bash\""));
+    TEST_ASSERT(strstr(calls.v[0].arguments, "\"command\""));
+    TEST_ASSERT(strstr(calls.v[0].arguments, "\"ls -la\""));
+    free(content);
+    free(reasoning);
+    tool_calls_free(&calls);
+}
+
+static void test_strip_dsml_keep_prefix(void) {
+    {
+        strip_dsml_keep_prefix(NULL);
+    }
+    {
+        buf text = {0};
+        strip_dsml_keep_prefix(&text);
+        TEST_ASSERT(text.len == 0);
+    }
+    {
+        buf text = {0};
+        buf_append(&text, "hello", 5);
+        buf_append(&text, "</think>", 8);
+        buf_append(&text, "   ", 3);
+        buf_append(&text, DS4_TOOL_CALLS_START, strlen(DS4_TOOL_CALLS_START));
+        buf_append(&text, " rest", 5);
+        strip_dsml_keep_prefix(&text);
+        TEST_ASSERT(text.len == 13);
+        TEST_ASSERT(!memcmp(text.ptr, "hello</think>", 13));
+        buf_free(&text);
+    }
+    {
+        buf text = {0};
+        buf_append(&text, "no markers here", 15);
+        strip_dsml_keep_prefix(&text);
+        TEST_ASSERT(text.len == 15);
+        buf_free(&text);
+    }
+    {
+        buf text = {0};
+        buf_append(&text, DS4_TOOL_CALLS_START, strlen(DS4_TOOL_CALLS_START));
+        buf_append(&text, " rest", 5);
+        strip_dsml_keep_prefix(&text);
+        TEST_ASSERT(text.len == 0);
+        buf_free(&text);
+    }
+    {
+        buf text = {0};
+        buf_append(&text, "abc", 3);
+        buf_append(&text, "</think>", 8);
+        buf_append(&text, " ", 1);
+        buf_append(&text, DS4_TOOL_CALLS_START, strlen(DS4_TOOL_CALLS_START));
+        strip_dsml_keep_prefix(&text);
+        size_t first_len = text.len;
+        char *first_ptr = xstrndup(text.ptr, text.len);
+        strip_dsml_keep_prefix(&text);
+        TEST_ASSERT(text.len == first_len);
+        TEST_ASSERT(!memcmp(text.ptr, first_ptr, first_len));
+        free(first_ptr);
+        buf_free(&text);
+    }
+    {
+        buf text = {0};
+        buf_append(&text, "xyz", 3);
+        buf_append(&text, "</think>", 8);
+        buf_append(&text, " \t  ", 4);
+        buf_append(&text, DS4_TOOL_CALLS_START, strlen(DS4_TOOL_CALLS_START));
+        strip_dsml_keep_prefix(&text);
+        TEST_ASSERT(text.len == 11);
+        TEST_ASSERT(!memcmp(text.ptr, "xyz</think>", 11));
+        buf_free(&text);
+    }
+}
+
+static void test_clamp_live_stream_positions(void) {
+    {
+        size_t plain = 100;
+        openai_stream openai = {0}; openai.emit_pos = 80;
+        anthropic_stream anthropic = {0}; anthropic.emit_pos = 90;
+        responses_stream responses = {0}; responses.emit_pos = 110;
+        clamp_live_stream_positions(&plain, &openai, &anthropic, &responses, 50);
+        TEST_ASSERT(plain == 50);
+        TEST_ASSERT(openai.emit_pos == 50);
+        TEST_ASSERT(anthropic.emit_pos == 50);
+        TEST_ASSERT(responses.emit_pos == 50);
+    }
+    {
+        size_t plain = 30;
+        openai_stream openai = {0}; openai.emit_pos = 20;
+        anthropic_stream anthropic = {0}; anthropic.emit_pos = 10;
+        responses_stream responses = {0}; responses.emit_pos = 5;
+        clamp_live_stream_positions(&plain, &openai, &anthropic, &responses, 50);
+        TEST_ASSERT(plain == 30);
+        TEST_ASSERT(openai.emit_pos == 20);
+        TEST_ASSERT(anthropic.emit_pos == 10);
+        TEST_ASSERT(responses.emit_pos == 5);
+    }
+    {
+        size_t plain = 100;
+        openai_stream openai = {0}; openai.emit_pos = 80;
+        anthropic_stream anthropic = {0}; anthropic.emit_pos = 90;
+        responses_stream responses = {0}; responses.emit_pos = 110;
+        clamp_live_stream_positions(&plain, &openai, &anthropic, &responses, 50);
+        clamp_live_stream_positions(&plain, &openai, &anthropic, &responses, 50);
+        TEST_ASSERT(plain == 50);
+        TEST_ASSERT(openai.emit_pos == 50);
+        TEST_ASSERT(anthropic.emit_pos == 50);
+        TEST_ASSERT(responses.emit_pos == 50);
+    }
+    {
+        size_t plain = 100;
+        openai_stream openai = {0}; openai.emit_pos = 30;
+        anthropic_stream anthropic = {0}; anthropic.emit_pos = 90;
+        responses_stream responses = {0}; responses.emit_pos = 10;
+        clamp_live_stream_positions(&plain, &openai, &anthropic, &responses, 50);
+        TEST_ASSERT(plain == 50);
+        TEST_ASSERT(openai.emit_pos == 30);
+        TEST_ASSERT(anthropic.emit_pos == 50);
+        TEST_ASSERT(responses.emit_pos == 10);
+    }
+}
+
 static void ds4_server_unit_tests_run(void) {
     test_batched_prefill_round_robin();
     test_batched_live_continuation_slot_binding();
@@ -17565,6 +17848,9 @@ static void ds4_server_unit_tests_run(void) {
     test_kv_cache_eviction_score_decays_stale_hits();
     test_kv_cache_eviction_decayed_hits_tie_break_by_age();
     test_kv_cache_eviction_keeps_aligned_continued_frontiers();
+    test_dsml_bare_parameters_parse_as_unknown_call();
+    test_strip_dsml_keep_prefix();
+    test_clamp_live_stream_positions();
 }
 
 #ifndef DS4_SERVER_TEST_NO_MAIN
