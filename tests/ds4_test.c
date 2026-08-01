@@ -6412,6 +6412,196 @@ static void test_think_tool_recovery(void) {
     test_close_engine(false);
 }
 
+/* A DSML marker that appears mid-sentence inside open thinking is model prose
+ * about the protocol, not a real stanza opening.  Recovery must NOT force-close
+ * thinking on it (that would truncate reasoning after ~9 tokens).  Only a
+ * marker at buffer start or preceded by "\n\n" counts as a real boundary.
+ * Runs purely on the buffer; no engine decoding needed. */
+static void test_think_recovery_ignores_prose_marker(void) {
+    thinking_state thinking = {0};
+    char err[160];
+
+    /* Singular "<tool_call>" and quoted "<tool_calls>" mid-prose are ignored. */
+    const char *cases[] = {
+        "The <tool_calls> tag is the syntax we use for tool calls.",
+        "We saw <tool_call> mentioned in the docs; not an actual call.",
+        "Use the format like <tool_calls> when you need a tool.",
+    };
+    for (size_t c = 0; c < sizeof(cases)/sizeof(cases[0]); c++) {
+        thinking.inside = true;
+        buf text = {0};
+        buf_append(&text, cases[c], strlen(cases[c]));
+        size_t scan_from = 0;
+        int completion = 0;
+        server srv;
+        memset(&srv, 0, sizeof(srv));
+        server_slot slot = {0};
+        slot.srv = &srv;
+        int rec = chat_think_tool_recovery(&srv, &slot, &text, &thinking,
+                                           &scan_from, &completion, 512,
+                                           true, NULL, err, sizeof(err));
+        TEST_ASSERT(rec == 0);
+        TEST_ASSERT(thinking.inside && "expect no forced close on prose marker");
+        buf_free(&text);
+    }
+}
+
+/* Regression for the scan-advance fix in chat_think_tool_recovery
+ * (ds4_server.c:10208): rejecting a spurious prose marker must advance
+ * *scan_from one byte past the marker's leading '<' (marker_off + 1), not pin
+ * it to marker_off.  The buffer carries a SPURIOUS mid-sentence marker first
+ * and a LEGITIMATE "\n\n"-bounded stanza later.  Recovery must skip the
+ * spurious marker and still fire on the legitimate one, closing thinking and
+ * recovering the list_files call.  With the pre-fix advance (*scan_from pinned
+ * to the spurious marker_off) find_any_tool_start re-matches the same prose
+ * marker on every per-token call and never reaches the legitimate stanza, so
+ * recovery never fires and this test fails. */
+static void test_think_recovery_spurious_then_legitimate(void) {
+    ds4_engine *engine = test_get_engine(false);
+    if (!engine) return;
+
+    request r;
+    char err[160];
+    TEST_ASSERT(parse_chat_request(engine, NULL, test_think_recovery_request_json(),
+                                   512, 32768, &r, err, sizeof(err)));
+
+    ds4_session *session = NULL;
+    TEST_ASSERT(ds4_session_create(&session, engine, 32768) == 0);
+    if (!session) {
+        request_free(&r);
+        return;
+    }
+    TEST_ASSERT(ds4_session_sync(session, &r.prompt, err, sizeof(err)) == 0);
+
+    thinking_state thinking = thinking_state_from_prompt(&r);
+    buf text = {0};
+    buf forced = {0};
+    /* "<" / ">" are hex-escaped (\x3c / \x3e) purely to keep the literal on a
+     * single source line; "\x3cthink\x3e" == the 7-char open-thinking tag. */
+    if (!thinking.inside) buf_append(&forced, "\x3cthink\x3e", 7);
+    /* In order: (a) a SPURIOUS "<tool_calls>" mid-sentence -- preceded by a
+     * space/word, not at offset 0 and not preceded by "\n\n"; then (b) a
+     * LEGITIMATE stanza opening preceded by "\n\n", identical to
+     * test_think_tool_recovery so the recovered call is list_files. */
+    const char *body =
+        "The user wants a directory listing. I will note the <tool_calls> "
+        "syntax. I will call the list_files tool right away.\n\n"
+        DS4_TOOL_CALLS_START;
+    buf_append(&forced, body, strlen(body));
+
+    server srv;
+    memset(&srv, 0, sizeof(srv));
+    srv.engine = engine;
+    server_slot slot = {
+        .srv = &srv,
+        .session = session,
+    };
+    srv.slots = &slot;
+    srv.slot_count = 1;
+    pthread_mutex_init(&srv.inference_mu, NULL);
+
+    /* Replay the malformed prefix token by token exactly as the worker loop
+     * does (ds4_server.c ~11679), persisting scan_from across per-token calls.
+     * The spurious marker completes early; recovery must reject it and advance
+     * the scan, then fire once the legitimate "\n\n" opening completes.  The
+     * iteration cap (token count + 8) guards against an infinite loop if the
+     * scan-advance ever regressed. */
+    ds4_tokens toks = {0};
+    ds4_tokenize_rendered_chat(engine, forced.ptr, &toks);
+    TEST_ASSERT(toks.len > 1);
+    size_t scan_from = 0;
+    int completion = 0;
+    int rec = 0;
+    int triggered_at = -1;
+    size_t inject_at = 0;
+    const int max_iters = toks.len + 8;
+    for (int i = 0; i < max_iters; i++) {
+        if (i < toks.len) {
+            TEST_ASSERT(ds4_session_eval(session, toks.v[i], err, sizeof(err)) == 0);
+            size_t piece_len = 0;
+            char *piece = ds4_token_text(engine, toks.v[i], &piece_len);
+            buf_append(&text, piece, piece_len);
+            thinking_state_feed(&thinking, piece, piece_len);
+            free(piece);
+        }
+        TEST_ASSERT(thinking.inside);
+        rec = chat_think_tool_recovery(&srv, &slot, &text, &thinking, &scan_from,
+                                        &completion, 512, true, &inject_at, err, sizeof(err));
+        TEST_ASSERT(rec >= 0);
+        if (rec == 1) {
+            triggered_at = i;
+            break;
+        }
+    }
+    fprintf(stderr,
+            "ds4-test: think-recovery-spurious-then-legit trigger=%d/%d injected_tokens=%d\n",
+            triggered_at, toks.len, completion);
+    /* Recovery must eventually fire on the legitimate stanza, not get stuck
+     * re-matching the spurious prose marker. */
+    TEST_ASSERT(rec == 1);
+    TEST_ASSERT(triggered_at >= 0 && triggered_at < toks.len);
+    TEST_ASSERT(inject_at > 0);
+    TEST_ASSERT(inject_at < text.len);
+    /* The injected close lands at the legitimate marker, which sits after the
+     * spurious prose marker; the spurious marker is left inside reasoning. */
+    const char *spurious_in_pre = strstr(text.ptr, "<tool_calls>");
+    TEST_ASSERT(spurious_in_pre != NULL &&
+                (size_t)(spurious_in_pre - text.ptr) < inject_at);
+    ds4_tokens_free(&toks);
+    buf_free(&forced);
+    TEST_ASSERT(!thinking.inside);
+    TEST_ASSERT(completion > 0);
+    TEST_ASSERT(text.ptr && text.len >= 10 &&
+                !memcmp(text.ptr + text.len - 10, "\x3c/think\x3e\n\n", 10));
+
+    /* The model must now complete a valid call on the executable side. */
+    uint64_t rng = 123;
+    bool decode_ok = true;
+    bool saw_start = false;
+    bool saw_end = false;
+    for (int i = 0; i < 256 && !saw_end; i++) {
+        int token = ds4_session_sample(session, 0.0f, 0, 1.0f, 0.0f, &rng);
+        if (token == ds4_token_eos(engine)) break;
+        size_t piece_len = 0;
+        char *piece = ds4_token_text(engine, token, &piece_len);
+        buf_append(&text, piece, piece_len);
+        free(piece);
+        observe_tool_markers(text.ptr, &saw_start, &saw_end, NULL);
+        if (saw_end) break;
+        if (ds4_session_eval(session, token, err, sizeof(err)) != 0) {
+            decode_ok = false;
+            break;
+        }
+    }
+    fprintf(stderr, "ds4-test: think-recovery-spurious-then-legit continuation=[%s]\n",
+            text.ptr ? text.ptr : "");
+    TEST_ASSERT(decode_ok);
+    TEST_ASSERT(saw_end);
+
+    char *content = NULL;
+    char *reasoning = NULL;
+    tool_calls calls = {0};
+    bool parsed = parse_generated_message_ex(text.ptr, true,
+                                             &content, &reasoning, &calls);
+    TEST_ASSERT(parsed);
+    TEST_ASSERT(calls.len > 0 && !strcmp(calls.v[0].name, "list_files"));
+    /* The spurious prose marker stayed on the reasoning side of the close. */
+    TEST_ASSERT(reasoning && strstr(reasoning, "<tool_calls>"));
+
+    fprintf(stderr,
+            "ds4-test: think-recovery-spurious-then-legit recovered=%d gen_tokens=%d calls=%d name=%s\n",
+            rec, completion, calls.len, calls.len ? calls.v[0].name : "-");
+
+    free(content);
+    free(reasoning);
+    tool_calls_free(&calls);
+    buf_free(&text);
+    pthread_mutex_destroy(&srv.inference_mu);
+    ds4_session_free(session);
+    request_free(&r);
+    test_close_engine(false);
+}
+
 static void test_tool_call_quality_one(bool quality) {
     ds4_engine *engine = test_get_engine(quality);
     if (!engine) return;
@@ -6816,6 +7006,8 @@ static const ds4_test_entry test_entries[] = {
     {"--long-context", "long-context", "long-context story fact-recall regression", test_long_story_fact_recall},
     {"--tool-call-quality", "tool-call-quality", "model emits valid DSML tool calls", test_tool_call_quality},
     {"--think-tool-recovery", "think-tool-recovery", "forced </think> recovery when a tool call starts inside thinking", test_think_tool_recovery},
+    {"--think-recovery-ignore-prose", "think-recovery-ignore-prose", "recovery ignores spurious DSML markers inside thinking", test_think_recovery_ignores_prose_marker},
+    {"--think-recovery-spurious-then-legit", "think-recovery-spurious-then-legit", "recovery fires on a legitimate stanza after ignoring an earlier spurious prose marker", test_think_recovery_spurious_then_legitimate},
     {"--logprob-vectors", "logprob-vectors", "official API top-logprob vector comparison on the standard Metal path", test_official_logprob_vectors},
     {"--metal-ssd-streaming-cache-pressure", "metal-ssd-streaming-cache-pressure", "Metal SSD-streaming layer-batched decode cache-pressure repro for issue #384", test_metal_ssd_streaming_cache_pressure},
     {"--local-golden-vectors", "local-golden-vectors", "local top-k/logit drift regression for long Metal prefill", test_local_golden_vectors},

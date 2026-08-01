@@ -6462,7 +6462,7 @@ static bool openai_sse_stream_update(int fd, server *s, const request *r, const 
         } else if (final) {
             limit = raw_len;
         } else {
-            const size_t hold = strlen("</ład>") - 1;
+            const size_t hold = strlen("</think>") - 1;
             limit = raw_len > hold ? raw_len - hold : st->emit_pos;
             if (r && r->has_tools) {
                 size_t tl = text_stream_safe_limit(raw, st->emit_pos,
@@ -7164,7 +7164,7 @@ static bool responses_sse_stream_update(int fd, const request *r,
         } else if (final) {
             limit = raw_len;
         } else {
-            const size_t hold = strlen("</ład>") - 1;
+            const size_t hold = strlen("</think>") - 1;
             limit = raw_len > hold ? raw_len - hold : st->emit_pos;
             if (r && r->has_tools) {
                 size_t tl = text_stream_safe_limit(raw, st->emit_pos,
@@ -8055,7 +8055,7 @@ static bool anthropic_sse_stream_update(int fd, server *s, const request *r, con
         } else if (final) {
             limit = raw_len;
         } else {
-            const size_t hold = strlen("</ład>") - 1;
+            const size_t hold = strlen("</think>") - 1;
             limit = raw_len > hold ? raw_len - hold : st->emit_pos;
             if (r && r->has_tools) {
                 size_t tl = text_stream_safe_limit(raw, st->emit_pos,
@@ -10184,6 +10184,50 @@ static int chat_think_tool_recovery(server *s,
         return 0;
     }
 
+    /* Mirror the parse-time contract (parse_deepseek_generated_message_ex,
+     * 4798-4827): a DSML marker inside open thinking is only a real stanza
+     * opening when it starts a line right after a blank line ("\n\n" separator)
+     * or begins the emitted text (marker_off == 0).  A marker mid-sentence, or
+     * a bare single-newline or quoted occurrence, is model prose about the
+     * protocol; force-closing thinking on it truncates reasoning after a few
+     * tokens.  In the genuine forgot-to-close case the model writes the stanza
+     * in the canonical "\n\n" position, so this keeps recovery for real calls
+     * while dropping spurious ones.
+     *
+     * The "\n\n"-only boundary is a deliberate tradeoff, not an oversight.
+     * Canonical DeepSeek stanzas are always blank-line bounded: the tool
+     * system-prompt example terminates the block with "</｜DSML｜tool_calls>\n\n"
+     * and instructs the model to finish its <think>...</think> reasoning BEFORE
+     * any tool call (append_tools_prompt_text, ds4_server.c:2063-2084), and the
+     * recovery's own forced close is the close tag plus "\n\n" (inject,
+     * ds4_server.c:10231), reproducing that same blank-line boundary for the
+     * regenerated stanza.  The parser keeps a separate bare-marker fallback for
+     * the non-recovery parse path (ds4_server.c:4811 and :4825), so a genuine
+     * stanza separated by only a single "\n" or a space is still parsed once
+     * thinking is closed; it is simply not force-recovered here.  We
+     * intentionally do NOT relax this gate to accept single-"\n"/space
+     * separation, because that would re-admit the mid-prose marker
+     * false-positive that truncates reasoning.  Covered by tests
+     * --think-recovery-ignore-prose (test_think_recovery_ignores_prose_marker),
+     * --think-tool-recovery (test_think_tool_recovery) and
+     * --think-recovery-spurious-then-legit
+     * (test_think_recovery_spurious_then_legitimate). */
+    const size_t marker_off = (size_t)(marker - text->ptr);
+    const bool stanza_boundary =
+        marker_off == 0 ||
+        (marker_off >= 2 && text->ptr[marker_off - 1] == '\n' &&
+         text->ptr[marker_off - 2] == '\n');
+    if (!stanza_boundary) {
+        /* Spurious marker in prose: do not recover, but advance one byte past
+         * the marker's leading '<' so the scan does not re-match this same
+         * occurrence on every future generated token.  Every candidate marker
+         * begins with '<', so starting at marker_off + 1 cannot re-find this
+         * occurrence, while a later legitimate "\n\n" stanza opening is still
+         * discovered. */
+        *scan_from = marker_off + 1;
+        return 0;
+    }
+
     const char *inject = "</think>\n\n";
     const size_t inject_len = strlen(inject);
     ds4_tokens toks = {0};
@@ -10210,7 +10254,6 @@ static int chat_think_tool_recovery(server *s,
         (*completion)++;
     }
     if (append_to_output) {
-        size_t marker_off = (size_t)(marker - text->ptr);
         text->len = marker_off;
         text->ptr[text->len] = '\0';
         buf_append(text, inject, inject_len);
@@ -11570,6 +11613,15 @@ decode_again:
             size_t stream_len = hit_stop ?
                 stop_pos : stop_list_stream_safe_len(&j->req.stops, text.len);
             if (stream_len > text.len) stream_len = text.len;
+            if (!structured_stream && j->req.kind == REQ_CHAT &&
+                j->req.has_tools && !hit_stop) {
+                /* Mirror the structured-stream hold-back (text_stream_safe_limit)
+                 * on the plain path so DSML markers and their preceding separator
+                 * whitespace are never streamed ahead of think-recovery truncation. */
+                size_t tl = text_stream_safe_limit(text.ptr, plain_stream_pos,
+                                                   text.len, true, false);
+                if (tl < stream_len) stream_len = tl;
+            }
             stream_len = utf8_stream_safe_len(text.ptr, plain_stream_pos,
                                               stream_len, hit_stop);
             if (!hit_stop && j->req.stops.max_len > 1) {
