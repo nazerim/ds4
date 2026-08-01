@@ -33,3 +33,5 @@ __pycache__/
 /misc/
 .*.swp
 .DS_Store
+*.o.tmp
+log/

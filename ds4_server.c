@@ -11411,6 +11411,8 @@ static void generate_job(server *s, server_slot *slot, job *j) {
 
     int dsml_recovery_attempts = 0;
     bool post_recovery_validation_pending = false;
+    /* Set when think-tool recovery fires; forces checkpoint canonicalization. */
+    bool think_tool_recovery_fired = false;
     uint64_t rng = j->req.seed ? j->req.seed :
         (((uint64_t)time(NULL) << 32) ^ (response_seq << 1) ^
          (uint64_t)(uintptr_t)j);
@@ -11648,6 +11650,7 @@ decode_again:
                                     "think tool recovery after %d generated tokens",
                                     completion);
                         post_recovery_validation_pending = true;
+                        think_tool_recovery_fired = true;
                         clamp_live_stream_positions(&plain_stream_pos, &openai_live,
                                                     &anthropic_live, &responses_live,
                                                     recovery_inject_at);
@@ -12077,14 +12080,24 @@ decode_again:
 
     if (j->req.kind == REQ_CHAT && parsed_calls.len &&
         j->req.api != API_RESPONSES &&
-        should_canonicalize_tool_checkpoint(s, &parsed_calls))
+        (think_tool_recovery_fired ||
+         should_canonicalize_tool_checkpoint(s, &parsed_calls)))
     {
         /* Chat/completions has no protocol object that binds the next request
          * to this live KV state.  Canonicalize only the fallback tool-call
          * path where we lack exact sampled DSML replay; when raw DSML is known,
          * replaying those bytes keeps future prompts aligned without rebuilding
          * hidden reasoning.  Responses deliberately skips this path because its
-         * previous_response_id contract binds the next turn to live state. */
+         * previous_response_id contract binds the next turn to live state.
+         *
+         * After think-tool recovery, the raw-DSML-replay assumption is wrong:
+         * the recovery injected closing-think tokens into the live session,
+         * and the DSML tool-call text was extracted as a tool call (not sent
+         * as assistant content).  The next client prompt will contain the
+         * visible assistant text plus tool result, not the raw DSML bytes.
+         * Force canonicalization to rewrite the live KV suffix to match what
+         * the client will replay, avoiding a token-mismatch cache miss and
+         * 7+ minute full prefill. */
         canonicalize_tool_checkpoint(s, slot, j, ctx_span, trace_id,
                                      parsed_content ? parsed_content : "",
                                      parsed_reasoning, &parsed_calls);

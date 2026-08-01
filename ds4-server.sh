@@ -14,9 +14,11 @@ LOG_DIR="./log"
 LOG_FILE="$LOG_DIR/ds4.log"
 TOKENS=384000
 MTP_MODEL="gguf/DeepSeek-V4-Flash-DSpark-support.gguf"
-MTP_DRAFT=1
-MTP_MARGIN=3
-DSPARK_CONFIDENCE=0.6
+MTP_DRAFT="${MTP_DRAFT:-1}"
+MTP_MARGIN="${MTP_MARGIN:-3}"
+# 0.6 balances speculation acceptance vs verification cost; 0.9 was too
+# conservative, rejecting most drafts and negating MTP throughput gains.
+DSPARK_CONFIDENCE="${DSPARK_CONFIDENCE:-0.6}"
 MAX_LOG_ROTATIONS=10
 
 # Debug mode: set DEBUG=1 to enable verbose output
@@ -73,11 +75,6 @@ start_server() {
     echo "MTP speculative decoding enabled"
   fi
   echo "Logging to $LOG_FILE"
-
-  # Env var overrides (set before running the script)
-  MTP_DRAFT="${MTP_DRAFT:-1}"
-  MTP_MARGIN="${MTP_MARGIN:-3}"
-  DSPARK_CONFIDENCE="${DSPARK_CONFIDENCE:-0.9}"
 
   # Build MTP arguments
   MTP_ARGS=()
@@ -198,7 +195,7 @@ case "${1:-}" in
     echo "MTP/DSpark tuning (script variables or env overrides):"
     echo "  MTP_DRAFT           - Max autoregressive draft tokens (default: 1)"
     echo "  MTP_MARGIN          - Verifier confidence margin (default: 3)"
-    echo "  DSPARK_CONFIDENCE   - DSpark confidence threshold 0..1 (default: 0.9)"
+    echo "  DSPARK_CONFIDENCE   - DSpark confidence threshold 0..1 (default: 0.6)"
     echo ""
     echo "Environment:"
     echo "  DEBUG=1             - Enable verbose output"

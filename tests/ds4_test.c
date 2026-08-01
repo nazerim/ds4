@@ -6234,6 +6234,23 @@ static const char *test_think_recovery_request_json(void) {
         "}";
 }
 
+/* A tool-less request whose user turn still invites a tool call.  This models
+ * OpenCode's Summary/Compaction request, which is sent with `tools: {}` and an
+ * empty system: has_tools is false, so the worker engages M1 DSML-token
+ * suppression and renders no tool schema.  Locks in the guarantee that a
+ * no-tools turn can never emit a tool call. */
+static const char *test_no_tools_request_json(void) {
+    return
+        "{"
+        "\"model\":\"deepseek-v4-flash\","
+        "\"messages\":[{\"role\":\"user\",\"content\":\"List the files in the current directory. Use the provided tool; do not answer in prose.\"}],"
+        "\"think\":false,"
+        "\"temperature\":0,"
+        "\"max_tokens\":256,"
+        "\"stream\":false"
+        "}";
+}
+
 /* The model sometimes opens a DSML stanza without closing </think> first.
  * The server's forward recovery must force the close plus a fresh stanza
  * opening, after which the model must still complete a valid call.  The
@@ -6717,6 +6734,68 @@ static void test_dsml_token_suppression_excludes_id(void) {
     ds4_session_free(session);
     test_close_engine(false);
 }
+
+/* Regression: a no-tools request (e.g. OpenCode Summary/Compaction, sent with
+ * tools:{}) must never yield a tool call.  has_tools=false engages M1 DSML-token
+ * suppression, so the model cannot open a DSML stanza; consequently the decoded
+ * text carries no tool marker and parses to zero tool_calls.  When the engine
+ * exposes no DSML token (GLM, dsml_id<0) suppression is unavailable, but with no
+ * tools rendered the no-tool-call guarantee must still hold. */
+static void test_no_tools_request_yields_no_tool_calls(void) {
+    ds4_engine *engine = test_get_engine(false);
+    if (!engine) return;
+    int dsml_id = ds4_engine_dsml_id(engine);
+
+    request r;
+    char err[256];
+    TEST_ASSERT(parse_chat_request(engine, NULL, test_no_tools_request_json(),
+                                   512, 32768, &r, err, sizeof(err)));
+    /* The compaction shape: no tools -> the M1 suppression gate would engage. */
+    TEST_ASSERT(!r.has_tools);
+
+    ds4_session *session = NULL;
+    TEST_ASSERT(ds4_session_create(&session, engine, 32768) == 0);
+    if (!session) {
+        request_free(&r);
+        test_close_engine(false);
+        return;
+    }
+    TEST_ASSERT(ds4_session_sync(session, &r.prompt, err, sizeof(err)) == 0);
+
+    /* Decode exactly as the worker does for a no-tools turn: ban the DSML token
+     * when the engine resolves one (M1), otherwise sample normally. */
+    uint64_t rng = 1234;
+    buf text = {0};
+    for (int i = 0; i < 256; i++) {
+        int token = dsml_id >= 0
+            ? ds4_session_sample_excluding(session, 0.0f, 0, 1.0f, 0.0f, &rng, dsml_id)
+            : ds4_session_sample(session, 0.0f, 0, 1.0f, 0.0f, &rng);
+        if (token < 0 || token == ds4_token_eos(engine)) break;
+        size_t plen = 0;
+        char *p = ds4_token_text(engine, token, &plen);
+        if (p) { buf_append(&text, p, plen); free(p); }
+        if (ds4_session_eval(session, token, err, sizeof(err)) != 0) break;
+    }
+
+    /* No tool block may appear in the decoded text... */
+    TEST_ASSERT(find_any_tool_start(text.ptr ? text.ptr : "") == NULL);
+    /* ...and the text must parse to zero tool calls.  Use the syntax-aware
+     * parser so the assertion holds for both DeepSeek and GLM models. */
+    char *content = NULL;
+    char *reasoning = NULL;
+    tool_calls calls = {0};
+    server_model_syntax syntax = server_model_syntax_for_engine(engine);
+    parse_generated_message_ex_for_syntax(syntax, text.ptr ? text.ptr : "", false,
+                                          &content, &reasoning, &calls);
+    TEST_ASSERT(calls.len == 0);
+    free(content);
+    free(reasoning);
+    tool_calls_free(&calls);
+    buf_free(&text);
+    ds4_session_free(session);
+    request_free(&r);
+    test_close_engine(false);
+}
 #endif
 
 static void test_server_unit_group(void) {
@@ -6747,6 +6826,7 @@ static const ds4_test_entry test_entries[] = {
     {"--mtp-verify-depth", "mtp-verify-depth", "MTP speculative verify commits autoregressive-identical tokens at draft depth > 2", test_mtp_verify_depth},
     {"--dspark-verify-depth", "dspark-verify-depth", "DSpark speculative verify commits autoregressive-identical tokens at draft depth > 2", test_dspark_verify_depth},
     {"--dsml-token-suppression", "dsml-token-suppression", "ds4_session_sample_excluding never returns the excluded DSML token id", test_dsml_token_suppression_excludes_id},
+    {"--no-tools-no-tool-calls", "no-tools-no-tool-calls", "no-tools (compaction-shaped) request never emits a tool call", test_no_tools_request_yields_no_tool_calls},
 #endif
     {"--server", "server", "server parser/rendering/cache unit tests", test_server_unit_group},
 };
