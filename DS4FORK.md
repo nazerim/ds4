@@ -1,5 +1,14 @@
 # AGENTS.md — DwarfStar 4 (ds4)
 
+## Codebase Memory (knowledge graph)
+
+- **Project name:** `Users-naz-Projects-ds4` (indexed from `/Users/naz/Projects/ds4`)
+- **Index:** ~18,125 nodes / 65,810 edges (re-index after large changes: `index_repository(repo_path="/Users/naz/Projects/ds4", mode="full")`)
+- **Query entry points:** `search_graph` for functions/classes/routes, `trace_path` for callers/callees, `get_architecture` for structure, `query_graph` for Cypher.
+- **Excluded dirs:** `misc`, `gguf`, `log`, `.git`, `dir-steering/out`.
+- **Top modules (packages):** `ds4` (1446), `ds4_cuda` (622), `ds4_metal` (620), `ds4_server` (584), `ds4_agent` (442), `ds4_distributed` (226), `ds4_rocm_runtime` (200), `ds4_test` (121), `ds4_eval` (113), `ds4_kvstore` (72).
+- **Languages:** C (39 files), Python (11), Bash (5), C++ (1).
+
 ## What This Is
 
 DeepSeek V4 Flash / GLM 5.2 inference engine in C. **Not** a generic GGUF runner. Primary backend is Metal (macOS); also CUDA, ROCm, CPU-diagnostic. Single-file core (`ds4.c` ~37k lines) plus server, agent, bench, eval binaries.
@@ -65,11 +74,13 @@ Override model: `DS4_TEST_MODEL=/path/to/model.gguf ./ds4_test --server`
 1. **DSML tool inside ` thinking`** — model sometimes emits `<｜DSML｜tool_>` inside unclosed ` thinking`. Recovery forces ` response` after 9 tokens. Two fixes were required:
    - **Fix 1 (commit 531314e):** `think_tool_recovery_fired` flag forces checkpoint canonicalization after recovery, preventing the token-mismatch KV cache miss.
    - **Fix 2 (commit 125ea97):** THINKING-mode stream branches now hold back DSML markers via `text_stream_safe_limit()`, so the streamed `reasoning_content` matches `parsed_reasoning` and the canonical KV suffix aligns with the next request.
-   See `BUGFIXPLAN.md`.
+   - **Fix 3 (commit 8c91512):** follow-up hardening — recovery holds back the full 8-byte ` response` close marker (not 7), `chat_think_tool_recovery` advances `*scan_from = marker_off + 1` so a spurious mid-prose marker can't shadow a legitimate later `"\n\n"` stanza, and non-streaming requests get plain-stream `text_stream_safe_limit()` (Stage 2). Added discriminating regression tests `test_think_recovery_ignores_prose_marker` and `test_think_recovery_spurious_then_legitimate`.
+    See `BUGFIXPLAN.md`.
 
 ## Resolved Issues
 
-- **KV cache miss after think-tool recovery** — Required two fixes: (1) `think_tool_recovery_fired` flag forces canonicalization (531314e), and (2) THINKING-mode streams hold back DSML markers so `reasoning_content` matches `parsed_reasoning` (125ea97).
+- **KV cache miss after think-tool recovery** — Required two fixes: (1) `think_tool_recovery_fired` flag forces canonicalization (531314e), and (2) THINKING-mode streams hold back DSML markers so `reasoning_content` matches `parsed_reasoning` (125ea97). Hardened by commit `8c91512` (hold-string 8 bytes, `scan_from` off-by-one, Stage 2 plain-stream safety, 2 regression tests).
+- **Alternative models in `ds4-server.sh`** — commit `70568c2` adds `start-<model>` / `restart-<model>` via parallel `MODEL_KEYS`/`MODEL_PATHS` arrays and `lookup_model`; `start_server` accepts a model path and passes `--model`. Verified live: the `0731` mixed-quant model maps 92908 MiB vs 93065 MiB for the default `ds4flash.gguf`.
 - **DSpark confidence default** — Changed from 0.9 to 0.6. The 0.9 threshold was too conservative, rejecting most draft tokens and negating MTP throughput gains.
 - **No-tools test model compatibility** — Test now uses `server_model_syntax_for_engine()` and `parse_generated_message_ex_for_syntax()` to handle both DeepSeek and GLM models correctly.
 
@@ -87,7 +98,7 @@ Override model: `DS4_TEST_MODEL=/path/to/model.gguf ./ds4_test --server`
 
 **Status:** Complete & committed
 **Commit:** `a171132` — "fix: harden DSML recovery, add post-recovery validation and streaming fallback" (2026-07-30)
-**Repo:** `nazerim/ds4` (fork of `antirez/ds4`); local `main` is 14 commits ahead of upstream `origin/main`
+**Repo:** `nazerim/ds4` (fork of `antirez/ds4`); local `main` is 16 commits ahead of upstream `origin/main`
 **Diff:** 5 files, +355 / −35
 
 | File | Δ | Role |
@@ -139,43 +150,47 @@ unbounded retries. This change hardens that path end-to-end.
 - New accessor `ds4_engine_dsml_id(ds4_engine*)` for robust DSML-token resolution
   (`ds4.c:36672`, `ds4.h:313`; used at `ds4_server.c:11420`).
 - `dsml_token_id` initialised to `-1` and resolved **only** inside the `if (!has_tools)` block
-  (`ds4_server.c:11418–11425`) — preserves tool calling + MTP.
-- Setup hoisted above the `decode_again:` label (`ds4_server.c:11427`) to avoid per-retry spam.
+  (`ds4_server.c:11478–11484`) — preserves tool calling + MTP.
+- Setup hoisted above the `decode_again:` label (`ds4_server.c:11487`) to avoid per-retry spam.
 
 ### 3.2 Post-recovery validation + streaming fallback (M2)
-- Eager trial-parse validation at tool-block close (`observe_tool_markers` at `11672`;
-  validation/recovery branch ~`11729–11783`).
+- Eager trial-parse validation at tool-block close (`observe_tool_markers` at `4591`;
+  validation/recovery branch ~`11789–11843`).
 - Streaming fallback: `strip_dsml_keep_prefix()` + `clamp_live_stream_positions()` then
-  `finish=stop` (call sites `11765–11766`, `11866–11867`, `11961–11962`).
-- `saw_tool_start = false` reset after fallback (`11773`, `11869`) to prevent re-triggering.
+  `finish=stop` (call sites `11835`, `11936`, `12031`).
+- `saw_tool_start = false` reset after fallback (`11843`, `11939`) to prevent re-triggering.
 - Output truncated at the marker before injecting recovery in `chat_think_tool_recovery`.
 
 ### 3.3 Bounded retry + parser robustness (M3)
-- Bounded counter `dsml_recovery_attempts` (init `11412`; guard `< 2` at `11738`/`11832`/`11921`;
-  increments `11747`/`11848`/`11940`) replaces the single-shot flag.
+- Bounded counter `dsml_recovery_attempts` (init `11470`; guard `< 2` at `11808`/`11902`/`11991`;
+  increments `11817`/`11918`/`12010`) replaces the single-shot flag.
 - Bare-parameter parsing without an `<｜DSML｜invoke>` wrapper (`ds4_server.c:4870–4901`;
   rationale comment at `4871`). Invoke macros at `4552–4559`; tag-variant selection `4837–4852`.
 
 ### 3.4 New helpers (`ds4_server.c`)
 - `strip_dsml_keep_prefix(buf*)` — `5238`: removes DSML markup while keeping any plain prefix.
-- `clamp_live_stream_positions(...)` — `7560`: re-clamps plain/OpenAI/Anthropic/Responses stream
+- `clamp_live_stream_positions(...)` — `7570`: re-clamps plain/OpenAI/Anthropic/Responses stream
   byte offsets after stripping so clients never see out-of-range positions.
 
 ### 3.5 Launch-script tuning (`ds4-server.sh`)
-- `CTX=256000` (:9), `MTP_DRAFT=1` (:17), `MTP_MARGIN=3` (:18), `DSPARK_CONFIDENCE=0.6` (:19).
-- Wired through `--mtp … --dspark --mtp-draft … --mtp-margin …` (:85) and
-  `--dspark-confidence …` (:86).
+- `CTX=256000` (:9), `MTP_DRAFT=1` (:37), `MTP_MARGIN=3` (:38), `DSPARK_CONFIDENCE=0.6` (:41).
+- Wired through `--mtp … --dspark --mtp-draft … --mtp-margin …` (:113) and
+  `--dspark-confidence …` (:114).
+- Alternative models: `MODEL_KEYS`/`MODEL_PATHS` parallel arrays (:21–24), `lookup_model` (:26),
+  `start-<model>`/`restart-<model>` dispatch (commit 70568c2).
 
 ## 4. Tests (`tests/ds4_test.c`)
 
 | Test | Line | Notes |
 |---|---|---|
-| `test_think_tool_recovery` | 6242 | Strengthened with `inject_at` assertions (6338–6342): `> 0`, `< text.len`, marker-position check |
+| `test_think_tool_recovery` | 6259 | Strengthened with `inject_at` assertions (6338–6342): `> 0`, `< text.len`, marker-position check |
 | `test_dsml_token_suppression_excludes_id` | 6699 | GPU-gated; skips when `ds4_engine_dsml_id() < 0` (GLM) |
-| `test_no_tools_request_yields_no_tool_calls` | 6744 | **New (working tree)** — compaction regression: a tool-less request (`has_tools=false`) decoded with the M1 DSML-token ban yields no tool marker and zero `tool_calls`; GLM (`dsml_id<0`) skips suppression but still asserts no call. Flag `--no-tools-no-tool-calls` |
-| `test_strip_dsml_keep_prefix` | 17628 | `strlen`-based assertions (rewritten via Python generator) |
-| `test_clamp_live_stream_positions` | 17692 | Verifies offset re-clamping across all stream formats |
+| `test_no_tools_request_yields_no_tool_calls` | 6934 | **New (working tree)** — compaction regression: a tool-less request (`has_tools=false`) decoded with the M1 DSML-token ban yields no tool marker and zero `tool_calls`; GLM (`dsml_id<0`) skips suppression but still asserts no call. Flag `--no-tools-no-tool-calls` |
+| `test_strip_dsml_keep_prefix` | 17708 | `strlen`-based assertions (rewritten via Python generator) |
+| `test_clamp_live_stream_positions` | 17772 | Verifies offset re-clamping across all stream formats |
 | bare-parameter parser test | via `test_server_unit_group` (6722) | Covers invoke-less parameter emission |
+| `test_think_recovery_ignores_prose_marker` | 6420 | (commit 8c91512) 3 spurious mid-prose markers inside ` thinking` → recovery does NOT fire |
+| `test_think_recovery_spurious_then_legitimate` | 6459 | (commit 8c91512) spurious prose marker then `"\n\n"` stanza → recovery fires on the legitimate one; discriminating regression for the `scan_from` off-by-one |
 
 Related existing coverage retained: `test_tool_call_quality` (6453), `test_mtp_verify_depth`
 (6602), `test_dspark_verify_depth` (6644).
@@ -211,22 +226,28 @@ Related existing coverage retained: `test_tool_call_quality` (6453), `test_mtp_v
   two fixes: (1) force canonicalization after recovery via `think_tool_recovery_fired` flag,
   and (2) hold back DSML markers in THINKING-mode streaming so `reasoning_content` matches
   `parsed_reasoning`. See `BUGFIXPLAN.md` for details.
-- **Upstream drift:** local `main` is 14 commits ahead of `antirez/ds4` (0 behind); rebase/merge periodically.
+- **Upstream drift:** local `main` is 16 commits ahead of `antirez/ds4` (0 behind); rebase/merge periodically.
 
 ## 8. Reference index (@ `a171132`)
 
 | Symbol | Location |
-|---|---|
+|---|---|---|
 | `ds4_engine_dsml_id` (def) | `ds4.c:36672` |
 | `ds4_engine_dsml_id` (decl) | `ds4.h:313` |
-| DSML suppression setup | `ds4_server.c:11418–11425` |
-| `decode_again:` label | `ds4_server.c:11427` |
-| `dsml_recovery_attempts` (init / guards / incs) | `11412` / `11738,11832,11921` / `11747,11848,11940` |
+| DSML suppression setup | `ds4_server.c:11478–11484` |
+| `decode_again:` label | `ds4_server.c:11487` |
+| `dsml_recovery_attempts` (init / guards / incs) | `11470` / `11808,11902,11991` / `11817,11918,12010` |
+| `think_tool_recovery_fired` (init / set / gate) | `11473` / `11720` / `12150` |
 | `strip_dsml_keep_prefix` | `ds4_server.c:5238` |
-| `clamp_live_stream_positions` | `ds4_server.c:7560` |
-| bare-parameter parser | `ds4_server.c:4870–4901` |
+| `clamp_live_stream_positions` | `ds4_server.c:7570` |
+| `chat_think_tool_recovery` | `ds4_server.c:10167–10266` |
+| `canonicalize_tool_checkpoint` | `ds4_server.c:10757` |
+| `should_canonicalize_tool_checkpoint` | `ds4_server.c:10917–10925` |
+| `text_stream_safe_limit` (def / fwd decl) | `ds4_server.c:7991` / `5712` |
+| bare-parameter parser | `ds4_server.c:4871–4901` |
 | invoke tag macros | `ds4_server.c:4552–4559` |
-| DSpark/MTP tuning | `ds4-server.sh:9,17–19,85–86` |
+| DSpark/MTP tuning | `ds4-server.sh:37–41,113–114` |
+| model map / `lookup_model` | `ds4-server.sh:21–24,26–36` |
 
 ---
 
@@ -255,9 +276,9 @@ Two fixes were required. Both in `ds4_server.c`.
 ### Fix 1: Force canonicalization after recovery (commit 531314e)
 
 3 minimal changes:
-1. Added `bool think_tool_recovery_fired` flag (line 11413)
-2. Set flag when recovery fires (line 11653)
-3. Force canonicalization after recovery (line 12083): `(think_tool_recovery_fired || should_canonicalize_tool_checkpoint(...))`
+1. Added `bool think_tool_recovery_fired` flag (line 11473)
+2. Set flag when recovery fires (line 11720)
+3. Force canonicalization after recovery (line 12150): `(think_tool_recovery_fired || should_canonicalize_tool_checkpoint(...))`
 
 **How it works:** After recovery, canonicalization rewrites the live KV suffix to match what the client will send next, avoiding the token-mismatch.
 
@@ -273,8 +294,8 @@ Two fixes were required. Both in `ds4_server.c`.
 ## Code Changes
 
 ```diff
-@@ -11411,6 +11411,8 @@ static void generate_job(server *s, server_slot *slot, job *j) {
-
+@@ -11469,6 +11469,8 @@ static void generate_job(server *s, server_slot *slot, job *j) {
+ 
      int dsml_recovery_attempts = 0;
      bool post_recovery_validation_pending = false;
 +    /* Set when think-tool recovery fires; forces checkpoint canonicalization. */
@@ -282,7 +303,7 @@ Two fixes were required. Both in `ds4_server.c`.
      uint64_t rng = j->req.seed ? j->req.seed :
          (((uint64_t)time(NULL) << 32) ^ (response_seq << 1) ^
           (uint64_t)(uintptr_t)j);
-@@ -11648,6 +11650,7 @@ decode_again:
+@@ -11714,6 +11716,7 @@ decode_again:
                                      "think tool recovery after %d generated tokens",
                                      completion);
                          post_recovery_validation_pending = true;
@@ -290,7 +311,7 @@ Two fixes were required. Both in `ds4_server.c`.
                          clamp_live_stream_positions(&plain_stream_pos, &openai_live,
                                                      &anthropic_live, &responses_live,
                                                      recovery_inject_at);
-@@ -12077,14 +12080,24 @@ decode_again:
+@@ -12143,14 +12146,24 @@ decode_again:
 
      if (j->req.kind == REQ_CHAT && parsed_calls.len &&
          j->req.api != API_RESPONSES &&
@@ -333,8 +354,8 @@ Two fixes were required. Both in `ds4_server.c`.
 
 ## References
 
-- Recovery function: `ds4_server.c:10152-10208` (`chat_think_tool_recovery`)
-- Canonicalization: `ds4_server.c:10699-10857` (`canonicalize_tool_checkpoint`)
+- Recovery function: `ds4_server.c:10167-10266` (`chat_think_tool_recovery`)
+- Canonicalization: `ds4_server.c:10757` (`canonicalize_tool_checkpoint`)
 - Log evidence: `log/ds4.log:1744-1819` (repeated pattern)
 - Related: `DS4PLAN.md` (DSML recovery hardening)
 
@@ -368,14 +389,14 @@ When the model emits DSML tool calls inside an unclosed ` thinking` tag, the `ch
 
 ### 1. Recovery Injection Flow
 
-**Code location:** `ds4_server.c:10152-10208` (`chat_think_tool_recovery`)
+**Code location:** `ds4_server.c:10167-10266` (`chat_think_tool_recovery`)
 
 When the model emits `<｜DSML｜tool_` inside ` thinking`:
 
-1. **Detection:** The scanner detects the DSML marker at line 11628-11633
+1. **Detection:** The scanner detects the DSML marker at line 11698-11704
 2. **Injection:** `chat_think_tool_recovery()` tokenizes `\n response\n\n` and feeds each token to the live session via `server_eval_token()` (line 10190-10196)
 3. **Output modification:** The output text buffer is truncated at the DSML marker position, then `\n response\n\n` is appended (line 10197-10203)
-4. **Flag set:** `post_recovery_validation_pending = true` (line 11665)
+4. **Flag set:** `post_recovery_validation_pending = true` (line 11719)
 
 **Example from log (line 1744):**
 ```
@@ -477,7 +498,7 @@ The disk cache is keyed by `token-text` (rendered token text), which includes th
 
 ### 6. Why Canonicalization Is Skipped
 
-**Code location:** `ds4_server.c:12078-12091`
+**Code location:** `ds4_server.c:12145-12158`
 
 After tool call extraction, the server checks whether to canonicalize the checkpoint:
 
@@ -490,7 +511,7 @@ if (j->req.kind == REQ_CHAT && parsed_calls.len &&
 }
 ```
 
-**`should_canonicalize_tool_checkpoint()` logic** (line 10859-10867):
+**`should_canonicalize_tool_checkpoint()` logic** (line 10917-10925):
 ```c
 static bool should_canonicalize_tool_checkpoint(const server *s, const tool_calls *calls) {
     if (!calls || calls->len == 0) return false;
@@ -547,7 +568,7 @@ Force checkpoint canonicalization after think-tool recovery, even when `raw_tool
 
 **File:** `ds4_server.c`
 
-**Change 1:** Add a persistent flag to track recovery (line 11412-11423)
+**Change 1:** Add a persistent flag to track recovery (line 11470-11485)
 
 ```c
 int dsml_recovery_attempts = 0;
@@ -565,7 +586,7 @@ bool post_recovery_validation_pending = false;
 bool think_tool_recovery_fired = false;
 ```
 
-**Change 2:** Set the flag when recovery fires (line 11665)
+**Change 2:** Set the flag when recovery fires (line 11719)
 
 ```c
 if (recovered) {
@@ -577,7 +598,7 @@ if (recovered) {
 }
 ```
 
-**Change 3:** Modify the canonicalization condition (line 12094-12107)
+**Change 3:** Modify the canonicalization condition (line 12148-12161)
 
 ```c
 if (j->req.kind == REQ_CHAT && parsed_calls.len &&
@@ -609,7 +630,7 @@ if (j->req.kind == REQ_CHAT && parsed_calls.len &&
 
 ### How Canonicalization Fixes the Issue
 
-**`canonicalize_tool_checkpoint()` logic** (line 10699-10857):
+**`canonicalize_tool_checkpoint()` logic** (line 10757):
 
 1. **Build canonical prompt:** Tokenize `j->req.prompt_text` + tool call suffix
    - The suffix is built from `parsed_content` (which includes the `\n response\n\n` injection) + tool calls
@@ -752,9 +773,9 @@ The think-tool recovery path injects tokens into the live session that diverge f
 
 ## References
 
-- **Recovery function:** `ds4_server.c:10152-10208` (`chat_think_tool_recovery`)
-- **Recovery trigger:** `ds4_server.c:11628-11668`
-- **Canonicalization:** `ds4_server.c:10699-10857` (`canonicalize_tool_checkpoint`)
+- **Recovery function:** `ds4_server.c:10167-10266` (`chat_think_tool_recovery`)
+- **Recovery trigger:** `ds4_server.c:11698-11720`
+- **Canonicalization:** `ds4_server.c:10757` (`canonicalize_tool_checkpoint`)
 - **Disk cache store:** `ds4_kvstore.c:923-1169` (`ds4_kvstore_store_live_prefix_text`)
 - **Disk cache load:** `ds4_kvstore.c:1215-1339` (`ds4_kvstore_try_load_text`)
 - **Common prefix:** `ds4.c:58980-58986` (`ds4_session_common_prefix`)
