@@ -6462,8 +6462,13 @@ static bool openai_sse_stream_update(int fd, server *s, const request *r, const 
         } else if (final) {
             limit = raw_len;
         } else {
-            const size_t hold = strlen("</think>") - 1;
+            const size_t hold = strlen("</ład>") - 1;
             limit = raw_len > hold ? raw_len - hold : st->emit_pos;
+            if (r && r->has_tools) {
+                size_t tl = text_stream_safe_limit(raw, st->emit_pos,
+                                                  raw_len, true, false);
+                if (tl < limit) limit = tl;
+            }
             limit = utf8_stream_safe_len(raw, st->emit_pos, limit, false);
         }
 
@@ -7159,8 +7164,13 @@ static bool responses_sse_stream_update(int fd, const request *r,
         } else if (final) {
             limit = raw_len;
         } else {
-            const size_t hold = strlen("</think>") - 1;
+            const size_t hold = strlen("</ład>") - 1;
             limit = raw_len > hold ? raw_len - hold : st->emit_pos;
+            if (r && r->has_tools) {
+                size_t tl = text_stream_safe_limit(raw, st->emit_pos,
+                                                  raw_len, true, false);
+                if (tl < limit) limit = tl;
+            }
             limit = utf8_stream_safe_len(raw, st->emit_pos, limit, false);
         }
 
@@ -8045,8 +8055,13 @@ static bool anthropic_sse_stream_update(int fd, server *s, const request *r, con
         } else if (final) {
             limit = raw_len;
         } else {
-            const size_t hold = strlen("</think>") - 1;
+            const size_t hold = strlen("</ład>") - 1;
             limit = raw_len > hold ? raw_len - hold : st->emit_pos;
+            if (r && r->has_tools) {
+                size_t tl = text_stream_safe_limit(raw, st->emit_pos,
+                                                  raw_len, true, false);
+                if (tl < limit) limit = tl;
+            }
             limit = utf8_stream_safe_len(raw, st->emit_pos, limit, false);
         }
 
