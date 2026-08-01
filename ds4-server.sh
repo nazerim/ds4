@@ -14,6 +14,26 @@ LOG_DIR="./log"
 LOG_FILE="$LOG_DIR/ds4.log"
 TOKENS=384000
 MTP_MODEL="gguf/DeepSeek-V4-Flash-DSpark-support.gguf"
+
+# Alternative model map: short name -> full GGUF path
+# Add entries here for each model variant. Use `start-<name>` / `restart-<name>`.
+# Uses parallel indexed arrays (bash 3.2 compatible — macOS default).
+MODEL_KEYS=("0731")
+MODEL_PATHS=(
+    "/Users/naz/.omlx/models/jmilnz/DeepSeek-V4-Flash-0731-antirez-ds4-GGUF/DeepSeek-V4-Flash-0731-Layers37-42Q4K-mixed-realimatrix-v2.gguf"
+)
+
+lookup_model() {
+    local key="$1"
+    local i
+    for i in "${!MODEL_KEYS[@]}"; do
+        if [ "${MODEL_KEYS[$i]}" = "$key" ]; then
+            echo "${MODEL_PATHS[$i]}"
+            return 0
+        fi
+    done
+    return 1
+}
 MTP_DRAFT="${MTP_DRAFT:-1}"
 MTP_MARGIN="${MTP_MARGIN:-3}"
 # 0.6 balances speculation acceptance vs verification cost; 0.9 was too
@@ -45,7 +65,8 @@ rotate_logs() {
 }
 
 start_server() {
-  local enable_mtp="${1:-}"
+  local model_path="${1:-}"
+  local enable_mtp="${2:-}"
 
   if [ -f "$PID_FILE" ]; then
     local pid
@@ -70,11 +91,21 @@ start_server() {
     return 1
   fi
 
-  echo "Starting ds4-server on port $PORT (ctx: $CTX)..."
+  if [ -n "$model_path" ]; then
+    echo "Starting ds4-server on port $PORT with model $model_path (ctx: $CTX)..."
+  else
+    echo "Starting ds4-server on port $PORT (ctx: $CTX)..."
+  fi
   if [ "$enable_mtp" = "mtp" ]; then
     echo "MTP speculative decoding enabled"
   fi
   echo "Logging to $LOG_FILE"
+
+  # Build model argument
+  MODEL_ARGS=()
+  if [ -n "$model_path" ]; then
+    MODEL_ARGS+=(--model "$model_path")
+  fi
 
   # Build MTP arguments
   MTP_ARGS=()
@@ -85,6 +116,7 @@ start_server() {
 
   # Use ${arr[@]+"${arr[@]}"} to safely expand empty arrays on old bash
   $SERVER_CMD \
+    ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"} \
     --ctx "$CTX" \
     --tokens "$TOKENS" \
     --port "$PORT" \
@@ -163,33 +195,73 @@ status_server() {
 
 case "${1:-}" in
   start)
-    start_server
+    start_server "" ""
     ;;
   start-mtp)
-    start_server mtp
+    start_server "" mtp
     ;;
   stop)
     stop_server
     ;;
   restart)
-    stop_server; start_server
+    stop_server; start_server "" ""
     ;;
   restart-mtp)
-    stop_server; start_server mtp
+    stop_server; start_server "" mtp
     ;;
   status)
     status_server
     ;;
+  start-*|restart-*)
+    action="$1"
+    do_restart=0
+
+    # Strip command prefix to get model suffix
+    if [[ "$action" == start-* ]]; then
+      suffix="${action#start-}"
+    else
+      suffix="${action#restart-}"
+      do_restart=1
+    fi
+
+    # Check for -mtp variant
+    enable_mtp=""
+    if [[ "$suffix" == *-mtp ]]; then
+      enable_mtp="mtp"
+      suffix="${suffix%-mtp}"
+    fi
+
+    # Look up model path
+    model_path=$(lookup_model "$suffix") || true
+    if [ -z "$model_path" ]; then
+      echo "Error: unknown model '$suffix'. Available models: ${MODEL_KEYS[*]}"
+      exit 1
+    fi
+
+    if [ "$do_restart" = 1 ]; then
+      stop_server; start_server "$model_path" "$enable_mtp"
+    else
+      start_server "$model_path" "$enable_mtp"
+    fi
+    ;;
   *)
-    echo "Usage: $0 {start|start-mtp|stop|restart|restart-mtp|status}"
+    echo "Usage: $0 {start|start-mtp|start-<model>|stop|restart|restart-mtp|restart-<model>|status}"
     echo ""
     echo "Options:"
-    echo "  start       - Start ds4-server"
-    echo "  start-mtp   - Start ds4-server with MTP speculative decoding"
-    echo "  stop        - Stop ds4-server"
-    echo "  restart     - Restart ds4-server"
-    echo "  restart-mtp - Restart ds4-server with MTP speculative decoding"
-    echo "  status      - Check if ds4-server is running"
+    echo "  start              - Start ds4-server (default model)"
+    echo "  start-mtp          - Start ds4-server with MTP speculative decoding"
+    echo "  start-<model>      - Start ds4-server with an alternative model"
+    echo "  start-<model>-mtp  - Start ds4-server with an alternative model + MTP"
+    echo "  stop               - Stop ds4-server"
+    echo "  restart            - Restart ds4-server (default model)"
+    echo "  restart-mtp        - Restart ds4-server with MTP speculative decoding"
+    echo "  restart-<model>    - Restart ds4-server with an alternative model"
+    echo "  status             - Check if ds4-server is running"
+    echo ""
+    echo "Available models (default: ds4flash.gguf):"
+    for i in "${!MODEL_KEYS[@]}"; do
+      echo "  ${MODEL_KEYS[$i]}  -> ${MODEL_PATHS[$i]}"
+    done
     echo ""
     echo "MTP model: $MTP_MODEL"
     echo "MTP/DSpark tuning (script variables or env overrides):"
