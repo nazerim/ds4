@@ -9233,14 +9233,6 @@ static void kv_cache_restore_tool_memory_for_messages(server *s, const chat_msgs
 }
 
 #ifdef DS4_SERVER_TEST
-static double kv_entry_eviction_score(const kv_entry *e, const ds4_tokens *live,
-                                      uint64_t now,
-                                      const ds4_kvstore_eviction_context *incoming) {
-    return ds4_kvstore_entry_eviction_score(e, live, now, incoming);
-}
-#endif
-
-#ifdef DS4_SERVER_TEST
 static void kv_cache_evict(kv_disk_cache *kc, const ds4_tokens *live,
                            uint64_t extra_bytes,
                            const ds4_kvstore_eviction_context *incoming) {
@@ -9257,9 +9249,10 @@ static void kv_cache_log_cb(void *ud, ds4_kvstore_log_type type, const char *msg
 }
 
 static bool kv_cache_open(kv_disk_cache *kc, const char *dir, uint64_t budget_mb,
-                          bool reject_different_quant, kv_cache_options opt) {
-    return ds4_kvstore_open(kc, dir, budget_mb, reject_different_quant, opt,
-                            "ds4-server", kv_cache_log_cb, NULL);
+                          bool reject_different_quant, uint64_t model_fp,
+                          kv_cache_options opt) {
+    return ds4_kvstore_open(kc, dir, budget_mb, reject_different_quant, model_fp,
+                            opt, "ds4-server", kv_cache_log_cb, NULL);
 }
 
 static void kv_cache_close(kv_disk_cache *kc) {
@@ -13026,6 +13019,18 @@ static server_config parse_options(int argc, char **argv) {
             c.kv_cache.boundary_trim_tokens = parse_nonneg_int_arg(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--kv-cache-boundary-align-tokens")) {
             c.kv_cache.boundary_align_tokens = parse_nonneg_int_arg(need_arg(&i, argc, argv, arg), arg);
+        } else if (!strcmp(arg, "--kv-cache-anchor-step")) {
+            c.kv_cache.anchor_step = parse_int_arg(need_arg(&i, argc, argv, arg), arg);
+        } else if (!strcmp(arg, "--kv-cache-small-dense")) {
+            c.kv_cache.small_dense_tokens = parse_nonneg_int_arg(need_arg(&i, argc, argv, arg), arg);
+        } else if (!strcmp(arg, "--kv-cache-tail-anchors")) {
+            c.kv_cache.tail_anchors = parse_nonneg_int_arg(need_arg(&i, argc, argv, arg), arg);
+        } else if (!strcmp(arg, "--kv-cache-mid-spacing")) {
+            c.kv_cache.mid_spacing_tokens = parse_nonneg_int_arg(need_arg(&i, argc, argv, arg), arg);
+        } else if (!strcmp(arg, "--kv-cache-min-anchors")) {
+            c.kv_cache.min_anchors = parse_nonneg_int_arg(need_arg(&i, argc, argv, arg), arg);
+        } else if (!strcmp(arg, "--kv-cache-max-conversations")) {
+            c.kv_cache.max_conversations = parse_nonneg_int_arg(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--kv-cache-reject-different-quant")) {
             c.kv_cache_reject_different_quant = true;
         } else if (!strcmp(arg, "--disable-exact-dsml-tool-replay")) {
@@ -13266,8 +13271,9 @@ int main(int argc, char **argv) {
     }
 
     if (cfg.kv_disk_dir) {
+        uint64_t model_fp = ds4_kvstore_model_fingerprint(cfg.engine.model_path);
         kv_cache_open(&s.kv, cfg.kv_disk_dir, cfg.kv_disk_space_mb,
-                      cfg.kv_cache_reject_different_quant, cfg.kv_cache);
+                      cfg.kv_cache_reject_different_quant, model_fp, cfg.kv_cache);
     }
     if (s.disable_exact_dsml_tool_replay) {
         server_log(DS4_LOG_DEFAULT,
@@ -16773,8 +16779,8 @@ static void test_kv_cache_file_size_must_fit_budget(void) {
     kv_disk_cache kc = {0};
     kc.budget_bytes = 1100;
 
-    TEST_ASSERT(kv_cache_file_size_fits(&kc, 100, 930, 0, NULL, NULL));
-    TEST_ASSERT(!kv_cache_file_size_fits(&kc, 100, 938, 0, NULL, NULL));
+    TEST_ASSERT(kv_cache_file_size_fits(&kc, 100, 906, 0, NULL, NULL));
+    TEST_ASSERT(!kv_cache_file_size_fits(&kc, 100, 914, 0, NULL, NULL));
     TEST_ASSERT(!kv_cache_file_size_fits(&kc, 100, 900, 40, NULL, NULL));
     TEST_ASSERT(!kv_cache_file_size_fits(&kc, UINT64_MAX, 1, 0, NULL, NULL));
 
@@ -16849,6 +16855,72 @@ static void test_kv_text_stub_file(const char *dir, const char *text,
                                    uint8_t reason,
                                    uint32_t tokens, uint64_t payload_bytes) {
     test_kv_text_stub_file_model(dir, text, 0, reason, tokens, payload_bytes);
+}
+
+/* v2 header stub carrying a conversation lineage key, weight fingerprint,
+ * bucket, halving level, and explicit last_used — for conversation-scoped
+ * eviction tests. */
+static void test_kv_conv_stub_file(const char *dir, const char *text,
+                                   uint64_t conv_id, uint64_t model_fp,
+                                   uint8_t reason, uint32_t tokens,
+                                   uint8_t level, uint64_t last_used,
+                                   uint64_t payload_bytes) {
+    char sha[41];
+    sha1_bytes_hex(text, strlen(text), sha);
+    char name[44];
+    snprintf(name, sizeof(name), "%.40s.kv", sha);
+    char *path = path_join(dir, name);
+    FILE *fp = fopen(path, "wb");
+    TEST_ASSERT(fp != NULL);
+    if (!fp) {
+        free(path);
+        return;
+    }
+    uint8_t h[KV_CACHE_FIXED_HEADER + DS4_KVSTORE_HEADER_V2_EXTRA];
+    uint32_t bucket = DS4_KVSTORE_DEFAULT_ANCHOR_STEP > 0
+        ? tokens / (uint32_t)DS4_KVSTORE_DEFAULT_ANCHOR_STEP : 0u;
+    ds4_kvstore_fill_header_v2(h, 0, 2, reason, 0, tokens, 0, 32768,
+                               100, last_used, payload_bytes,
+                               conv_id, model_fp, bucket, level, false);
+    uint8_t text_len[4];
+    le_put32(text_len, (uint32_t)strlen(text));
+    TEST_ASSERT(fwrite(h, 1, sizeof(h), fp) == sizeof(h));
+    TEST_ASSERT(fwrite(text_len, 1, sizeof(text_len), fp) == sizeof(text_len));
+    TEST_ASSERT(fwrite(text, 1, strlen(text), fp) == strlen(text));
+    for (uint64_t i = 0; i < payload_bytes; i++) {
+        TEST_ASSERT(fputc(0, fp) != EOF);
+    }
+    TEST_ASSERT(fclose(fp) == 0);
+    free(path);
+}
+
+static char *test_kv_path_for_text(const char *dir, const char *text) {
+    char sha[41];
+    sha1_bytes_hex(text, strlen(text), sha);
+    char name[44];
+    snprintf(name, sizeof(name), "%.40s.kv", sha);
+    return path_join(dir, name);
+}
+
+static bool kv_file_exists(const char *dir, const char *text) {
+    char *p = test_kv_path_for_text(dir, text);
+    bool exists = access(p, F_OK) == 0;
+    free(p);
+    return exists;
+}
+
+/* Read back a checkpoint's persisted stale flag (-1 if unreadable). */
+static int kv_file_stale_flag(const char *dir, const char *text) {
+    char sha[41];
+    sha1_bytes_hex(text, strlen(text), sha);
+    char *path = test_kv_path_for_text(dir, text);
+    ds4_kvstore_entry e = {0};
+    bool ok = ds4_kvstore_read_entry_file(path, sha, &e);
+    free(path);
+    if (!ok) return -1;
+    int s = e.stale ? 1 : 0;
+    ds4_kvstore_entry_free(&e);
+    return s;
 }
 
 static void test_kv_cache_lookup_uses_longest_text_prefix(void) {
@@ -17099,75 +17171,102 @@ static void test_kv_tool_map_restores_before_prompt_render(void) {
     rmdir(dir);
 }
 
-static void test_kv_cache_eviction_values_fresh_snapshots(void) {
-    char tmpl[] = "/tmp/ds4-kv-evict-test.XXXXXX";
+static void test_kv_cache_retention_keeps_small_anchor(void) {
+    /* One conversation with small-dense + tail + frontier anchors and two
+     * redundant middle anchors.  Under budget pressure only the redundant
+     * middle anchors are dropped; the small anchors are never evicted merely
+     * because a bigger one exists, and the frontier + tail survive. */
+    char tmpl[] = "/tmp/ds4-kv-retention-test.XXXXXX";
     char *dir = mkdtemp(tmpl);
     TEST_ASSERT(dir != NULL);
     if (!dir) return;
 
-    const char *old_sha = "1111111111111111111111111111111111111111";
-    const char *new_sha = "2222222222222222222222222222222222222222";
-    uint64_t now = (uint64_t)time(NULL);
-    test_kv_stub_file(dir, old_sha, KV_REASON_UNKNOWN, 512, 0, now, 4096);
-    test_kv_stub_file(dir, new_sha, KV_REASON_UNKNOWN, 2048, 0, now, 2048);
-
-    char old_name[44], new_name[44];
-    snprintf(old_name, sizeof(old_name), "%.40s.kv", old_sha);
-    snprintf(new_name, sizeof(new_name), "%.40s.kv", new_sha);
-    char *old_path = path_join(dir, old_name);
-    char *new_path = path_join(dir, new_name);
+    const uint64_t conv = 0xABCDull;
+    const uint64_t now = (uint64_t)time(NULL);
+    struct { const char *text; uint32_t tokens; } anchors[] = {
+        {"a0", 8192},   /* small-dense  -> kept */
+        {"a1", 16384},  /* small-dense  -> kept */
+        {"a2", 24576},  /* middle, off-grid -> redundant */
+        {"a3", 32768},  /* middle, off-grid -> redundant */
+        {"a4", 40960},  /* tail (2nd largest) -> kept */
+        {"a5", 131072}, /* frontier -> kept */
+    };
+    for (int i = 0; i < 6; i++)
+        test_kv_conv_stub_file(dir, anchors[i].text, conv, 0, KV_REASON_COLD,
+                               anchors[i].tokens, 0, now, 1024);
 
     kv_disk_cache kc = {0};
     kc.enabled = true;
     kc.dir = xstrdup(dir);
     kc.opt = kv_cache_default_options();
-    kc.budget_bytes = (KV_CACHE_FIXED_HEADER + 4u + 2048u) + 16u;
+    /* 6 files x (72 + 4 + 2 + 1024) = 6612 bytes.  Budget 4500 forces exactly
+     * the two redundant middle anchors out, leaving the four kept anchors. */
+    kc.budget_bytes = 4500;
     kv_cache_evict(&kc, NULL, 0, NULL);
 
-    TEST_ASSERT(access(old_path, F_OK) != 0);
-    TEST_ASSERT(access(new_path, F_OK) == 0);
+    TEST_ASSERT(kv_file_exists(dir, "a0"));  /* small-dense */
+    TEST_ASSERT(kv_file_exists(dir, "a1"));  /* small-dense */
+    TEST_ASSERT(!kv_file_exists(dir, "a2")); /* redundant middle */
+    TEST_ASSERT(!kv_file_exists(dir, "a3")); /* redundant middle */
+    TEST_ASSERT(kv_file_exists(dir, "a4"));  /* tail */
+    TEST_ASSERT(kv_file_exists(dir, "a5"));  /* frontier */
 
     kv_cache_close(&kc);
-    unlink(old_path);
-    unlink(new_path);
-    free(old_path);
-    free(new_path);
+    for (int i = 0; i < 6; i++) {
+        char *p = test_kv_path_for_text(dir, anchors[i].text);
+        unlink(p);
+        free(p);
+    }
     rmdir(dir);
 }
 
-static void test_kv_cache_eviction_prefers_anchor_reason(void) {
-    char tmpl[] = "/tmp/ds4-kv-anchor-reason-test.XXXXXX";
+static void test_kv_cache_eviction_multi_conv_scoped(void) {
+    /* Two conversations, each a single frontier anchor.  Under budget
+     * pressure the LRU non-active conversation (B) is retired while the active
+     * conversation (A, matched by the incoming prompt) is never stripped. */
+    char tmpl[] = "/tmp/ds4-kv-multi-conv-test.XXXXXX";
     char *dir = mkdtemp(tmpl);
     TEST_ASSERT(dir != NULL);
     if (!dir) return;
 
-    const char *anchor_sha = "1111111111111111111111111111111111111111";
-    const char *continued_sha = "2222222222222222222222222222222222222222";
-    uint64_t now = (uint64_t)time(NULL);
-    test_kv_stub_file(dir, anchor_sha, KV_REASON_COLD, 2048, 0, now, 2048);
-    test_kv_stub_file(dir, continued_sha, KV_REASON_CONTINUED, 2048, 0, now, 2048);
+    const char *a_text = "convA frontier head";
+    const char *b_text = "convB frontier head";
+    const uint64_t now = (uint64_t)time(NULL);
+    const uint64_t active_conv =
+        ds4_kvstore_compute_conv_id(a_text, strlen(a_text), 0);
+    const uint64_t other_conv = active_conv ^ 0xFFull;
 
-    char anchor_name[44], continued_name[44];
-    snprintf(anchor_name, sizeof(anchor_name), "%.40s.kv", anchor_sha);
-    snprintf(continued_name, sizeof(continued_name), "%.40s.kv", continued_sha);
-    char *anchor_path = path_join(dir, anchor_name);
-    char *continued_path = path_join(dir, continued_name);
+    test_kv_conv_stub_file(dir, a_text, active_conv, 0, KV_REASON_COLD,
+                           100000, 0, now, 1024);          /* active, fresh */
+    test_kv_conv_stub_file(dir, b_text, other_conv, 0, KV_REASON_COLD,
+                           100000, 0, now - 100000, 1024);  /* LRU, old */
 
     kv_disk_cache kc = {0};
     kc.enabled = true;
     kc.dir = xstrdup(dir);
     kc.opt = kv_cache_default_options();
-    kc.budget_bytes = (KV_CACHE_FIXED_HEADER + 4u + 2048u) + 16u;
-    kv_cache_evict(&kc, NULL, 0, NULL);
+    /* Two ~1.1 KiB files; budget forces one out. */
+    kc.budget_bytes = 1200;
+    ds4_kvstore_eviction_context incoming = {
+        .text = a_text,
+        .text_len = strlen(a_text),
+        .model_id = 0,
+        .quant_bits = 2,
+        .ctx_size = 32768,
+        .reject_different_quant = false,
+    };
+    kv_cache_evict(&kc, NULL, 0, &incoming);
 
-    TEST_ASSERT(access(anchor_path, F_OK) == 0);
-    TEST_ASSERT(access(continued_path, F_OK) != 0);
+    TEST_ASSERT(kv_file_exists(dir, a_text));  /* active conversation kept */
+    TEST_ASSERT(!kv_file_exists(dir, b_text)); /* LRU conversation retired */
 
     kv_cache_close(&kc);
-    unlink(anchor_path);
-    unlink(continued_path);
-    free(anchor_path);
-    free(continued_path);
+    char *pa = test_kv_path_for_text(dir, a_text);
+    char *pb = test_kv_path_for_text(dir, b_text);
+    unlink(pa);
+    unlink(pb);
+    free(pa);
+    free(pb);
     rmdir(dir);
 }
 
@@ -17229,126 +17328,283 @@ static void test_kv_cache_eviction_ignores_oversize_incoming(void) {
     rmdir(dir);
 }
 
-static void test_kv_cache_eviction_prefers_superseded_continued_prefix(void) {
-    char tmpl[] = "/tmp/ds4-kv-prefix-evict-test.XXXXXX";
+static void test_kv_cache_stale_at_load(void) {
+    /* A checkpoint whose text is a byte-prefix of the incoming prompt stays
+     * healthy; one whose text diverges is flagged stale and persisted. */
+    char tmpl[] = "/tmp/ds4-kv-stale-load-test.XXXXXX";
     char *dir = mkdtemp(tmpl);
     TEST_ASSERT(dir != NULL);
     if (!dir) return;
 
-    const char *continued_text = "system: hello world";
-    const char *cold_text = "different stable prefix";
-    const char *incoming_text = "system: hello world\nuser: prompt";
-    test_kv_text_stub_file(dir, continued_text, KV_REASON_CONTINUED, 4096, 2048);
-    test_kv_text_stub_file(dir, cold_text, KV_REASON_COLD, 1024, 2048);
-
-    char continued_sha[41], cold_sha[41];
-    sha1_bytes_hex(continued_text, strlen(continued_text), continued_sha);
-    sha1_bytes_hex(cold_text, strlen(cold_text), cold_sha);
-    char continued_name[44], cold_name[44];
-    snprintf(continued_name, sizeof(continued_name), "%.40s.kv", continued_sha);
-    snprintf(cold_name, sizeof(cold_name), "%.40s.kv", cold_sha);
-    char *continued_path = path_join(dir, continued_name);
-    char *cold_path = path_join(dir, cold_name);
+    const char *prefix_text = "hello world";      /* byte-prefix of prompt */
+    const char *diverged_text = "goodbye world";  /* not a prefix -> stale */
+    const char *prompt = "hello world more stuff";
+    const uint64_t now = (uint64_t)time(NULL);
+    test_kv_conv_stub_file(dir, prefix_text, 7, 0, KV_REASON_COLD, 1024, 0, now, 64);
+    test_kv_conv_stub_file(dir, diverged_text, 7, 0, KV_REASON_COLD, 1024, 0, now, 64);
 
     kv_disk_cache kc = {0};
     kc.enabled = true;
     kc.dir = xstrdup(dir);
     kc.opt = kv_cache_default_options();
-    uint64_t incoming_bytes =
-        KV_CACHE_FIXED_HEADER + 4u + strlen(incoming_text) + 2048u;
-    kc.budget_bytes =
-        incoming_bytes + KV_CACHE_FIXED_HEADER + 4u + strlen(cold_text) + 2048u;
-    ds4_kvstore_eviction_context incoming = {
-        .text = incoming_text,
-        .text_len = strlen(incoming_text),
-        .model_id = 0,
-        .quant_bits = 2,
-        .ctx_size = 32768,
-        .reject_different_quant = false,
-    };
-    kv_cache_evict(&kc, NULL, incoming_bytes, &incoming);
+    kc.budget_bytes = 1ull << 30;
+    (void)ds4_kvstore_find_text_prefix(&kc, prompt, 0, 2, 32768); /* populate */
+    ds4_kvstore_mark_stale_at_load(&kc, prompt, 0, 2, 32768);
 
-    TEST_ASSERT(access(continued_path, F_OK) != 0);
-    TEST_ASSERT(access(cold_path, F_OK) == 0);
+    TEST_ASSERT(kv_file_stale_flag(dir, prefix_text) == 0);
+    TEST_ASSERT(kv_file_stale_flag(dir, diverged_text) == 1);
 
     kv_cache_close(&kc);
-    unlink(continued_path);
-    unlink(cold_path);
-    free(continued_path);
-    free(cold_path);
+    char *p1 = test_kv_path_for_text(dir, prefix_text);
+    char *p2 = test_kv_path_for_text(dir, diverged_text);
+    unlink(p1);
+    unlink(p2);
+    free(p1);
+    free(p2);
     rmdir(dir);
 }
 
-static void test_kv_cache_eviction_keeps_smaller_context_prefix(void) {
-    char tmpl[] = "/tmp/ds4-kv-prefix-ctx-test.XXXXXX";
+static void test_kv_cache_header_v2_roundtrip(void) {
+    char tmpl[] = "/tmp/ds4-kv-hdr-v2-test.XXXXXX";
     char *dir = mkdtemp(tmpl);
     TEST_ASSERT(dir != NULL);
     if (!dir) return;
 
-    const char *continued_text = "system: hello world";
-    const char *cold_text = "different stable prefix";
-    const char *incoming_text = "system: hello world\nuser: prompt";
-    test_kv_text_stub_file(dir, continued_text, KV_REASON_CONTINUED, 4096, 2048);
-    test_kv_text_stub_file(dir, cold_text, KV_REASON_COLD, 1024, 2048);
+    /* v2 header round-trips all new fields. */
+    const char *v2_text = "v2 checkpoint text";
+    test_kv_conv_stub_file(dir, v2_text, 0x1234ull, 0x5678ull, KV_REASON_COLD,
+                           40960, 3, 555, 128);
+    char sha[41];
+    sha1_bytes_hex(v2_text, strlen(v2_text), sha);
+    char *path = test_kv_path_for_text(dir, v2_text);
+    ds4_kvstore_entry e = {0};
+    TEST_ASSERT(ds4_kvstore_read_entry_file(path, sha, &e));
+    TEST_ASSERT(e.hdr_version == 2);
+    TEST_ASSERT(e.conv_id == 0x1234ull);
+    TEST_ASSERT(e.model_fp == 0x5678ull);
+    TEST_ASSERT(e.level == 3);
+    TEST_ASSERT(e.tokens == 40960);
+    TEST_ASSERT(e.bucket == 40960u / (uint32_t)DS4_KVSTORE_DEFAULT_ANCHOR_STEP);
+    TEST_ASSERT(e.stale == false);
+    ds4_kvstore_entry_free(&e);
+    unlink(path);
+    free(path);
 
-    char continued_sha[41], cold_sha[41];
-    sha1_bytes_hex(continued_text, strlen(continued_text), continued_sha);
-    sha1_bytes_hex(cold_text, strlen(cold_text), cold_sha);
-    char continued_name[44], cold_name[44];
-    snprintf(continued_name, sizeof(continued_name), "%.40s.kv", continued_sha);
-    snprintf(cold_name, sizeof(cold_name), "%.40s.kv", cold_sha);
-    char *continued_path = path_join(dir, continued_name);
-    char *cold_path = path_join(dir, cold_name);
+    /* v1 header reads back with legacy defaults. */
+    const char *v1_sha = "9999999999999999999999999999999999999999";
+    test_kv_stub_file(dir, v1_sha, KV_REASON_COLD, 2048, 0, 555, 128);
+    char v1_name[44];
+    snprintf(v1_name, sizeof(v1_name), "%.40s.kv", v1_sha);
+    char *v1_path = path_join(dir, v1_name);
+    ds4_kvstore_entry e1 = {0};
+    TEST_ASSERT(ds4_kvstore_read_entry_file(v1_path, v1_sha, &e1));
+    TEST_ASSERT(e1.hdr_version == 1);
+    TEST_ASSERT(e1.conv_id == 0);
+    TEST_ASSERT(e1.model_fp == 0);
+    TEST_ASSERT(e1.level == 0);
+    ds4_kvstore_entry_free(&e1);
+    unlink(v1_path);
+    free(v1_path);
+    rmdir(dir);
+}
+
+static void test_kv_cache_compute_conv_id_stable(void) {
+    const char *text = "system prompt head";
+    uint64_t a = ds4_kvstore_compute_conv_id(text, strlen(text), 0x1111);
+    uint64_t b = ds4_kvstore_compute_conv_id(text, strlen(text), 0x1111);
+    uint64_t c = ds4_kvstore_compute_conv_id(text, strlen(text), 0x2222);
+    uint64_t d = ds4_kvstore_compute_conv_id("different head", 14, 0x1111);
+    TEST_ASSERT(a == b); /* stable for same head + namespace */
+    TEST_ASSERT(a != c); /* folded by weight fingerprint */
+    TEST_ASSERT(a != d); /* sensitive to head content */
+}
+
+static void test_kv_cache_middle_anchor_per_window(void) {
+    /* Sparse middle keeps the LARGEST anchor per mid_spacing window (not an
+     * exact (frontier-tokens)%spacing grid), so a deep divergence still finds a
+     * nearby anchor even when the continued-store interval misaligns with the
+     * grid.  Here anchors sit at 10240 multiples: 102400 is the largest in
+     * window [0,131072) and must survive, while 51200 (same window, smaller) is
+     * the redundant one.  A grid would keep neither. */
+    char tmpl[] = "/tmp/ds4-kv-window-test.XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    TEST_ASSERT(dir != NULL);
+    if (!dir) return;
+
+    const uint64_t conv = 0xAAull;
+    const uint64_t now = (uint64_t)time(NULL);
+    struct { const char *text; uint32_t tokens; } a[] = {
+        {"m0", 10240},   /* small-dense -> kept */
+        {"m1", 51200},   /* window 0, not largest -> redundant */
+        {"m2", 102400},  /* window 0, largest -> kept */
+        {"m3", 153600},  /* tail (2nd largest) -> kept */
+        {"m4", 204800},  /* frontier -> kept */
+    };
+    for (int i = 0; i < 5; i++)
+        test_kv_conv_stub_file(dir, a[i].text, conv, 0, KV_REASON_COLD,
+                               a[i].tokens, 0, now, 512);
 
     kv_disk_cache kc = {0};
     kc.enabled = true;
     kc.dir = xstrdup(dir);
     kc.opt = kv_cache_default_options();
-    uint64_t incoming_bytes =
-        KV_CACHE_FIXED_HEADER + 4u + strlen(incoming_text) + 2048u;
-    kc.budget_bytes =
-        incoming_bytes + KV_CACHE_FIXED_HEADER + 4u + strlen(continued_text) + 2048u;
-    ds4_kvstore_eviction_context incoming = {
-        .text = incoming_text,
-        .text_len = strlen(incoming_text),
-        .model_id = 0,
-        .quant_bits = 2,
-        .ctx_size = 65536,
-        .reject_different_quant = false,
-    };
-    kv_cache_evict(&kc, NULL, incoming_bytes, &incoming);
+    /* 5 files x 590 bytes = 2950; budget 2500 evicts only the single redundant
+     * middle anchor (51200), keeping the window-largest 102400. */
+    kc.budget_bytes = 2500;
+    kv_cache_evict(&kc, NULL, 0, NULL);
 
-    TEST_ASSERT(access(continued_path, F_OK) == 0);
-    TEST_ASSERT(access(cold_path, F_OK) != 0);
+    TEST_ASSERT(kv_file_exists(dir, "m0"));  /* small-dense */
+    TEST_ASSERT(!kv_file_exists(dir, "m1")); /* redundant middle */
+    TEST_ASSERT(kv_file_exists(dir, "m2"));  /* window-largest middle */
+    TEST_ASSERT(kv_file_exists(dir, "m3"));  /* tail */
+    TEST_ASSERT(kv_file_exists(dir, "m4"));  /* frontier */
 
     kv_cache_close(&kc);
-    unlink(continued_path);
-    unlink(cold_path);
-    free(continued_path);
-    free(cold_path);
+    for (int i = 0; i < 5; i++) {
+        char *p = test_kv_path_for_text(dir, a[i].text);
+        unlink(p);
+        free(p);
+    }
     rmdir(dir);
 }
 
-static void test_kv_cache_eviction_score_decays_stale_hits(void) {
-    /* stale: lower tokens-per-byte (e.g. tool-heavy prompt) but boosted by
-     * 10 hits well in the past.  fresh: higher tokens-per-byte and zero hits,
-     * just stored.  The stale hit bonus decays by inactivity, so fresh wins on
-     * its better baseline even though stale once had more successful hits. */
-    const uint64_t now = 1000u + 14u * KV_CACHE_HIT_HALF_LIFE_SECONDS;
-    kv_entry stale = {.tokens = 1024, .hits = 10, .file_size = 4096, .last_used = 1000};
-    kv_entry fresh = {.tokens = 2048, .hits = 0,  .file_size = 4096, .last_used = now};
+static void test_kv_cache_halving_doubles_window(void) {
+    /* Over budget, the LRU conversation's middle window is doubled (level++);
+     * the anchor that becomes redundant after the merge is then evicted, while
+     * the active conversation is never halved or stripped. */
+    char tmpl[] = "/tmp/ds4-kv-halving-test.XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    TEST_ASSERT(dir != NULL);
+    if (!dir) return;
 
-    double s_on = kv_entry_eviction_score(&stale, NULL, now, NULL);
-    double f_on = kv_entry_eviction_score(&fresh, NULL, now, NULL);
-    TEST_ASSERT(s_on < f_on);
+    const char *a_text = "A_frontier";
+    const uint64_t now = (uint64_t)time(NULL);
+    const uint64_t active_conv =
+        ds4_kvstore_compute_conv_id(a_text, strlen(a_text), 0);
+    const uint64_t b_conv = 0xB0Bull;
 
-    /* A fresh entry's score never decays below its (0+1) * tokens/size floor,
-     * regardless of how old another entry's hit history is. */
-    TEST_ASSERT(f_on == 1.0 * (double)fresh.tokens / (double)fresh.file_size);
+    /* Active conversation A: a single frontier anchor. */
+    test_kv_conv_stub_file(dir, a_text, active_conv, 0, KV_REASON_COLD,
+                           100000, 0, now, 512);
+    /* LRU conversation B: one anchor per level-0 window (no redundancy yet). */
+    test_kv_conv_stub_file(dir, "bs", b_conv, 0, KV_REASON_COLD, 10240, 0, now - 100000, 512);
+    test_kv_conv_stub_file(dir, "b0", b_conv, 0, KV_REASON_COLD, 51200, 0, now - 100000, 512);
+    test_kv_conv_stub_file(dir, "b1", b_conv, 0, KV_REASON_COLD, 153600, 0, now - 100000, 512);
+    test_kv_conv_stub_file(dir, "b2", b_conv, 0, KV_REASON_COLD, 256000, 0, now - 100000, 512);
+
+    kv_disk_cache kc = {0};
+    kc.enabled = true;
+    kc.dir = xstrdup(dir);
+    kc.opt = kv_cache_default_options();
+    kc.opt.min_anchors = 2; /* halve a conversation with >= 3 anchors */
+    kc.budget_bytes = 2400;
+    ds4_kvstore_eviction_context incoming = {
+        .text = a_text, .text_len = strlen(a_text),
+        .model_id = 0, .quant_bits = 2, .ctx_size = 32768,
+        .reject_different_quant = false,
+    };
+    kv_cache_evict(&kc, NULL, 0, &incoming);
+
+    TEST_ASSERT(kv_file_exists(dir, a_text)); /* active frontier kept */
+    TEST_ASSERT(kv_file_exists(dir, "bs"));   /* B small-dense kept */
+    TEST_ASSERT(kv_file_exists(dir, "b1"));   /* B tail kept */
+    TEST_ASSERT(kv_file_exists(dir, "b2"));   /* B frontier kept */
+    TEST_ASSERT(!kv_file_exists(dir, "b0"));  /* B middle, redundant after halving */
+
+    kv_cache_close(&kc);
+    const char *texts[] = {a_text, "bs", "b0", "b1", "b2"};
+    for (int i = 0; i < 5; i++) {
+        char *p = test_kv_path_for_text(dir, texts[i]);
+        unlink(p);
+        free(p);
+    }
+    rmdir(dir);
 }
 
-static void test_kv_cache_eviction_decayed_hits_tie_break_by_age(void) {
-    char tmpl[] = "/tmp/ds4-kv-stale-hit-evict-test.XXXXXX";
+static void test_kv_cache_retirement_at_floor(void) {
+    /* A least-recently-used conversation already at/below min_anchors cannot be
+     * halved further, so budget pressure retires it entirely; the active
+     * conversation survives. */
+    char tmpl[] = "/tmp/ds4-kv-retire-test.XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    TEST_ASSERT(dir != NULL);
+    if (!dir) return;
+
+    const char *a_text = "A_frontier";
+    const uint64_t now = (uint64_t)time(NULL);
+    const uint64_t active_conv =
+        ds4_kvstore_compute_conv_id(a_text, strlen(a_text), 0);
+    const uint64_t b_conv = 0xBEEFull;
+
+    test_kv_conv_stub_file(dir, a_text, active_conv, 0, KV_REASON_COLD,
+                           100000, 0, now, 512);
+    /* LRU conversation B: 2 anchors (<= default min_anchors=4). */
+    test_kv_conv_stub_file(dir, "b0", b_conv, 0, KV_REASON_COLD, 10240, 0, now - 100000, 512);
+    test_kv_conv_stub_file(dir, "b1", b_conv, 0, KV_REASON_COLD, 204800, 0, now - 100000, 512);
+
+    kv_disk_cache kc = {0};
+    kc.enabled = true;
+    kc.dir = xstrdup(dir);
+    kc.opt = kv_cache_default_options();
+    kc.budget_bytes = 700;
+    ds4_kvstore_eviction_context incoming = {
+        .text = a_text, .text_len = strlen(a_text),
+        .model_id = 0, .quant_bits = 2, .ctx_size = 32768,
+        .reject_different_quant = false,
+    };
+    kv_cache_evict(&kc, NULL, 0, &incoming);
+
+    TEST_ASSERT(kv_file_exists(dir, a_text)); /* active conversation kept */
+    TEST_ASSERT(!kv_file_exists(dir, "b0"));  /* B retired entirely */
+    TEST_ASSERT(!kv_file_exists(dir, "b1"));
+
+    kv_cache_close(&kc);
+    const char *texts[] = {a_text, "b0", "b1"};
+    for (int i = 0; i < 3; i++) {
+        char *p = test_kv_path_for_text(dir, texts[i]);
+        unlink(p);
+        free(p);
+    }
+    rmdir(dir);
+}
+
+static void test_kv_cache_model_fp_routing(void) {
+    /* A checkpoint written for a different weight fingerprint is neither
+     * selected as a rebuild prefix nor marked stale for the current prompt. */
+    char tmpl[] = "/tmp/ds4-kv-modelfp-test.XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    TEST_ASSERT(dir != NULL);
+    if (!dir) return;
+
+    const char *text = "hello world";
+    const char *prompt = "hello world more";
+    const uint64_t now = (uint64_t)time(NULL);
+    test_kv_conv_stub_file(dir, text, 5, 0xAAAAull, KV_REASON_COLD, 1024, 0, now, 64);
+
+    kv_disk_cache kc = {0};
+    kc.enabled = true;
+    kc.dir = xstrdup(dir);
+    kc.opt = kv_cache_default_options();
+    kc.model_fp = 0xBBBBull; /* different from the checkpoint's 0xAAAA */
+
+    int idx = ds4_kvstore_find_text_prefix(&kc, prompt, 0, 2, 32768);
+    TEST_ASSERT(idx < 0); /* cross-model checkpoint never selected */
+    ds4_kvstore_mark_stale_at_load(&kc, prompt, 0, 2, 32768);
+    TEST_ASSERT(kv_file_stale_flag(dir, text) == 0); /* never marked stale */
+
+    kv_cache_close(&kc);
+    char *p = test_kv_path_for_text(dir, text);
+    unlink(p);
+    free(p);
+    rmdir(dir);
+}
+
+static void test_kv_cache_eviction_legacy_lru_evicts_oldest(void) {
+    /* Two legacy (conv_id==0) singletons under budget pressure: neither is
+     * stale or redundant, so eviction falls through to legacy-LRU and drops
+     * the one with the older last_used.  Distinct last_used makes this
+     * independent of readdir order. */
+    char tmpl[] = "/tmp/ds4-kv-legacy-lru-test.XXXXXX";
     char *dir = mkdtemp(tmpl);
     TEST_ASSERT(dir != NULL);
     if (!dir) return;
@@ -17356,10 +17612,10 @@ static void test_kv_cache_eviction_decayed_hits_tie_break_by_age(void) {
     const char *old_sha = "1111111111111111111111111111111111111111";
     const char *new_sha = "2222222222222222222222222222222222222222";
     uint64_t now = (uint64_t)time(NULL);
-    uint64_t stale = now > KV_CACHE_HIT_HALF_LIFE_SECONDS * 14ull
+    uint64_t old_used = now > KV_CACHE_HIT_HALF_LIFE_SECONDS * 14ull
         ? now - KV_CACHE_HIT_HALF_LIFE_SECONDS * 14ull
         : 1;
-    test_kv_stub_file(dir, old_sha, KV_REASON_COLD, 2048, 15, stale, 2048);
+    test_kv_stub_file(dir, old_sha, KV_REASON_COLD, 2048, 0, old_used, 2048);
     test_kv_stub_file(dir, new_sha, KV_REASON_COLD, 2048, 0, now, 2048);
 
     char old_name[44], new_name[44];
@@ -17383,42 +17639,6 @@ static void test_kv_cache_eviction_decayed_hits_tie_break_by_age(void) {
     unlink(new_path);
     free(old_path);
     free(new_path);
-    rmdir(dir);
-}
-
-static void test_kv_cache_eviction_keeps_aligned_continued_frontiers(void) {
-    char tmpl[] = "/tmp/ds4-kv-live-prefix-test.XXXXXX";
-    char *dir = mkdtemp(tmpl);
-    TEST_ASSERT(dir != NULL);
-    if (!dir) return;
-
-    const char *cold_sha = "1111111111111111111111111111111111111111";
-    const char *continued_sha = "2222222222222222222222222222222222222222";
-    uint64_t now = (uint64_t)time(NULL);
-    test_kv_stub_file(dir, cold_sha, KV_REASON_COLD, 512, 0, now, 2048);
-    test_kv_stub_file(dir, continued_sha, KV_REASON_CONTINUED, 2048, 0, now, 2048);
-
-    char cold_name[44], continued_name[44];
-    snprintf(cold_name, sizeof(cold_name), "%.40s.kv", cold_sha);
-    snprintf(continued_name, sizeof(continued_name), "%.40s.kv", continued_sha);
-    char *cold_path = path_join(dir, cold_name);
-    char *continued_path = path_join(dir, continued_name);
-
-    kv_disk_cache kc = {0};
-    kc.enabled = true;
-    kc.dir = xstrdup(dir);
-    kc.opt = kv_cache_default_options();
-    kc.budget_bytes = (KV_CACHE_FIXED_HEADER + 4u + 2048u) + 16u;
-    kv_cache_evict(&kc, NULL, 0, NULL);
-
-    TEST_ASSERT(access(cold_path, F_OK) != 0);
-    TEST_ASSERT(access(continued_path, F_OK) == 0);
-
-    kv_cache_close(&kc);
-    unlink(cold_path);
-    unlink(continued_path);
-    free(cold_path);
-    free(continued_path);
     rmdir(dir);
 }
 
@@ -17919,15 +18139,18 @@ static void ds4_server_unit_tests_run(void) {
     test_kv_cache_lookup_uses_longest_text_prefix();
     test_kv_cache_lookup_rejects_wrong_model();
     test_kv_cache_lookup_rejects_stale_payload_abi();
-    test_kv_cache_eviction_values_fresh_snapshots();
-    test_kv_cache_eviction_prefers_anchor_reason();
+    test_kv_cache_retention_keeps_small_anchor();
+    test_kv_cache_eviction_multi_conv_scoped();
     test_kv_cache_eviction_makes_room_before_store();
     test_kv_cache_eviction_ignores_oversize_incoming();
-    test_kv_cache_eviction_prefers_superseded_continued_prefix();
-    test_kv_cache_eviction_keeps_smaller_context_prefix();
-    test_kv_cache_eviction_score_decays_stale_hits();
-    test_kv_cache_eviction_decayed_hits_tie_break_by_age();
-    test_kv_cache_eviction_keeps_aligned_continued_frontiers();
+    test_kv_cache_stale_at_load();
+    test_kv_cache_header_v2_roundtrip();
+    test_kv_cache_compute_conv_id_stable();
+    test_kv_cache_middle_anchor_per_window();
+    test_kv_cache_halving_doubles_window();
+    test_kv_cache_retirement_at_floor();
+    test_kv_cache_model_fp_routing();
+    test_kv_cache_eviction_legacy_lru_evicts_oldest();
     test_dsml_bare_parameters_parse_as_unknown_call();
     test_strip_dsml_keep_prefix();
     test_clamp_live_stream_positions();

@@ -9,8 +9,16 @@
 #include <stdio.h>
 
 #define DS4_KVSTORE_FIXED_HEADER 48u
+#define DS4_KVSTORE_HEADER_V2_EXTRA 24u
+#define DS4_KVSTORE_CONV_ID_HEAD_BYTES 512u
 #define DS4_KVSTORE_DEFAULT_MB 4096
 #define DS4_KVSTORE_HIT_HALF_LIFE_SECONDS (6ull * 60ull * 60ull)
+
+#define DS4_KVSTORE_DEFAULT_ANCHOR_STEP 8192
+#define DS4_KVSTORE_DEFAULT_SMALL_DENSE 16384
+#define DS4_KVSTORE_DEFAULT_TAIL_ANCHORS 2
+#define DS4_KVSTORE_DEFAULT_MID_SPACING 131072
+#define DS4_KVSTORE_DEFAULT_MIN_ANCHORS 4
 
 #define DS4_KVSTORE_EXT_TOOL_MAP          (1u << 0)
 #define DS4_KVSTORE_EXT_RESPONSES_VISIBLE (1u << 1)
@@ -54,6 +62,15 @@ typedef struct {
     uint64_t payload_bytes;
     uint64_t text_bytes;
     uint64_t file_size;
+    /* NEW (v2 header, offset 48): conversation lineage key (per namespace),
+     * weight fingerprint, token bucket, and middle-anchor halving level. */
+    uint64_t conv_id;      /* conversation lineage key; 0 = legacy singleton */
+    uint64_t model_fp;     /* weight fingerprint; 0 = legacy (always accept) */
+    uint32_t bucket;       /* tokens / anchor_step; orders redundant eviction
+                            * (oldest/smallest bucket first, plan §3.3) */
+    uint8_t  level;        /* halving level of this conversation's large-middle spacing */
+    uint8_t  hdr_version;  /* 1 or 2, from the file's version byte */
+    bool     stale;        /* failed byte_prefix_match at load, same namespace */
 } ds4_kvstore_entry;
 
 typedef struct {
@@ -62,6 +79,13 @@ typedef struct {
     int continued_interval_tokens;
     int boundary_trim_tokens;
     int boundary_align_tokens;
+    /* NEW retention knobs */
+    int anchor_step;            /* bucket granularity, default 8192 */
+    int small_dense_tokens;     /* keep ALL anchors <= this, default 16384 */
+    int tail_anchors;           /* frontier + this many below kept dense, default 2 */
+    int mid_spacing_tokens;     /* large-middle spacing at level 0, default 131072 */
+    int min_anchors;            /* retire a conversation when ladder <= this, default 4 */
+    int max_conversations;      /* cap distinct conv_ids; retire LRU over the cap, 0=unlimited */
 } ds4_kvstore_options;
 
 typedef struct {
@@ -77,6 +101,7 @@ typedef struct {
     const char *log_name;
     void *log_ud;
     void (*log)(void *ud, ds4_kvstore_log_type type, const char *msg);
+    uint64_t model_fp;   /* set once at open from the loaded weights */
 } ds4_kvstore;
 
 typedef struct {
@@ -112,7 +137,8 @@ uint8_t ds4_kvstore_reason_code(const char *reason);
 const char *ds4_kvstore_key_kind(uint8_t ext_flags);
 
 bool ds4_kvstore_open(ds4_kvstore *kc, const char *dir, uint64_t budget_mb,
-                      bool reject_different_quant, ds4_kvstore_options opt,
+                      bool reject_different_quant, uint64_t model_fp,
+                      ds4_kvstore_options opt,
                       const char *log_name,
                       void (*log)(void *ud, ds4_kvstore_log_type type, const char *msg),
                       void *log_ud);
@@ -150,10 +176,6 @@ bool ds4_kvstore_file_size_fits(const ds4_kvstore *kc,
                                 uint64_t trailer_bytes,
                                 uint64_t *file_bytes_out,
                                 uint64_t *required_bytes_out);
-double ds4_kvstore_entry_eviction_score(const ds4_kvstore_entry *e,
-                                        const ds4_tokens *live,
-                                        uint64_t now,
-                                        const ds4_kvstore_eviction_context *incoming);
 void ds4_kvstore_evict(ds4_kvstore *kc, const ds4_tokens *live,
                        uint64_t extra_bytes,
                        const ds4_kvstore_eviction_context *incoming);
@@ -207,7 +229,21 @@ void ds4_kvstore_fill_header(uint8_t h[DS4_KVSTORE_FIXED_HEADER],
                              uint32_t tokens, uint32_t hits, uint32_t ctx_size,
                              uint64_t created_at, uint64_t last_used,
                              uint64_t payload_bytes);
-bool ds4_kvstore_touch_file(const char *path, uint32_t hits);
+void ds4_kvstore_fill_header_v2(uint8_t h[DS4_KVSTORE_FIXED_HEADER + DS4_KVSTORE_HEADER_V2_EXTRA],
+                                uint8_t model_id, uint8_t quant_bits,
+                                uint8_t reason, uint8_t ext_flags,
+                                uint32_t tokens, uint32_t hits, uint32_t ctx_size,
+                                uint64_t created_at, uint64_t last_used,
+                                uint64_t payload_bytes,
+                                uint64_t conv_id, uint64_t model_fp,
+                                uint32_t bucket, uint8_t level, bool stale);
+bool ds4_kvstore_touch_file(const char *path, uint32_t hits, bool stale,
+                            uint64_t last_used);
+uint64_t ds4_kvstore_compute_conv_id(const char *text, size_t text_len,
+                                     uint64_t model_fp);
+uint64_t ds4_kvstore_model_fingerprint(const char *model_path);
+void ds4_kvstore_mark_stale_at_load(ds4_kvstore *kc, const char *prompt_text,
+                                    int model_id, int quant_bits, int ctx_size);
 bool ds4_kvstore_sha_hex_name(const char *name, char sha[41]);
 void ds4_kvstore_sha1_bytes_hex(const void *ptr, size_t len, char out[41]);
 char *ds4_kvstore_path_join(const char *dir, const char *name);
