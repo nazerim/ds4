@@ -11211,6 +11211,9 @@ static void generate_job(server *s, server_slot *slot, job *j) {
             cached = disk_cached;
             cache_source = "disk-text";
             prompt_for_sync = &effective_prompt;
+            /* Restore the slot's continued-store watermark to the loaded frontier
+             * so we do not re-fire a continued store at tokens already on disk. */
+            slot->continued_last_store_tokens = disk_cached;
         }
     }
     const bool responses_reasoning_state_preserved =
@@ -13020,7 +13023,7 @@ static server_config parse_options(int argc, char **argv) {
         } else if (!strcmp(arg, "--kv-cache-boundary-align-tokens")) {
             c.kv_cache.boundary_align_tokens = parse_nonneg_int_arg(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--kv-cache-anchor-step")) {
-            c.kv_cache.anchor_step = parse_int_arg(need_arg(&i, argc, argv, arg), arg);
+            c.kv_cache.anchor_step = parse_nonneg_int_arg(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--kv-cache-small-dense")) {
             c.kv_cache.small_dense_tokens = parse_nonneg_int_arg(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--kv-cache-tail-anchors")) {
@@ -13272,6 +13275,9 @@ int main(int argc, char **argv) {
 
     if (cfg.kv_disk_dir) {
         uint64_t model_fp = ds4_kvstore_model_fingerprint(cfg.engine.model_path);
+        /* Align the continued-checkpoint grid to the engine's prefill chunk so
+         * anchors actually land on chunk boundaries (kv_cache_continued_step). */
+        cfg.kv_cache.prefill_chunk = (int)ds4_engine_prefill_chunk(engine);
         kv_cache_open(&s.kv, cfg.kv_disk_dir, cfg.kv_disk_space_mb,
                       cfg.kv_cache_reject_different_quant, model_fp, cfg.kv_cache);
     }
@@ -16741,18 +16747,28 @@ static void test_kv_cache_continued_uses_aligned_frontiers(void) {
     kc.enabled = true;
     kc.opt = kv_cache_default_options();
 
-    TEST_ASSERT(kv_cache_continued_store_target(&kc, 10239) == 0);
-    TEST_ASSERT(kv_cache_continued_store_target(&kc, 10240) == 10240);
+    /* Default anchor_step (8192) is the writing grid: it is a multiple of the
+     * prefill chunk, so dense-small anchors (<= small_dense) actually land. */
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 8191) == 0);
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 8192) == 8192);
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 16384) == 16384);
 
     kc.continued_last_store_tokens = 4096;
-    TEST_ASSERT(kv_cache_continued_store_target(&kc, 10240) == 10240);
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 8192) == 8192);
 
     kc.continued_last_store_tokens = 24576;
-    TEST_ASSERT(kv_cache_continued_store_target(&kc, 30720) == 30720);
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 32768) == 32768);
 
-    kc.continued_last_store_tokens = 10240;
-    TEST_ASSERT(kv_cache_continued_store_target(&kc, 18432) == 0);
-    TEST_ASSERT(kv_cache_continued_store_target(&kc, 20480) == 20480);
+    kc.continued_last_store_tokens = 8192;
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 12288) == 0);
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 16384) == 16384);
+
+    /* anchor_step unset -> fall back to continued_interval (10000) aligned to
+     * boundary_align (2048) = 10240. */
+    kc.opt.anchor_step = 0;
+    kc.continued_last_store_tokens = 0;
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 10239) == 0);
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 10240) == 10240);
 
     kc.opt.boundary_align_tokens = 0;
     kc.continued_last_store_tokens = 20480;
@@ -16765,14 +16781,14 @@ static void test_kv_cache_cold_store_suppresses_duplicate_continued_boundary(voi
     kc.enabled = true;
     kc.opt = kv_cache_default_options();
 
-    int old = kv_cache_suppress_continued_store(&kc, 10240);
+    int old = kv_cache_suppress_continued_store(&kc, 8192);
     TEST_ASSERT(old == 0);
-    TEST_ASSERT(kc.continued_last_store_tokens == 10240);
-    TEST_ASSERT(kv_cache_continued_store_target(&kc, 10240) == 0);
+    TEST_ASSERT(kc.continued_last_store_tokens == 8192);
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 8192) == 0);
 
-    kv_cache_restore_suppressed_continued(&kc, old, 10240);
+    kv_cache_restore_suppressed_continued(&kc, old, 8192);
     TEST_ASSERT(kc.continued_last_store_tokens == 0);
-    TEST_ASSERT(kv_cache_continued_store_target(&kc, 10240) == 10240);
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 8192) == 8192);
 }
 
 static void test_kv_cache_file_size_must_fit_budget(void) {
@@ -17330,7 +17346,8 @@ static void test_kv_cache_eviction_ignores_oversize_incoming(void) {
 
 static void test_kv_cache_stale_at_load(void) {
     /* A checkpoint whose text is a byte-prefix of the incoming prompt stays
-     * healthy; one whose text diverges is flagged stale and persisted. */
+     * healthy; one whose text diverges (same conversation) is flagged stale and
+     * persisted. */
     char tmpl[] = "/tmp/ds4-kv-stale-load-test.XXXXXX";
     char *dir = mkdtemp(tmpl);
     TEST_ASSERT(dir != NULL);
@@ -17340,8 +17357,11 @@ static void test_kv_cache_stale_at_load(void) {
     const char *diverged_text = "goodbye world";  /* not a prefix -> stale */
     const char *prompt = "hello world more stuff";
     const uint64_t now = (uint64_t)time(NULL);
-    test_kv_conv_stub_file(dir, prefix_text, 7, 0, KV_REASON_COLD, 1024, 0, now, 64);
-    test_kv_conv_stub_file(dir, diverged_text, 7, 0, KV_REASON_COLD, 1024, 0, now, 64);
+    /* Both checkpoints belong to the prompt's conversation; mark_stale scopes
+     * stale-marking to the active conv_id, so they must share it. */
+    const uint64_t conv = ds4_kvstore_compute_conv_id(prompt, strlen(prompt), 0);
+    test_kv_conv_stub_file(dir, prefix_text, conv, 0, KV_REASON_COLD, 1024, 0, now, 64);
+    test_kv_conv_stub_file(dir, diverged_text, conv, 0, KV_REASON_COLD, 1024, 0, now, 64);
 
     kv_disk_cache kc = {0};
     kc.enabled = true;
@@ -17361,6 +17381,171 @@ static void test_kv_cache_stale_at_load(void) {
     unlink(p2);
     free(p1);
     free(p2);
+    rmdir(dir);
+}
+
+static void test_kv_cache_stale_at_load_isolates_conversations(void) {
+    /* In batched mode many conversations share one namespace.  Loading
+     * conversation A must NOT poison conversation B's anchors just because they
+     * do not prefix A's prompt; only A's own diverged anchors are marked stale. */
+    char tmpl[] = "/tmp/ds4-kv-stale-iso-test.XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    TEST_ASSERT(dir != NULL);
+    if (!dir) return;
+
+    const char *prompt_a = "conversation A prompt text that is quite a bit longer";
+    const char *text_b   = "conversation B unrelated text"; /* B's anchor */
+    const char *text_a_div = "conversation A diverged";       /* A's, non-prefix */
+    const uint64_t now = (uint64_t)time(NULL);
+    const uint64_t conv_a = ds4_kvstore_compute_conv_id(prompt_a, strlen(prompt_a), 0);
+    const uint64_t conv_b = ds4_kvstore_compute_conv_id(text_b, strlen(text_b), 0);
+    TEST_ASSERT(conv_a != conv_b);
+    test_kv_conv_stub_file(dir, text_b, conv_b, 0, KV_REASON_COLD, 1024, 0, now, 64);
+    test_kv_conv_stub_file(dir, text_a_div, conv_a, 0, KV_REASON_COLD, 1024, 0, now, 64);
+
+    kv_disk_cache kc = {0};
+    kc.enabled = true;
+    kc.dir = xstrdup(dir);
+    kc.opt = kv_cache_default_options();
+    kc.budget_bytes = 1ull << 30;
+    (void)ds4_kvstore_find_text_prefix(&kc, prompt_a, 0, 2, 32768);
+    ds4_kvstore_mark_stale_at_load(&kc, prompt_a, 0, 2, 32768);
+
+    TEST_ASSERT(kv_file_stale_flag(dir, text_b) == 0);     /* other conv: untouched */
+    TEST_ASSERT(kv_file_stale_flag(dir, text_a_div) == 1); /* same conv: stale */
+
+    kv_cache_close(&kc);
+    char *p1 = test_kv_path_for_text(dir, text_b);
+    char *p2 = test_kv_path_for_text(dir, text_a_div);
+    unlink(p1);
+    unlink(p2);
+    free(p1);
+    free(p2);
+    rmdir(dir);
+}
+
+static void test_kv_cache_continued_step_aligns_to_prefill_chunk(void) {
+    kv_disk_cache kc = {0};
+    kc.enabled = true;
+    kc.opt = kv_cache_default_options();   /* anchor_step=8192, align=2048 */
+
+    /* Default chunk (4096) divides anchor_step (8192): grid stays 8192. */
+    kc.opt.prefill_chunk = 4096;
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 8192) == 8192);
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 12288) == 0);
+
+    /* A user-set anchor_step that is NOT a multiple of the chunk is rounded up
+     * to a chunk multiple so anchors still land (the original lcm gap). */
+    kc.opt.anchor_step = 10240;            /* not a multiple of 4096 */
+    kc.continued_last_store_tokens = 0;
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 10240) == 0);
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 12288) == 12288);
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 24576) == 24576);
+
+    /* Chunk unknown (0): align to boundary_align only. */
+    kc.opt.anchor_step = 8192;
+    kc.opt.prefill_chunk = 0;
+    kc.continued_last_store_tokens = 0;
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 8192) == 8192);
+}
+
+static void test_kv_cache_max_conversations_retires_lru(void) {
+    char tmpl[] = "/tmp/ds4-kv-maxconv-test.XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    TEST_ASSERT(dir != NULL);
+    if (!dir) return;
+
+    const char *t1 = "conv one text";
+    const char *t2 = "conv two text";
+    const char *t3 = "conv three text";
+    const uint64_t now = (uint64_t)time(NULL);
+    const uint64_t c1 = ds4_kvstore_compute_conv_id(t1, strlen(t1), 0);
+    const uint64_t c2 = ds4_kvstore_compute_conv_id(t2, strlen(t2), 0);
+    const uint64_t c3 = ds4_kvstore_compute_conv_id(t3, strlen(t3), 0);
+    TEST_ASSERT(c1 != c2 && c2 != c3 && c1 != c3);
+    test_kv_conv_stub_file(dir, t1, c1, 0, KV_REASON_COLD, 8192, 0, now - 300, 64);
+    test_kv_conv_stub_file(dir, t2, c2, 0, KV_REASON_COLD, 8192, 0, now - 200, 64);
+    test_kv_conv_stub_file(dir, t3, c3, 0, KV_REASON_COLD, 8192, 0, now - 100, 64);
+
+    kv_disk_cache kc = {0};
+    kc.enabled = true;
+    kc.dir = xstrdup(dir);
+    kc.opt = kv_cache_default_options();
+    kc.opt.max_conversations = 1;          /* keep at most one non-active conv */
+    kc.budget_bytes = 1ull << 40;          /* budget is not the pressure here */
+
+    ds4_kvstore_eviction_context incoming = {0};
+    incoming.text = t3;                    /* active conversation = c3 */
+    incoming.text_len = strlen(t3);
+    incoming.model_id = 0;
+    incoming.quant_bits = 2;
+    incoming.ctx_size = 32768;
+    ds4_kvstore_evict(&kc, NULL, 0, &incoming);
+
+    TEST_ASSERT(kv_file_exists(dir, t1) == false); /* LRU (oldest) retired */
+    TEST_ASSERT(kv_file_exists(dir, t2) == true);  /* the one non-active kept */
+    TEST_ASSERT(kv_file_exists(dir, t3) == true);  /* active kept */
+
+    kv_cache_close(&kc);
+    char *p1 = test_kv_path_for_text(dir, t1);
+    char *p2 = test_kv_path_for_text(dir, t2);
+    char *p3 = test_kv_path_for_text(dir, t3);
+    unlink(p1); unlink(p2); unlink(p3);
+    free(p1); free(p2); free(p3);
+    rmdir(dir);
+}
+
+static void test_kv_cache_lru_uses_last_activity_not_creation(void) {
+    /* M-1: a conversation's LRU rank is its MOST-recent touch (max last_used),
+     * not its oldest anchor's creation time.  Conv A has an old small anchor plus
+     * a recently-used frontier, so it is more recent than conv B (a single
+     * medium-aged anchor) and must survive when one of them is retired.  Under
+     * the old min(last_used) rule A's rank would pin to its old anchor and A
+     * would be retired instead — this test fails under that logic. */
+    char tmpl[] = "/tmp/ds4-kv-lru-recency-test.XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    TEST_ASSERT(dir != NULL);
+    if (!dir) return;
+
+    const char *a_old = "conv A old small anchor";
+    const char *a_new = "conv A recent frontier anchor";
+    const char *b_mid = "conv B medium anchor";
+    const char *active = "conv C active prompt";
+    const uint64_t now = (uint64_t)time(NULL);
+    const uint64_t cA = ds4_kvstore_compute_conv_id(a_old, strlen(a_old), 0);
+    const uint64_t cB = ds4_kvstore_compute_conv_id(b_mid, strlen(b_mid), 0);
+    TEST_ASSERT(cA != cB);
+    /* Two members of one conversation A (old + recent), one member of B. */
+    test_kv_conv_stub_file(dir, a_old, cA, 0, KV_REASON_COLD, 8192,  0, now - 1000, 64);
+    test_kv_conv_stub_file(dir, a_new, cA, 0, KV_REASON_COLD, 90000, 0, now - 10,   64);
+    test_kv_conv_stub_file(dir, b_mid, cB, 0, KV_REASON_COLD, 40000, 0, now - 500,  64);
+
+    kv_disk_cache kc = {0};
+    kc.enabled = true;
+    kc.dir = xstrdup(dir);
+    kc.opt = kv_cache_default_options();
+    kc.opt.max_conversations = 1;     /* keep active + at most one other conv */
+    kc.budget_bytes = 1ull << 40;     /* budget is not the pressure here */
+
+    ds4_kvstore_eviction_context incoming = {0};
+    incoming.text = active;           /* active conversation (distinct) */
+    incoming.text_len = strlen(active);
+    incoming.model_id = 0;
+    incoming.quant_bits = 2;
+    incoming.ctx_size = 32768;
+    ds4_kvstore_evict(&kc, NULL, 0, &incoming);
+
+    /* B (recency now-500) is older than A (recency now-10) -> B retired, A kept. */
+    TEST_ASSERT(kv_file_exists(dir, b_mid) == false);
+    TEST_ASSERT(kv_file_exists(dir, a_old) == true);
+    TEST_ASSERT(kv_file_exists(dir, a_new) == true);
+
+    kv_cache_close(&kc);
+    char *p1 = test_kv_path_for_text(dir, a_old);
+    char *p2 = test_kv_path_for_text(dir, a_new);
+    char *p3 = test_kv_path_for_text(dir, b_mid);
+    unlink(p1); unlink(p2); unlink(p3);
+    free(p1); free(p2); free(p3);
     rmdir(dir);
 }
 
@@ -18144,6 +18329,10 @@ static void ds4_server_unit_tests_run(void) {
     test_kv_cache_eviction_makes_room_before_store();
     test_kv_cache_eviction_ignores_oversize_incoming();
     test_kv_cache_stale_at_load();
+    test_kv_cache_stale_at_load_isolates_conversations();
+    test_kv_cache_continued_step_aligns_to_prefill_chunk();
+    test_kv_cache_max_conversations_retires_lru();
+    test_kv_cache_lru_uses_last_activity_not_creation();
     test_kv_cache_header_v2_roundtrip();
     test_kv_cache_compute_conv_id_stable();
     test_kv_cache_middle_anchor_per_window();

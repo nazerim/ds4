@@ -502,6 +502,10 @@ bool ds4_kvstore_read_header(FILE *fp, ds4_kvstore_entry *e,
         e->level = x[20];
         e->stale = x[21] != 0;
     } else {
+        /* v1 header: no conversation metadata.  conv_id==0 marks a legacy
+         * singleton that is always kept (never redundant) and exits only via
+         * the legacy-LRU path keyed on last_used, so bucket/level are unused and
+         * left at zero rather than derived. */
         e->conv_id = 0;
         e->model_fp = 0;
         e->bucket = 0;
@@ -673,11 +677,15 @@ static int kv_cache_find_redundant(ds4_kvstore *kc) {
 }
 
 /* LRU conversation (excluding the active one and legacy conv_id==0) whose
- * member count is >= min_count.  Returns 0 if none. */
+ * member count is >= min_count.  Returns 0 if none.  A conversation's recency is
+ * the MOST-recent touch among its members (max last_used); the least-recently-
+ * active conversation has the smallest such recency.  Using max (not min) stops
+ * a long-running conversation's old small anchor from pinning its rank to
+ * creation time and getting it halved/retired ahead of a genuinely idle one. */
 static uint64_t kv_cache_find_lru_conv(ds4_kvstore *kc, uint64_t active_conv,
                                        int min_count) {
     uint64_t best = 0;
-    int64_t oldest = INT64_MAX;
+    int64_t lru_recency = INT64_MAX;
     for (int i = 0; i < kc->len; i++) {
         uint64_t c = kc->entry[i].conv_id;
         if (c == 0 || c == active_conv) continue;
@@ -686,17 +694,17 @@ static uint64_t kv_cache_find_lru_conv(ds4_kvstore *kc, uint64_t active_conv,
             if (kc->entry[j].conv_id == c) { seen = true; break; }
         if (seen) continue;
         int cnt = 0;
-        int64_t conv_oldest = INT64_MAX;
+        int64_t conv_recency = 0;
         for (int j = 0; j < kc->len; j++) {
             if (kc->entry[j].conv_id != c) continue;
             cnt++;
             int64_t lu = (int64_t)(kc->entry[j].last_used ?
                                    kc->entry[j].last_used :
                                    kc->entry[j].created_at);
-            if (lu < conv_oldest) conv_oldest = lu;
+            if (lu > conv_recency) conv_recency = lu;
         }
         if (cnt < min_count) continue;
-        if (conv_oldest < oldest) { oldest = conv_oldest; best = c; }
+        if (conv_recency < lru_recency) { lru_recency = conv_recency; best = c; }
     }
     return best;
 }
@@ -718,15 +726,15 @@ static int64_t kv_cache_entry_last_used(const ds4_kvstore_entry *e) {
     return (int64_t)(e->last_used ? e->last_used : e->created_at);
 }
 
-/* Oldest last_used across a conversation's members. */
-static int64_t kv_cache_conv_oldest(ds4_kvstore *kc, uint64_t conv_id) {
-    int64_t oldest = INT64_MAX;
+/* Most-recent last_used across a conversation's members (its last activity). */
+static int64_t kv_cache_conv_recency(ds4_kvstore *kc, uint64_t conv_id) {
+    int64_t recency = 0;
     for (int i = 0; i < kc->len; i++) {
         if (kc->entry[i].conv_id != conv_id) continue;
         int64_t lu = kv_cache_entry_last_used(&kc->entry[i]);
-        if (lu < oldest) oldest = lu;
+        if (lu > recency) recency = lu;
     }
-    return oldest;
+    return recency;
 }
 
 /* Can halving this conversation still make a kept middle anchor redundant?
@@ -768,7 +776,9 @@ static int kv_cache_find_lru_legacy(ds4_kvstore *kc) {
 static void kv_cache_unlink_entry(ds4_kvstore *kc, int victim,
                                   uint64_t *total, const char *reason) {
     ds4_kvstore_entry e = kc->entry[victim];
-    if (unlink(e.path) == 0) {
+    bool freed = unlink(e.path) == 0;
+    if (!freed && errno == ENOENT) freed = true; /* already gone: space is free */
+    if (freed) {
         kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
                 "%s: kv cache evicted reason=%s conv=%llu level=%u tokens=%u hits=%u size=%.2f MiB file=%s",
                 kv_log_name(kc), reason,
@@ -779,7 +789,13 @@ static void kv_cache_unlink_entry(ds4_kvstore *kc, int victim,
         if (*total >= e.file_size) *total -= e.file_size;
         else *total = 0;
     } else {
-        *total = 0;
+        /* Could not remove the file (permissions, etc.).  Do NOT zero the whole
+         * budget total — that aborted the pass even when far over budget.  Drop
+         * the in-memory entry so this pass does not re-pick it (a directory
+         * refresh re-adds it); the file stays on disk until then. */
+        kv_logf(kc, DS4_KVSTORE_LOG_WARNING,
+                "%s: kv cache failed to evict reason=%s file=%s: %s (left on disk)",
+                kv_log_name(kc), reason, e.path ? e.path : "?", strerror(errno));
     }
     ds4_kvstore_entry_free(&e);
     memmove(kc->entry + victim, kc->entry + victim + 1,
@@ -849,6 +865,10 @@ void ds4_kvstore_evict(ds4_kvstore *kc, const ds4_tokens *live,
             bool bumped = false;
             for (int i = 0; i < kc->len; i++) {
                 if (kc->entry[i].conv_id != conv) continue;
+                /* Small-dense anchors are kept regardless of level; bumping them
+                 * would only waste a header rewrite. */
+                if (kc->entry[i].tokens <= (uint32_t)kc->opt.small_dense_tokens)
+                    continue;
                 if (kc->entry[i].level < 255) {
                     kc->entry[i].level++;
                     bumped = true;
@@ -866,12 +886,12 @@ void ds4_kvstore_evict(ds4_kvstore *kc, const ds4_tokens *live,
          * older.  Legacy conv_id==0 files are never redundant, but they must
          * still yield under budget pressure (migration one-time cost). */
         conv = kv_cache_find_lru_conv(kc, active_conv, 1);
-        int64_t conv_lu = conv ? kv_cache_conv_oldest(kc, conv) : INT64_MAX;
+        int64_t conv_recency = conv ? kv_cache_conv_recency(kc, conv) : INT64_MAX;
         int legacy = kv_cache_find_lru_legacy(kc);
         int64_t legacy_lu = legacy >= 0 ?
             kv_cache_entry_last_used(&kc->entry[legacy]) : INT64_MAX;
         if (conv == 0 && legacy < 0) break; /* PHASE D: active at floor -> stop */
-        if (legacy >= 0 && (conv == 0 || legacy_lu <= conv_lu)) {
+        if (legacy >= 0 && (conv == 0 || legacy_lu <= conv_recency)) {
             kv_cache_unlink_entry(kc, legacy, &total, "legacy-lru");
             continue;
         }
@@ -879,6 +899,8 @@ void ds4_kvstore_evict(ds4_kvstore *kc, const ds4_tokens *live,
         continue;
     }
 }
+
+static int kv_cache_continued_step(const ds4_kvstore *kc);
 
 bool ds4_kvstore_open(ds4_kvstore *kc, const char *dir, uint64_t budget_mb,
                       bool reject_different_quant, uint64_t model_fp,
@@ -904,6 +926,24 @@ bool ds4_kvstore_open(ds4_kvstore *kc, const char *dir, uint64_t budget_mb,
     kc->reject_different_quant = reject_different_quant;
     kc->model_fp = model_fp;
     kc->opt = opt;
+    if (kc->opt.anchor_step < 0) {
+        kv_logf(kc, DS4_KVSTORE_LOG_WARNING,
+                "%s: kv cache anchor_step=%d is negative; using continued_interval fallback",
+                kv_log_name(kc), kc->opt.anchor_step);
+        kc->opt.anchor_step = 0;
+    }
+    if (kc->opt.anchor_step == 0)
+        kv_logf(kc, DS4_KVSTORE_LOG_WARNING,
+                "%s: kv cache anchor_step=0; continued checkpoints fall back to continued_interval spacing (dense-small anchors may not land)",
+                kv_log_name(kc));
+    if (kc->opt.mid_spacing_tokens == 0)
+        kv_logf(kc, DS4_KVSTORE_LOG_WARNING,
+                "%s: kv cache mid_spacing=0; all large-middle anchors are treated as redundant",
+                kv_log_name(kc));
+    if (kc->opt.tail_anchors == 0)
+        kv_logf(kc, DS4_KVSTORE_LOG_WARNING,
+                "%s: kv cache tail_anchors=0; only the frontier anchor is kept dense",
+                kv_log_name(kc));
     ds4_kvstore_evict(kc, NULL, 0, NULL);
     kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
             "%s: KV disk cache %s (budget=%llu MiB, cross-quant=%s, min=%d, cold_max=%d, continued=%d, trim=%d, align=%d, hit_half_life=%llus)",
@@ -918,9 +958,11 @@ bool ds4_kvstore_open(ds4_kvstore *kc, const char *dir, uint64_t budget_mb,
             kc->opt.boundary_align_tokens,
             (unsigned long long)DS4_KVSTORE_HIT_HALF_LIFE_SECONDS);
     kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
-            "%s: KV retention anchor_step=%d small_dense=%d tail=%d mid_spacing=%d min_anchors=%d max_conversations=%d model_fp=%llu",
+            "%s: KV retention anchor_step=%d continued_step=%d prefill_chunk=%d small_dense=%d tail=%d mid_spacing=%d min_anchors=%d max_conversations=%d model_fp=%llu",
             kv_log_name(kc),
             kc->opt.anchor_step,
+            kv_cache_continued_step(kc),
+            kc->opt.prefill_chunk,
             kc->opt.small_dense_tokens,
             kc->opt.tail_anchors,
             kc->opt.mid_spacing_tokens,
@@ -1013,12 +1055,37 @@ int ds4_kvstore_chat_anchor_pos(const ds4_kvstore *kc,
     return last_user >= kc->opt.min_tokens ? last_user : -1;
 }
 
+static int kv_lcm(int a, int b) {
+    if (a <= 0) return b > 0 ? b : 0;
+    if (b <= 0) return a;
+    int x = a, y = b;
+    while (y) { int t = x % y; x = y; y = t; }
+    long long l = (long long)(a / x) * b;
+    return l > INT_MAX ? INT_MAX : (int)l;
+}
+
 static int kv_cache_continued_step(const ds4_kvstore *kc) {
     if (!kc->enabled || kc->opt.continued_interval_tokens <= 0) return 0;
-    int step = kc->opt.continued_interval_tokens;
-    const int align = kc->opt.boundary_align_tokens;
+    /* Continued checkpoints are the retention anchors, so write them on the
+     * anchor_step grid instead of the legacy continued_interval; this populates
+     * the dense-small ladder (<= small_dense).  continued_interval stays the
+     * enable gate and the fallback when anchor_step is unset. */
+    int step = kc->opt.anchor_step;
+    if (step <= 0) step = kc->opt.continued_interval_tokens;
+    /* The store only fires when live_tokens % step == 0 AND live_tokens sits on
+     * a prefill-chunk boundary, so step MUST be a multiple of the chunk or the
+     * effective spacing silently becomes lcm(step, chunk) — the original bug
+     * (step 10240, chunk 4096 -> anchors every 20480, none <= small_dense).
+     * Align to lcm(boundary_align, prefill_chunk); anchor_step (8192) is already
+     * a multiple of every default chunk, and this keeps user-set values safe. */
+    int align = kc->opt.boundary_align_tokens;
+    if (kc->opt.prefill_chunk > 0) align = kv_lcm(align, kc->opt.prefill_chunk);
     if (align > 0) {
-        step = ((step + align - 1) / align) * align;
+        /* Round up in wide arithmetic: align can reach INT_MAX (kv_lcm caps it),
+         * so step + align - 1 would overflow a signed int (UB). */
+        long long s = (long long)step;
+        s = ((s + align - 1) / align) * align;
+        step = s > INT_MAX ? INT_MAX : (int)s;
         if (step <= 0) step = align;
     }
     return step;
@@ -1376,6 +1443,15 @@ bool ds4_kvstore_store_live_prefix_text(ds4_kvstore *kc,
     const uint64_t now = (uint64_t)time(NULL);
     const uint64_t conv_id =
         ds4_kvstore_compute_conv_id(text, text_len, kc->model_fp);
+    /* Inherit the conversation's current halving level so a new anchor stays
+     * consistent with the keep-set windowing of its siblings; a fresh level=0
+     * anchor in a level-L conversation would mix window sizes. */
+    uint8_t level = 0;
+    if (conv_id != 0) {
+        for (int i = 0; i < kc->len; i++)
+            if (kc->entry[i].conv_id == conv_id && kc->entry[i].level > level)
+                level = kc->entry[i].level;
+    }
     const uint32_t bucket = kc->opt.anchor_step > 0
         ? (uint32_t)(store_tokens.len / (uint32_t)kc->opt.anchor_step)
         : 0u;
@@ -1387,7 +1463,7 @@ bool ds4_kvstore_store_live_prefix_text(ds4_kvstore *kc,
                                (uint32_t)store_tokens.len, 0,
                                (uint32_t)ds4_session_ctx(session),
                                now, now, payload_bytes,
-                               conv_id, kc->model_fp, bucket, 0, false);
+                               conv_id, kc->model_fp, bucket, level, false);
     uint8_t tb[4];
     ds4_kvstore_le_put32(tb, (uint32_t)text_len);
     uint64_t trailer_bytes = 0;
@@ -1497,15 +1573,19 @@ bool ds4_kvstore_maybe_store_continued(ds4_kvstore *kc,
     return false;
 }
 
-int ds4_kvstore_find_text_prefix(ds4_kvstore *kc, const char *prompt_text,
-                                 int model_id, int quant_bits, int ctx_size) {
+static int kv_cache_find_text_prefix_skip(ds4_kvstore *kc, const char *prompt_text,
+                                          int model_id, int quant_bits, int ctx_size,
+                                          const int *skip, int skip_len) {
     if (!prompt_text) return -1;
     const size_t prompt_bytes = strlen(prompt_text);
-    kv_cache_refresh(kc);
     int best = -1;
     for (int i = 0; i < kc->len; i++) {
         ds4_kvstore_entry *e = &kc->entry[i];
-        if (e->text_bytes > prompt_bytes || e->text_bytes > SIZE_MAX) continue;
+        bool skipped = false;
+        for (int s = 0; s < skip_len; s++)
+            if (skip[s] == i) { skipped = true; break; }
+        if (skipped) continue;
+        if (e->text_bytes > prompt_bytes) continue;
         if ((int)e->tokens < kc->opt.min_tokens) continue;
         if (e->model_id != (uint8_t)model_id) continue;
         if (e->model_fp && e->model_fp != kc->model_fp) continue;
@@ -1523,19 +1603,39 @@ int ds4_kvstore_find_text_prefix(ds4_kvstore *kc, const char *prompt_text,
     return best;
 }
 
+int ds4_kvstore_find_text_prefix(ds4_kvstore *kc, const char *prompt_text,
+                                 int model_id, int quant_bits, int ctx_size) {
+    kv_cache_refresh(kc);
+    return kv_cache_find_text_prefix_skip(kc, prompt_text, model_id, quant_bits,
+                                          ctx_size, NULL, 0);
+}
+
 /* Mark stale at load time: for every candidate in the current namespace whose
  * text is NOT a byte-prefix of the incoming prompt, flag it stale for this
  * prompt and persist.  This is agnostic to compaction vs tool-call — the prefix
- * test does the work.  Cheap: one SHA1 over the prefix bytes, no payload reads.
- * A checkpoint that fails to prefix a forward-moving prompt can never match a
- * later one, so evicting it first is safe. */
+ * test does the work.  Cheap: one SHA1 over the prefix bytes, no payload reads,
+ * and (via the conv_id filter below) scoped to the active conversation's own
+ * anchors rather than every checkpoint in the namespace.  A checkpoint that
+ * fails to prefix a forward-moving prompt can never match a later one, so
+ * evicting it first is safe. */
 void ds4_kvstore_mark_stale_at_load(ds4_kvstore *kc, const char *prompt_text,
                                     int model_id, int quant_bits, int ctx_size) {
     if (!kc->enabled || !prompt_text) return;
     const size_t prompt_bytes = strlen(prompt_text);
     const uint64_t now = (uint64_t)time(NULL);
+    /* Only the ACTIVE conversation's own anchors can be stale for this prompt.
+     * In batched mode many conversations share one namespace; an anchor of
+     * conversation B that does not prefix conversation A's prompt is still valid
+     * for B's next turn, so it must NOT be poisoned when A loads.  conv_id==0
+     * legacy singletons have no lineage and stay in scope.  (conv_id hashes the
+     * first CONV_ID_HEAD_BYTES bytes; any candidate that survives the min_tokens
+     * filter below is long enough to hash the full head window, so a same-lineage
+     * anchor's conv_id matches active_conv.) */
+    const uint64_t active_conv =
+        ds4_kvstore_compute_conv_id(prompt_text, prompt_bytes, kc->model_fp);
     for (int i = 0; i < kc->len; i++) {
         ds4_kvstore_entry *e = &kc->entry[i];
+        if (e->conv_id != 0 && e->conv_id != active_conv) continue;
         if (e->model_fp && e->model_fp != kc->model_fp) continue;
         if (e->model_id != (uint8_t)model_id) continue;
         if (kc->reject_different_quant &&
@@ -1560,29 +1660,21 @@ void ds4_kvstore_mark_stale_at_load(ds4_kvstore *kc, const char *prompt_text,
     }
 }
 
-int ds4_kvstore_try_load_text(ds4_kvstore *kc,
-                              ds4_engine *engine,
-                              ds4_session *session,
-                              const char *prompt_text,
-                              ds4_tokens *effective_prompt,
-                              ds4_kvstore_load_result *result,
-                              const ds4_kvstore_trailer_hooks *hooks,
-                              bool responses_protocol) {
-    if (result) memset(result, 0, sizeof(*result));
-    if (effective_prompt) effective_prompt->len = 0;
-    if (!kc->enabled || !prompt_text) return 0;
-    const int quant_bits = ds4_engine_routed_quant_bits(engine);
-    if (quant_bits != 2 && quant_bits != 4) return 0;
+/* Attempt to load one candidate checkpoint (entry idx).  Returns the loaded
+ * token count (0 on failure).  Sets *retryable when the failure happened BEFORE
+ * the session payload was touched (header/text-hash/prefix mismatch), so the
+ * caller may safely fall back to the next-largest candidate.  Once the payload
+ * load is attempted the session is mutated, so any failure there is terminal
+ * (retryable=false) to avoid replaying onto partially-restored state. */
+static int kv_cache_try_load_one(ds4_kvstore *kc, ds4_engine *engine,
+                                 ds4_session *session, const char *prompt_text,
+                                 size_t prompt_bytes, int idx,
+                                 ds4_tokens *effective_prompt,
+                                 ds4_kvstore_load_result *result,
+                                 const ds4_kvstore_trailer_hooks *hooks,
+                                 bool responses_protocol, bool *retryable) {
+    *retryable = false;
     const int model_id = ds4_engine_model_id(engine);
-    const size_t prompt_bytes = strlen(prompt_text);
-    int idx = ds4_kvstore_find_text_prefix(kc, prompt_text, model_id, quant_bits,
-                                           ds4_session_ctx(session));
-    if (idx < 0) return 0;
-    /* Flag same-namespace checkpoints that no longer prefix this prompt; they
-     * are evicted first on the next budget pass. */
-    ds4_kvstore_mark_stale_at_load(kc, prompt_text, model_id, quant_bits,
-                                   ds4_session_ctx(session));
-
     ds4_kvstore_entry e = kc->entry[idx];
     char *path = kv_xstrdup(e.path);
     const double load_t0 = kv_now_sec();
@@ -1623,10 +1715,26 @@ int ds4_kvstore_try_load_text(ds4_kvstore *kc,
             }
         }
     }
+    if (!header_ok) {
+        /* Session untouched: a larger corrupt/mismatched checkpoint must not
+         * shadow a valid smaller one — let the caller try the next candidate. */
+        *retryable = true;
+        kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
+                "%s: kv cache load failed%s%s %s: %s load=%.1f ms",
+                kv_log_name(kc),
+                responses_protocol ? " " : "",
+                responses_protocol ? "RESPPROTO" : "",
+                path, fail_reason, (kv_now_sec() - load_t0) * 1000.0);
+        fclose(fp);
+        free(cached_text);
+        free(path);
+        return 0;
+    }
+
     char err[160] = {0};
     int loaded = 0;
-    if (header_ok &&
-        ds4_session_load_payload(session, fp, hdr.payload_bytes, err, sizeof(err)) == 0)
+    if (ds4_session_load_payload(session, fp, hdr.payload_bytes, err,
+                                 sizeof(err)) == 0)
     {
         const ds4_tokens *loaded_tokens = ds4_session_tokens(session);
         if (loaded_tokens && loaded_tokens->len == (int)hdr.tokens) {
@@ -1654,15 +1762,13 @@ int ds4_kvstore_try_load_text(ds4_kvstore *kc,
                     path);
         }
     } else {
-        if (header_ok) ds4_session_invalidate(session);
+        ds4_session_invalidate(session);
         kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
                 "%s: kv cache load failed%s%s %s: %s load=%.1f ms",
                 kv_log_name(kc),
                 responses_protocol ? " " : "",
                 responses_protocol ? "RESPPROTO" : "",
-                path,
-                header_ok ? err : fail_reason,
-                (kv_now_sec() - load_t0) * 1000.0);
+                path, err, (kv_now_sec() - load_t0) * 1000.0);
     }
     fclose(fp);
 
@@ -1702,6 +1808,54 @@ int ds4_kvstore_try_load_text(ds4_kvstore *kc,
     }
     free(cached_text);
     free(path);
+    return loaded;
+}
+
+int ds4_kvstore_try_load_text(ds4_kvstore *kc,
+                              ds4_engine *engine,
+                              ds4_session *session,
+                              const char *prompt_text,
+                              ds4_tokens *effective_prompt,
+                              ds4_kvstore_load_result *result,
+                              const ds4_kvstore_trailer_hooks *hooks,
+                              bool responses_protocol) {
+    if (result) memset(result, 0, sizeof(*result));
+    if (effective_prompt) effective_prompt->len = 0;
+    if (!kc->enabled || !prompt_text) return 0;
+    const int quant_bits = ds4_engine_routed_quant_bits(engine);
+    if (quant_bits != 2 && quant_bits != 4) return 0;
+    const int model_id = ds4_engine_model_id(engine);
+    const size_t prompt_bytes = strlen(prompt_text);
+    const int ctx_size = ds4_session_ctx(session);
+
+    kv_cache_refresh(kc);
+    /* Flag same-namespace checkpoints that no longer prefix this prompt; they
+     * are evicted first on the next budget pass. */
+    ds4_kvstore_mark_stale_at_load(kc, prompt_text, model_id, quant_bits, ctx_size);
+
+    /* Try candidates largest-first; if the selected checkpoint fails pre-payload
+     * verification (corrupt body, hash/prefix mismatch), fall back to the next
+     * largest valid candidate instead of forcing a full prefill. */
+    int skip[16];
+    int skip_len = 0;
+    int loaded = 0;
+    for (;;) {
+        const int idx = kv_cache_find_text_prefix_skip(kc, prompt_text, model_id,
+                                                       quant_bits, ctx_size,
+                                                       skip, skip_len);
+        if (idx < 0) break;
+        bool retryable = false;
+        loaded = kv_cache_try_load_one(kc, engine, session, prompt_text,
+                                       prompt_bytes, idx, effective_prompt,
+                                       result, hooks, responses_protocol,
+                                       &retryable);
+        if (loaded > 0 || !retryable) break;
+        if (effective_prompt) effective_prompt->len = 0;
+        if (skip_len < (int)(sizeof(skip) / sizeof(skip[0])))
+            skip[skip_len++] = idx;
+        else
+            break;
+    }
     return loaded;
 }
 

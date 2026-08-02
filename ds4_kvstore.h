@@ -86,6 +86,9 @@ typedef struct {
     int mid_spacing_tokens;     /* large-middle spacing at level 0, default 131072 */
     int min_anchors;            /* retire a conversation when ladder <= this, default 4 */
     int max_conversations;      /* cap distinct conv_ids; retire LRU over the cap, 0=unlimited */
+    int prefill_chunk;          /* engine prefill chunk in tokens; the continued-store
+                                 * grid is aligned to it so anchors actually land.
+                                 * 0 = unknown (align to boundary_align only). */
 } ds4_kvstore_options;
 
 typedef struct {
@@ -94,6 +97,9 @@ typedef struct {
     uint64_t budget_bytes;
     bool reject_different_quant;
     ds4_kvstore_options opt;
+    /* Continued-store watermark for the standalone ds4_kvstore_maybe_store_continued
+     * API.  The HTTP server tracks this per-slot (server_slot.continued_last_store_tokens)
+     * and overrides it through a view, so this field is not used on the server path. */
     int continued_last_store_tokens;
     ds4_kvstore_entry *entry;
     int len;
