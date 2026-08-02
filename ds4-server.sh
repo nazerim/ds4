@@ -8,6 +8,9 @@ SERVER_CMD="./ds4-server"
 PID_FILE="./ds4-server.pid"
 CTX=256000
 PORT=8001
+# Bind address. Default 127.0.0.1 (loopback). Override with HOST env, e.g.
+# HOST=0.0.0.0 or HOST=192.168.1.20 to expose the server on the LAN.
+HOST="${HOST:-127.0.0.1}"
 KV_DIR="/tmp/ds4-kv"
 KV_SIZE=32768
 LOG_DIR="./log"
@@ -119,6 +122,7 @@ start_server() {
     ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"} \
     --ctx "$CTX" \
     --tokens "$TOKENS" \
+    --host "$HOST" \
     --port "$PORT" \
     --kv-disk-dir "$KV_DIR" \
     --kv-disk-space-mb "$KV_SIZE" \
@@ -271,6 +275,9 @@ case "${1:-}" in
     echo ""
     echo "Environment:"
     echo "  DEBUG=1             - Enable verbose output"
+    echo "  HOST=ADDR           - Bind address (default: 127.0.0.1). Use 0.0.0.0 or a"
+    echo "                        LAN IP like 192.168.1.20 to expose the server"
+    echo "                        on the network for remote clients."
     exit 1
     ;;
 esac
