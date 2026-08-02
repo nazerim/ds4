@@ -783,51 +783,121 @@ The think-tool recovery path injects tokens into the live session that diverge f
 
 ---
 
-# Converting the HF DSpark Drafter to ds4's `mtp.` Naming Convention
+# DSpark Speculative Decoding — Drafter Selection & Setup
 
-**Status:** Done & verified (0731 Q2_K-Q8_0 drafter, Aug 2026)
+**Status:** Working with the official support GGUF (Aug 2026)
 
-## Why
+## TL;DR — use the official support GGUF
 
-ds4 detects and binds the MTP draft model **by tensor name**. It looks for
-`mtp.<stage>.<suffix>` (`ds4_tensor_mtp_stage`, `ds4.c:2544`; `tensor_by_mtp_stage_suffix`,
-`ds4.c:4223`) and expects final-stage heads as `mtp.<final>.norm`, `mtp.<final>.hc_head_*`,
-`mtp.<final>.markov_head.markov_w1/w2`, `mtp.<final>.confidence_head.proj`, plus
-`mtp.0.main_proj`/`main_norm` (`dspark_bind_block`, `ds4.c:6545`).
-
-The HF drafter uses the **`dspark.<stage>.`** prefix and **flattened** final-head names
-(`dspark.markov_w1.weight`, `dspark.confidence_head.weight`). With no `mtp.*` tensors,
-`support_model_detect` (`ds4.c:2787`) reports `stages=0` → the model is `detected=none`
-and MTP is silently disabled.
-
-The MXFP4 variant is unusable regardless: `ds4`'s `gguf_types[]` table (`ds4.c:2008`)
-only supports GGUF types 0–30, and MXFP4 is type 39 → "unsupported GGUF type 39".
-
-## The fix: rename tensors, keep bytes
-
-The stage-block tensors already match ds4's expected 24-per-stage suffixes — only the
-prefix (`dspark.` → `mtp.`) and the flattened final-head names differ. So we rewrite the
-GGUF tensor directory **in place** (header rebuild) and append the tensor payload unchanged.
-
-## Exact steps (0731 Q2_K-Q8_0)
+DSpark drafting works with antirez's official support model
+(`DeepSeek-V4-Flash-DSpark-support.gguf`, ~6 GB, from `antirez/deepseek-v4-gguf`
+via `./download_model.sh dspark-support`). It loads with `invalid=0` **with no
+tensor renaming** and, against the `0731` mixed-quant main model, drafts at
+**~89% acceptance** and is net-profitable. `ds4-server.sh` points
+`MTP_PATHS["0731"]` at it:
 
 ```sh
-# 1. Convert the HF drafter
-python3 gguf-tools/rename-dspark-tensors.py \
-  "/Users/naz/.omlx/models/alessandrobologna/DeepSeek-V4-Flash-0731-DSpark-Drafter-GGUF/DeepSeek-V4-Flash-0731-DSpark-Drafter-Q2_K-Q8_0.gguf"
-
-#    Writes .../DeepSeek-V4-Flash-0731-DSpark-Drafter-Q2_K-Q8_0-ds4.gguf
-#    (input is left untouched)
-
-# 2. Point the server at the converted file, then start with MTP
-#    (ds4-server.sh already sets MTP_PATHS to the -ds4.gguf for key "0731")
 ./ds4-server.sh start-0731-mtp
 ```
 
-Expected on success: the MTP model reports `DSpark support model detected` (no
-`detected=none`, no `tensor points outside GGUF file`).
+The third-party HF-converted drafter
+(`alessandrobologna/DeepSeek-V4-Flash-0731-DSpark-Drafter-GGUF`) is **not
+usable**: even after renaming makes it *load* (`invalid=0`), it scores **0%
+first-token acceptance** (`miss_first == cycles`) — its predictions do not match
+the target model. See "HF conversion (reference only)" below.
 
-## Renames applied (final stage = max stage, here 2)
+## How DSpark is enabled (and the gotchas)
+
+Invocation is `--mtp <support.gguf> --dspark --temp 0` (README §DSpark). Notes:
+
+- **Greedy only.** Sampled decoding ignores DSpark proposals. The server's
+  speculative gate (`ds4_server.c:11554`) requires `temperature <= 0`.
+- **`--mtp-draft` / `--mtp-margin` are legacy-MTP flags.** For DSpark the block
+  size comes from the support model metadata (`block=5`); `mtp_ready` is *not*
+  set for DSpark (`ds4.c:55886`), so `ds4_engine_mtp_draft_tokens` returns the
+  block size regardless of `--mtp-draft` (`ds4.c:49357`). Passing them is harmless.
+- **Tool-less chat disables speculation.** For `REQ_CHAT && !has_tools` the
+  server sets `dsml_token_id` to suppress raw DSML markup (`ds4_server.c:11472`),
+  which fails the gate's `dsml_token_id < 0`. To observe drafting, use
+  `/v1/completions` (or chat *with* tools).
+- **`--quality` / `--dspark-strict` force target-only decode** (no speculation).
+- **Confidence threshold:** README default is `0.9`; this fork uses `0.6`
+  (`DSPARK_CONFIDENCE`). `--dspark-confidence 0` forces fixed 5-token blocks
+  (diagnostic only).
+
+## Diagnosing draft acceptance
+
+Run with `DS4_DSPARK_STATS=1` (optionally `DS4_DSPARK_SPEC_LOG=1`, and
+`DS4_DSPARK_SCHEDULER=0` to disable the adaptive scheduler). Stats print at
+session teardown (`ds4.c:56682`). Key fields:
+
+| Field | Meaning |
+|---|---|
+| `cycles` | speculative cycles entered |
+| `proposed` / `accepted_draft` | draft tokens proposed / accepted |
+| `accept_rate` | accepted / proposed |
+| `miss_first` | cycles where the *first* draft token was wrong |
+| `no_draft` | cycles that produced no draft |
+| `net_saved` | ms saved net of drafter overhead (positive = profitable) |
+
+A healthy drafter has high `accept_rate` and low `miss_first`. **`miss_first`
+≈ `cycles` (0% first-token accuracy) means the drafter is incompatible with the
+target model**, even if it loads with `invalid=0`.
+
+### Measured (0731 main model, greedy `/v1/completions`)
+
+| Drafter | accept_rate | miss_first | net_saved | verdict |
+|---|---|---|---|---|
+| official `DeepSeek-V4-Flash-DSpark-support.gguf` | 89.25% | 2 / 225 | +394 ms | works |
+| HF-converted `...0731-DSpark-Drafter-Q2_K-Q8_0-ds4.gguf` (forced blocks) | 0.00% | 399 / 399 | −3165 ms | incompatible |
+
+Aggregate token-throughput gains on a *thinking* workload are modest (~3%) — the
+README warns low-yield/thinking prompts benefit least; predictable text (e.g.
+code) benefits most. The acceptance rate is the correctness signal.
+
+---
+
+## HF conversion (reference only — loads but does not function)
+
+> **Do not use this path for inference.** Kept for reference. The rename makes
+> the HF drafter *load* (`invalid=0`) but it still scores 0% first-token
+> acceptance, so something beyond naming/dims (weight layout, quantization, or
+> model provenance) is incompatible with the target model. Use the official
+> support GGUF above instead.
+
+### Why a rename was needed at all
+
+ds4 detects and binds the MTP draft model **by tensor name**. It looks for
+`mtp.<stage>.<suffix>` (`ds4_tensor_mtp_stage`, `ds4.c:2544`;
+`tensor_by_mtp_stage_suffix`, `ds4.c:4223`) and expects final-stage heads as
+`mtp.<final>.norm`, `mtp.<final>.hc_head_*`, `mtp.<final>.markov_head.markov_w1/w2`,
+`mtp.<final>.confidence_head.proj`, plus `mtp.0.main_proj`/`main_norm`
+(`dspark_bind_block`, `ds4.c:6545`).
+
+The HF drafter uses the **`dspark.<stage>.`** prefix and **flattened** final-head
+names (`dspark.markov_w1.weight`, `dspark.confidence_head.weight`). With no
+`mtp.*` tensors, `support_model_detect` (`ds4.c:2787`) reports `stages=0` →
+`detected=none` and MTP is silently disabled.
+
+The MXFP4 variant is unusable regardless: `ds4`'s `gguf_types[]` table
+(`ds4.c:2008`) only supports GGUF types 0–30, and MXFP4 is type 39.
+
+### The rename: rewrite names, keep bytes
+
+The stage-block tensors already match ds4's expected 24-per-stage suffixes — only
+the prefix (`dspark.` → `mtp.`) and the flattened final-head names differ. The
+tool rewrites the GGUF tensor directory (header rebuild) and appends the payload
+unchanged. One extra fix: HF stores the final confidence projection squeezed to
+**1-D `[N_EMBD+markov_rank]`**, but ds4 binds it as a **2-D `[N_EMBD+markov_rank, 1]`**
+matrix (`ds4.c:5354`, runtime check `ds4.c:32000`). The bytes are identical, so
+the tool promotes that one tensor's shape (`ndim` 1→2). Without it the model loads
+with `invalid=1` and the confidence probe is silently disabled.
+
+```sh
+python3 gguf-tools/rename-dspark-tensors.py INPUT.gguf   # writes INPUT-ds4.gguf
+```
+
+### Renames applied (final stage = max stage, here 2)
 
 | HF name | ds4 name |
 |---|---|
@@ -840,46 +910,22 @@ Expected on success: the MTP model reports `DSpark support model detected` (no
 | `dspark.hc_head_scale.weight` | `mtp.<final>.hc_head_scale.weight` |
 | `dspark.markov_w1.weight` | `mtp.<final>.markov_head.markov_w1.weight` |
 | `dspark.markov_w2.weight` | `mtp.<final>.markov_head.markov_w2.weight` |
-| `dspark.confidence_head.weight` | `mtp.<final>.confidence_head.proj.weight` |
+| `dspark.confidence_head.weight` | `mtp.<final>.confidence_head.proj.weight` (1-D→2-D) |
 
-## Layout invariants (why the tool is correct)
+### GGUF layout invariants (why the tool is byte-safe)
 
-- GGUF v3 header: magic(4) version(4) `n_tensors`(u64) `n_kv`(u64), then KVs, then the
-  tensor directory. **String lengths are u64.** Value types per `ds4.c:1986`
-  (`GGUF_VALUE_*`): array = item_type(u32) + count(u64) + items.
-- ds4 aligns tensor-data start to `general.alignment` (KV) or 32 (`ds4.c:2346`, `2405`).
-  The tool reads that KV; this drafter has none → 32.
-- The payload is copied **from `old_tdp` (the aligned tensor-data start)** to `new_tdp`,
-  skipping the old header padding. Because the relative layout is unchanged, **rel
-  offsets are written unchanged** — they are relative to the aligned tensor-data start,
-  not to absolute file offsets.
+- GGUF v3 header: magic(4) version(4) `n_tensors`(u64) `n_kv`(u64), then KVs, then
+  the tensor directory. **String lengths are u64.** Value types per `ds4.c:1986`:
+  array = item_type(u32) + count(u64) + items.
+- ds4 aligns tensor-data start to `general.alignment` (KV) or 32 (`ds4.c:2346`).
+- The payload is copied **from the aligned tensor-data start**, so **rel offsets
+  are written unchanged** (they are relative to that start, not absolute).
 
-### Two pitfalls hit during development
-
-1. **KV value re-encoding.** When rebuilding the header, string KV values need the u64
-   length prefix, and array values need item_type(u32)+count(u64) — not just the raw bytes.
-2. **rel-offset adjustment sign.** The first attempt "preserved" absolute offsets by adding
-   `(old_tdp - new_tdp)`. That is **wrong**: it shifts every tensor 192 bytes past its actual
-   payload, so the last tensor (which ends exactly at original EOF) overruns the
-   192-byte-shorter file → `ds4: tensor points outside GGUF file`. Correct behavior: leave
-   rel offsets untouched.
-
-## Verification
-
-- All 81 tensors renamed to `mtp.*`, 3 stages, no `dspark.` tensors remain.
-- `--inspect` on the converted file passes `parse_tensors` (no "outside" error).
-- Tensor abs offsets and byte sizes all fit within the file (`bytes <= size - abs`).
-- Live: `start-0731-mtp` starts cleanly.
-
-## Script
-
-`gguf-tools/rename-dspark-tensors.py` — standalone Python, no deps:
-
-```
-Usage: rename-dspark-tensors.py INPUT.gguf [OUTPUT.gguf]
-Writes OUTPUT (default <input>-ds4.gguf); leaves INPUT unchanged.
-```
+Two pitfalls hit during development: (1) string/array KV values must be
+re-encoded with their length/type prefixes, not copied raw; (2) do **not** adjust
+rel offsets by the header delta — doing so shifts every tensor past its payload
+and the last tensor overruns the shorter file (`tensor points outside GGUF file`).
 
 Key references: `ds4_tensor_mtp_stage` (`ds4.c:2544`), `tensor_by_mtp_stage_suffix`
-(`ds4.c:4223`), `dspark_bind_block` (`ds4.c:6545`), `support_model_detect` (`ds4.c:2787`),
-`parse_tensors` (`ds4.c:2372`), `gguf_types[]` (`ds4.c:2008`).
+(`ds4.c:4223`), `dspark_bind_block` (`ds4.c:6545`), `support_model_detect`
+(`ds4.c:2787`), confidence layout (`ds4.c:5354`, `ds4.c:32000`).

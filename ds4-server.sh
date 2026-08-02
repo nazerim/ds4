@@ -37,7 +37,7 @@ MODEL_PATHS=(
 # entry, the default MTP_MODEL above is used instead.
 MTP_KEYS=("0731")
 MTP_PATHS=(
-    "/Users/naz/.omlx/models/alessandrobologna/DeepSeek-V4-Flash-0731-DSpark-Drafter-GGUF/DeepSeek-V4-Flash-0731-DSpark-Drafter-Q2_K-Q8_0-ds4.gguf"
+    "/Users/naz/Projects/ds4/gguf/DeepSeek-V4-Flash-DSpark-support.gguf"
 )
 
 lookup_model() {
