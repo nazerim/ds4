@@ -152,6 +152,11 @@ def main():
     for (name, ndim, dims, ttype, rel) in tensors:
         s = name.decode('utf8', 'replace')
         new_name = rewrite_name(name, final) if s.startswith('dspark.') else name
+        # ds4 binds the final confidence projection as a 2-D [K, 1] matrix
+        # (matvec of the [hidden; markov] feature vector -> one logit); HF
+        # stores it squeezed to 1-D [K]. Bytes are identical, promote shape.
+        if s == 'dspark.confidence_head.weight' and ndim == 1:
+            ndim, dims = 2, (dims[0], 1)
         new_tensors.append((new_name, ndim, dims, ttype, rel))
 
     tmp_name = None
