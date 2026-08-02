@@ -8,6 +8,12 @@ SERVER_CMD="./ds4-server"
 PID_FILE="./ds4-server.pid"
 CTX=256000
 PORT=8001
+# Auth-gated reverse proxy in front of ds4-server. Keep the server on loopback;
+# clients hit the proxy's LAN address. Requires DS4_API_KEY (refuses to start without).
+PROXY_CMD="./auth_proxy.py"
+PROXY_PID_FILE="./auth_proxy.pid"
+PROXY_PORT=8002
+PROXY_HOST="${PROXY_HOST:-0.0.0.0}"
 # Bind address. Default 127.0.0.1 (loopback). Override with HOST env, e.g.
 # HOST=0.0.0.0 or HOST=192.168.1.20 to expose the server on the LAN.
 HOST="${HOST:-127.0.0.1}"
@@ -197,6 +203,73 @@ status_server() {
   fi
 }
 
+start_proxy() {
+  if [ -z "${DS4_API_KEY:-}" ]; then
+    echo "Error: DS4_API_KEY not set — refusing to start an unauthenticated proxy."
+    return 1
+  fi
+  if [ -f "$PROXY_PID_FILE" ]; then
+    local pid
+    pid=$(cat "$PROXY_PID_FILE")
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "auth_proxy is already running (PID: $pid)"
+      return 1
+    else
+      rm -f "$PROXY_PID_FILE"
+    fi
+  fi
+  echo "Starting auth_proxy on ${PROXY_HOST}:${PROXY_PORT} -> 127.0.0.1:${PORT} (auth required)..."
+  python3 "$PROXY_CMD" > "$LOG_DIR/auth_proxy.log" 2>&1 &
+  local pid=$!
+  echo "$pid" > "${PROXY_PID_FILE}.tmp" && mv "${PROXY_PID_FILE}.tmp" "$PROXY_PID_FILE"
+  sleep 1
+  if ! kill -0 "$pid" 2>/dev/null; then
+    echo "Error: auth_proxy failed to start (PID: $pid)"
+    rm -f "$PROXY_PID_FILE"
+    return 1
+  fi
+  echo "auth_proxy started (PID: $pid)"
+}
+
+stop_proxy() {
+  if [ ! -f "$PROXY_PID_FILE" ]; then
+    echo "No proxy PID file found. Is auth_proxy running?"
+    return 0
+  fi
+  local pid
+  pid=$(cat "$PROXY_PID_FILE")
+  if kill -0 "$pid" 2>/dev/null; then
+    echo "Stopping auth_proxy (PID: $pid)..."
+    kill "$pid"
+    sleep 1
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+    rm -f "$PROXY_PID_FILE"
+    echo "auth_proxy stopped"
+  else
+    rm -f "$PROXY_PID_FILE"
+  fi
+  return 0
+}
+
+status_proxy() {
+  if [ -f "$PROXY_PID_FILE" ]; then
+    local pid
+    pid=$(cat "$PROXY_PID_FILE")
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "auth_proxy is running (PID: $pid)"
+      return 0
+    else
+      echo "auth_proxy is not running (stale PID file)"
+      return 1
+    fi
+  else
+    echo "auth_proxy is not running"
+    return 1
+  fi
+}
+
 case "${1:-}" in
   start)
     start_server "" ""
@@ -215,6 +288,18 @@ case "${1:-}" in
     ;;
   status)
     status_server
+    ;;
+  start-proxy)
+    start_proxy
+    ;;
+  stop-proxy)
+    stop_proxy
+    ;;
+  restart-proxy)
+    stop_proxy; start_proxy
+    ;;
+  status-proxy)
+    status_proxy
     ;;
   start-*|restart-*)
     action="$1"
@@ -249,7 +334,8 @@ case "${1:-}" in
     fi
     ;;
   *)
-    echo "Usage: $0 {start|start-mtp|start-<model>|stop|restart|restart-mtp|restart-<model>|status}"
+    echo "Usage: $0 {start|start-mtp|start-<model>|stop|restart|restart-mtp|restart-<model>|status"
+    echo "       |start-proxy|stop-proxy|restart-proxy|status-proxy}"
     echo ""
     echo "Options:"
     echo "  start              - Start ds4-server (default model)"
@@ -261,6 +347,16 @@ case "${1:-}" in
     echo "  restart-mtp        - Restart ds4-server with MTP speculative decoding"
     echo "  restart-<model>    - Restart ds4-server with an alternative model"
     echo "  status             - Check if ds4-server is running"
+    echo "  start-proxy        - Start the auth-gated proxy on PROXY_HOST:PROXY_PORT"
+    echo "                        (requires DS4_API_KEY)"
+    echo "  stop-proxy         - Stop the auth proxy"
+    echo "  restart-proxy      - Restart the auth proxy"
+    echo "  status-proxy       - Check if the auth proxy is running"
+    echo ""
+    echo "Auth proxy: keep ds4-server on loopback; remote clients hit the proxy."
+    echo "  PROXY_HOST        - Proxy bind address (default: 0.0.0.0)"
+    echo "  PROXY_PORT        - Proxy port (default: 8002)"
+    echo "  DS4_API_KEY       - Bearer token clients must present (required to start proxy)"
     echo ""
     echo "Available models (default: ds4flash.gguf):"
     for i in "${!MODEL_KEYS[@]}"; do
@@ -278,6 +374,9 @@ case "${1:-}" in
     echo "  HOST=ADDR           - Bind address (default: 127.0.0.1). Use 0.0.0.0 or a"
     echo "                        LAN IP like 192.168.1.20 to expose the server"
     echo "                        on the network for remote clients."
+    echo "  PROXY_HOST          - Proxy bind address (default: 0.0.0.0)"
+    echo "  PROXY_PORT          - Proxy port (default: 8002)"
+    echo "  DS4_API_KEY         - Bearer token for the auth proxy (required to start)"
     exit 1
     ;;
 esac
