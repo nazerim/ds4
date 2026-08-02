@@ -944,6 +944,10 @@ bool ds4_kvstore_open(ds4_kvstore *kc, const char *dir, uint64_t budget_mb,
         kv_logf(kc, DS4_KVSTORE_LOG_WARNING,
                 "%s: kv cache tail_anchors=0; only the frontier anchor is kept dense",
                 kv_log_name(kc));
+    if ((unsigned)kc->opt.min_tokens < DS4_KVSTORE_CONV_ID_HEAD_BYTES)
+        kv_logf(kc, DS4_KVSTORE_LOG_WARNING,
+                "%s: kv cache min_tokens=%d < conv_id head=%u; anchors shorter than the head window may be mis-scoped by conv_id filtering",
+                kv_log_name(kc), kc->opt.min_tokens, DS4_KVSTORE_CONV_ID_HEAD_BYTES);
     ds4_kvstore_evict(kc, NULL, 0, NULL);
     kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
             "%s: KV disk cache %s (budget=%llu MiB, cross-quant=%s, min=%d, cold_max=%d, continued=%d, trim=%d, align=%d, hit_half_life=%llus)",
@@ -1648,6 +1652,7 @@ void ds4_kvstore_mark_stale_at_load(ds4_kvstore *kc, const char *prompt_text,
         ds4_kvstore_sha1_bytes_hex(prompt_text, (size_t)e->text_bytes, sha);
         if (strcmp(sha, e->sha) != 0) {
             e->stale = true;
+            e->last_used = now;
             if (!ds4_kvstore_touch_file(e->path, e->hits, true, now)) {
                 /* In-memory stays stale (it is stale for this prompt and will
                  * be evicted first this session), but the on-disk flag did not
@@ -1680,6 +1685,10 @@ static int kv_cache_try_load_one(ds4_kvstore *kc, ds4_engine *engine,
     const double load_t0 = kv_now_sec();
     FILE *fp = fopen(path, "rb");
     if (!fp) {
+        /* fopen failure is a pre-payload failure (session untouched), so let the
+         * caller fall back to the next-largest candidate instead of forcing a
+         * full prefill. */
+        *retryable = true;
         free(path);
         return 0;
     }
