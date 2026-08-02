@@ -32,12 +32,32 @@ MODEL_PATHS=(
     "/Users/naz/.omlx/models/jmilnz/DeepSeek-V4-Flash-0731-antirez-ds4-GGUF/DeepSeek-V4-Flash-0731-Layers37-42Q4K-mixed-realimatrix-v2.gguf"
 )
 
+# Alternative MTP (draft) model map: short name -> full GGUF path.
+# Used by start-<model>-mtp / restart-<model>-mtp. If a key has no MTP
+# entry, the default MTP_MODEL above is used instead.
+MTP_KEYS=("0731")
+MTP_PATHS=(
+    "/Users/naz/.omlx/models/alessandrobologna/DeepSeek-V4-Flash-0731-DSpark-Drafter-GGUF/DeepSeek-V4-Flash-0731-DSpark-Drafter-Q2_K-Q8_0-ds4.gguf"
+)
+
 lookup_model() {
     local key="$1"
     local i
     for i in "${!MODEL_KEYS[@]}"; do
         if [ "${MODEL_KEYS[$i]}" = "$key" ]; then
             echo "${MODEL_PATHS[$i]}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+lookup_mtp_model() {
+    local key="$1"
+    local i
+    for i in "${!MTP_KEYS[@]}"; do
+        if [ "${MTP_KEYS[$i]}" = "$key" ]; then
+            echo "${MTP_PATHS[$i]}"
             return 0
         fi
     done
@@ -76,6 +96,7 @@ rotate_logs() {
 start_server() {
   local model_path="${1:-}"
   local enable_mtp="${2:-}"
+  local mtp_model_path="${3:-}"
 
   if [ -f "$PID_FILE" ]; then
     local pid
@@ -94,9 +115,15 @@ start_server() {
   # Rotate and clean up old logs
   rotate_logs
 
+  # Choose MTP draft model (per-model override, else default)
+  local mtp_used="$MTP_MODEL"
+  if [ -n "$mtp_model_path" ]; then
+    mtp_used="$mtp_model_path"
+  fi
+
   # Validate MTP model exists if requested
-  if [ "$enable_mtp" = "mtp" ] && [ ! -f "$MTP_MODEL" ]; then
-    echo "Error: MTP model not found: $MTP_MODEL"
+  if [ "$enable_mtp" = "mtp" ] && [ ! -f "$mtp_used" ]; then
+    echo "Error: MTP model not found: $mtp_used"
     return 1
   fi
 
@@ -106,7 +133,7 @@ start_server() {
     echo "Starting ds4-server on port $PORT (ctx: $CTX)..."
   fi
   if [ "$enable_mtp" = "mtp" ]; then
-    echo "MTP speculative decoding enabled"
+    echo "MTP speculative decoding enabled (draft: $mtp_used)"
   fi
   echo "Logging to $LOG_FILE"
 
@@ -119,7 +146,7 @@ start_server() {
   # Build MTP arguments
   MTP_ARGS=()
   if [ "$enable_mtp" = "mtp" ]; then
-    MTP_ARGS+=(--mtp "$MTP_MODEL" --dspark --mtp-draft "$MTP_DRAFT" --mtp-margin "$MTP_MARGIN")
+    MTP_ARGS+=(--mtp "$mtp_used" --dspark --mtp-draft "$MTP_DRAFT" --mtp-margin "$MTP_MARGIN")
     MTP_ARGS+=(--dspark-confidence "$DSPARK_CONFIDENCE")
   fi
 
@@ -272,19 +299,19 @@ status_proxy() {
 
 case "${1:-}" in
   start)
-    start_server "" ""
+    start_server "" "" ""
     ;;
   start-mtp)
-    start_server "" mtp
+    start_server "" mtp ""
     ;;
   stop)
     stop_server
     ;;
   restart)
-    stop_server; start_server "" ""
+    stop_server; start_server "" "" ""
     ;;
   restart-mtp)
-    stop_server; start_server "" mtp
+    stop_server; start_server "" mtp ""
     ;;
   status)
     status_server
@@ -327,10 +354,13 @@ case "${1:-}" in
       exit 1
     fi
 
+    # Look up per-model MTP draft path (empty => default MTP_MODEL)
+    mtp_model_path=$(lookup_mtp_model "$suffix") || true
+
     if [ "$do_restart" = 1 ]; then
-      stop_server; start_server "$model_path" "$enable_mtp"
+      stop_server; start_server "$model_path" "$enable_mtp" "$mtp_model_path"
     else
-      start_server "$model_path" "$enable_mtp"
+      start_server "$model_path" "$enable_mtp" "$mtp_model_path"
     fi
     ;;
   *)
@@ -346,6 +376,7 @@ case "${1:-}" in
     echo "  restart            - Restart ds4-server (default model)"
     echo "  restart-mtp        - Restart ds4-server with MTP speculative decoding"
     echo "  restart-<model>    - Restart ds4-server with an alternative model"
+    echo "  restart-<model>-mtp - Restart ds4-server with an alternative model + MTP"
     echo "  status             - Check if ds4-server is running"
     echo "  start-proxy        - Start the auth-gated proxy on PROXY_HOST:PROXY_PORT"
     echo "                        (requires DS4_API_KEY)"
@@ -364,6 +395,10 @@ case "${1:-}" in
     done
     echo ""
     echo "MTP model: $MTP_MODEL"
+    echo "Per-model MTP drafts (used by start-<model>-mtp):"
+    for i in "${!MTP_KEYS[@]}"; do
+      echo "  ${MTP_KEYS[$i]}  -> ${MTP_PATHS[$i]}"
+    done
     echo "MTP/DSpark tuning (script variables or env overrides):"
     echo "  MTP_DRAFT           - Max autoregressive draft tokens (default: 1)"
     echo "  MTP_MARGIN          - Verifier confidence margin (default: 3)"

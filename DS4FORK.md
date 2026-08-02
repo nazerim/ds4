@@ -780,3 +780,106 @@ The think-tool recovery path injects tokens into the live session that diverge f
 - **Disk cache load:** `ds4_kvstore.c:1215-1339` (`ds4_kvstore_try_load_text`)
 - **Common prefix:** `ds4.c:58980-58986` (`ds4_session_common_prefix`)
 - **Log file:** `log/ds4.log:1744-1819` (repeated recovery + full prefill pattern)
+
+---
+
+# Converting the HF DSpark Drafter to ds4's `mtp.` Naming Convention
+
+**Status:** Done & verified (0731 Q2_K-Q8_0 drafter, Aug 2026)
+
+## Why
+
+ds4 detects and binds the MTP draft model **by tensor name**. It looks for
+`mtp.<stage>.<suffix>` (`ds4_tensor_mtp_stage`, `ds4.c:2544`; `tensor_by_mtp_stage_suffix`,
+`ds4.c:4223`) and expects final-stage heads as `mtp.<final>.norm`, `mtp.<final>.hc_head_*`,
+`mtp.<final>.markov_head.markov_w1/w2`, `mtp.<final>.confidence_head.proj`, plus
+`mtp.0.main_proj`/`main_norm` (`dspark_bind_block`, `ds4.c:6545`).
+
+The HF drafter uses the **`dspark.<stage>.`** prefix and **flattened** final-head names
+(`dspark.markov_w1.weight`, `dspark.confidence_head.weight`). With no `mtp.*` tensors,
+`support_model_detect` (`ds4.c:2787`) reports `stages=0` → the model is `detected=none`
+and MTP is silently disabled.
+
+The MXFP4 variant is unusable regardless: `ds4`'s `gguf_types[]` table (`ds4.c:2008`)
+only supports GGUF types 0–30, and MXFP4 is type 39 → "unsupported GGUF type 39".
+
+## The fix: rename tensors, keep bytes
+
+The stage-block tensors already match ds4's expected 24-per-stage suffixes — only the
+prefix (`dspark.` → `mtp.`) and the flattened final-head names differ. So we rewrite the
+GGUF tensor directory **in place** (header rebuild) and append the tensor payload unchanged.
+
+## Exact steps (0731 Q2_K-Q8_0)
+
+```sh
+# 1. Convert the HF drafter
+python3 gguf-tools/rename-dspark-tensors.py \
+  "/Users/naz/.omlx/models/alessandrobologna/DeepSeek-V4-Flash-0731-DSpark-Drafter-GGUF/DeepSeek-V4-Flash-0731-DSpark-Drafter-Q2_K-Q8_0.gguf"
+
+#    Writes .../DeepSeek-V4-Flash-0731-DSpark-Drafter-Q2_K-Q8_0-ds4.gguf
+#    (input is left untouched)
+
+# 2. Point the server at the converted file, then start with MTP
+#    (ds4-server.sh already sets MTP_PATHS to the -ds4.gguf for key "0731")
+./ds4-server.sh start-0731-mtp
+```
+
+Expected on success: the MTP model reports `DSpark support model detected` (no
+`detected=none`, no `tensor points outside GGUF file`).
+
+## Renames applied (final stage = max stage, here 2)
+
+| HF name | ds4 name |
+|---|---|
+| `dspark.<s>.<suffix>.weight` | `mtp.<s>.<suffix>.weight` |
+| `dspark.main_proj.weight` | `mtp.0.main_proj.weight` |
+| `dspark.main_norm.weight` | `mtp.0.main_norm.weight` |
+| `dspark.norm.weight` | `mtp.<final>.norm.weight` |
+| `dspark.hc_head_fn.weight` | `mtp.<final>.hc_head_fn.weight` |
+| `dspark.hc_head_base.weight` | `mtp.<final>.hc_head_base.weight` |
+| `dspark.hc_head_scale.weight` | `mtp.<final>.hc_head_scale.weight` |
+| `dspark.markov_w1.weight` | `mtp.<final>.markov_head.markov_w1.weight` |
+| `dspark.markov_w2.weight` | `mtp.<final>.markov_head.markov_w2.weight` |
+| `dspark.confidence_head.weight` | `mtp.<final>.confidence_head.proj.weight` |
+
+## Layout invariants (why the tool is correct)
+
+- GGUF v3 header: magic(4) version(4) `n_tensors`(u64) `n_kv`(u64), then KVs, then the
+  tensor directory. **String lengths are u64.** Value types per `ds4.c:1986`
+  (`GGUF_VALUE_*`): array = item_type(u32) + count(u64) + items.
+- ds4 aligns tensor-data start to `general.alignment` (KV) or 32 (`ds4.c:2346`, `2405`).
+  The tool reads that KV; this drafter has none → 32.
+- The payload is copied **from `old_tdp` (the aligned tensor-data start)** to `new_tdp`,
+  skipping the old header padding. Because the relative layout is unchanged, **rel
+  offsets are written unchanged** — they are relative to the aligned tensor-data start,
+  not to absolute file offsets.
+
+### Two pitfalls hit during development
+
+1. **KV value re-encoding.** When rebuilding the header, string KV values need the u64
+   length prefix, and array values need item_type(u32)+count(u64) — not just the raw bytes.
+2. **rel-offset adjustment sign.** The first attempt "preserved" absolute offsets by adding
+   `(old_tdp - new_tdp)`. That is **wrong**: it shifts every tensor 192 bytes past its actual
+   payload, so the last tensor (which ends exactly at original EOF) overruns the
+   192-byte-shorter file → `ds4: tensor points outside GGUF file`. Correct behavior: leave
+   rel offsets untouched.
+
+## Verification
+
+- All 81 tensors renamed to `mtp.*`, 3 stages, no `dspark.` tensors remain.
+- `--inspect` on the converted file passes `parse_tensors` (no "outside" error).
+- Tensor abs offsets and byte sizes all fit within the file (`bytes <= size - abs`).
+- Live: `start-0731-mtp` starts cleanly.
+
+## Script
+
+`gguf-tools/rename-dspark-tensors.py` — standalone Python, no deps:
+
+```
+Usage: rename-dspark-tensors.py INPUT.gguf [OUTPUT.gguf]
+Writes OUTPUT (default <input>-ds4.gguf); leaves INPUT unchanged.
+```
+
+Key references: `ds4_tensor_mtp_stage` (`ds4.c:2544`), `tensor_by_mtp_stage_suffix`
+(`ds4.c:4223`), `dspark_bind_block` (`ds4.c:6545`), `support_model_detect` (`ds4.c:2787`),
+`parse_tensors` (`ds4.c:2372`), `gguf_types[]` (`ds4.c:2008`).
