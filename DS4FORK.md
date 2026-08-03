@@ -42,7 +42,7 @@ Override model: `DS4_TEST_MODEL=/path/to/model.gguf ./ds4_test --server`
 
 - **Never break these paths silently:** Metal resident, SSD streaming, CUDA, distributed inference, ROCm. Test or ask user before changes touching them.
 - **DSML is the tool-call format.** `<｜DSML｜tool_calls>`, `<｜DSML｜invoke name="...">`. Server renders OpenAI/Anthropic tool schemas into DSML and maps DSML back. Do not confuse with XML-like tags.
-- **KV cache checkpoints matter.** Long agent sessions rely on disk KV persistence (`ds4_kvstore.c`). The live KV state must stay consistent with the rendered token prefix. Token-mismatch after recovery injection is a known issue — see `DS4PLAN.md`.
+- **KV cache checkpoints matter.** Long agent sessions rely on disk KV persistence (`ds4_kvstore.c`). The live KV state must stay consistent with the rendered token prefix. The new conversation-scoped retention (commits `4f4a486`, `fa035a0`, `4e5a8de`) bounds tool-call divergence rebuilds to ≤ `anchor_step`; see `PLAN-KVCACHE.md` and the KVCACHE section below. The recovery-injection token-mismatch is resolved (commits `531314e`/`125ea97`/`8c91512`).
 - **Thinking mode has a recovery path.** When the model emits tool calls inside ` thinking`, `chat_think_tool_recovery()` injects ` response`. This can cause downstream KV cache misses if the injected tokens diverge from what the next request expects.
 - **No C++.** Ever.
 - **Preserve correctness over speed.** Do not keep a faster path with unexplained attention/KV/logits drift.
@@ -357,7 +357,7 @@ Two fixes were required. Both in `ds4_server.c`.
 - Recovery function: `ds4_server.c:10167-10266` (`chat_think_tool_recovery`)
 - Canonicalization: `ds4_server.c:10757` (`canonicalize_tool_checkpoint`)
 - Log evidence: `log/ds4.log:1744-1819` (repeated pattern)
-- Related: `DS4PLAN.md` (DSML recovery hardening)
+- Related: the "DS4 Server — DSML Recovery Hardening" section earlier in this file.
 
 ---
 
@@ -929,3 +929,60 @@ and the last tensor overruns the shorter file (`tensor points outside GGUF file`
 Key references: `ds4_tensor_mtp_stage` (`ds4.c:2544`), `tensor_by_mtp_stage_suffix`
 (`ds4.c:4223`), `dspark_bind_block` (`ds4.c:6545`), `support_model_detect`
 (`ds4.c:2787`), confidence layout (`ds4.c:5354`, `ds4.c:32000`).
+
+---
+
+# KVCACHE — Conversation-Scoped Disk KV Retention
+
+**Status:** Implemented, hardened, and regression-reviewed
+**Commits:**
+- `4f4a486` — feat: conversation-scoped KV disk-cache retention (the redesign)
+- `fa035a0` — fix: harden KV disk-cache retention (stale scoping, anchor grid, eviction, load fallback)
+- `4e5a8de` — fix: kv cache load-fallback, min_tokens warning, and last_used sync
+**Design docs:** `PLAN-KVCACHE.md` (design), `IMPLEMENTATION-PLAN.md` (scaffold)
+**Files:** `ds4_kvstore.c`, `ds4_kvstore.h`, `ds4_server.c`
+
+## Problem it solves
+
+The old disk cache kept only the *largest* checkpoints (keep-largest eviction). After any divergence — tool-call visible-text rewrite or OpenCode compaction — the large checkpoints go stale (their text no longer prefixes the new prompt), and the smaller still-valid ones were already evicted. So at a miss the disk holds only stale large checkpoints → `find_text_prefix` finds nothing → full prefill from 0 (120k tokens ≈ 6–7 min). The 32 GB budget was never the constraint; the policy discarded the useful checkpoints.
+
+**Goal / metric:** bound a **tool-call divergence** rebuild to ≤ `anchor_step` tokens (default 8192 ≈ 25–35 s at ~260–335 t/s), regardless of where the divergence lands. Compaction is irreducible (rebuild = `prompt_len − common`) and not fixable server-side.
+
+## Design
+
+Checkpoint file headers are now **v2** (72 bytes = base 48 + 24), persisting `conv_id`, `model_fp`, `bucket` (`tokens / anchor_step`), `level` (halving), and `stale` so eviction can act on them without reading multi-hundred-MB payloads. v1 files still load (legacy defaults) and are never upgraded in place.
+
+Retention is **per conversation lineage** (keyed by `conv_id`, a fold of the SHA1 of the conversation head + `model_fp`), non-uniform and age-tiered:
+
+- **Dense small:** keep ALL anchors ≤ `small_dense` (default 16k) — cheap, good coverage.
+- **Dense tail:** keep the frontier + `tail_anchors` (default 2) below — bounds the common tool-call divergence to ≤ `step`.
+- **Sparse middle:** every `mid_spacing` (default 128k); on budget pressure **halve** (double the spacing) the LRU conversation's large-middle anchors.
+- **Age tier:** an LRU conversation downgrades to a few largest anchors; retire it entirely at `min_anchors` (default 4).
+- Never evict a small anchor merely because a bigger one exists; never strip one conversation's floor for another's budget.
+
+**Stale detection at load:** `mark_stale_at_load` flags candidates in the active namespace whose text fails the byte-prefix test, scoped to the active `conv_id` (H-1) so batched conversations don't poison each other. Stale entries evict first.
+
+**Anchor grid (H-2):** continued checkpoints now write on the `anchor_step` grid (not the legacy `continued_interval`) aligned to the prefill chunk via `lcm(boundary_align, prefill_chunk)`, so they populate the dense-small ladder. This fixed the "checkpoints every 20k" bug (step 10240 + chunk 4096 → lcm 20480 > small_dense → no dense-small anchors). The startup log shows `anchor_step=8192 continued_step=8192 prefill_chunk=0` — prefill_chunk=0 is the expected default for non-CUDA-TP engines.
+
+**Load fallback (M-5):** `try_load_text` tries the largest candidate first; on pre-payload verification failure (corrupt body, hash/prefix mismatch, fopen failure) it falls back to the next-largest valid candidate instead of forcing a full prefill.
+
+**Namespace:** keyed by `model_fp` (weight fingerprint) + quant + ctx; default `reject_different_quant=true`. Cross-model/quant checkpoints are never selected or marked stale; byte-compatible builds (0731/v2) share one fingerprint and reuse KV.
+
+## Config knobs (ds4-server)
+
+```
+--kv-cache-anchor-step       8192     base anchor spacing (dense tail + small)
+--kv-cache-small-dense       16384    keep ALL anchors ≤ this
+--kv-cache-tail-anchors      2        frontier + this many below kept dense
+--kv-cache-mid-spacing       131072   large-middle spacing; halve (double) on pressure
+--kv-cache-min-anchors       4        retire a conversation when ladder ≤ this
+--kv-cache-max-conversations 0        cap distinct convs (0 = unlimited)
+```
+Plus existing: `--kv-cache-min-tokens`, `--kv-cache-cold-max-tokens`, `--kv-cache-continued-interval-tokens` (enable-gate/fallback), `--kv-cache-boundary-trim-tokens`, `--kv-cache-boundary-align-tokens`, `--kv-cache-reject-different-quant`.
+
+## Verification
+
+- `make ds4_test && ./ds4_test --server` passes (incl. new tests: stale isolation, chunk alignment, max-conversations retirement, LRU last-activity).
+- `make ds4-server` builds clean (0 warnings under `-Wall -Wextra -std=c99`).
+- Two code-review passes: no Critical/High; all findings fixed and re-verified (fopen retryable, min_tokens warning, last_used sync).
+- Startup banner now logs `continued_step` and `prefill_chunk` so the effective anchor grid is observable.
