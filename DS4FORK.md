@@ -961,7 +961,7 @@ Retention is **per lineage by prefix-chaining**: a lineage is a maximal chain of
 - **Dense tail:** keep the frontier (a chain leaf, always) + `tail_anchors` (default 2) below — bounds the common tool-call divergence to ≤ `step`.
 - **Sparse middle:** the largest anchor per `mid_spacing` (default 128k) window; on budget pressure **halve** (double the spacing of) the LRU idle lineage's exclusive large-middle anchors — shared-ancestor levels are never bumped, so halving cannot leak into other branches.
 - **Age tier:** retire the LRU idle lineage (exclusive entries only) when halving is exhausted; legacy v1 files exit only via legacy-LRU.
-- The **active chain** (ancestors of the incoming store text) is never halved or retired.
+- The **active chain** (ancestors of the incoming store text) is never halved or retired, and its anchors are judged against the *virtual incoming chain* for redundancy — so an idle branch's diverged anchor can never "cover" an ancestor the incoming session still needs (matters when the branching session has no leaf on disk yet).
 - Never evict a small anchor merely because a bigger one exists; never strip one lineage's floor for another's budget.
 
 **Stale layer decommissioned (`99c497f`):** `mark_stale_at_load` is an intentional no-op. Stale marking overrode keep-set protection (evicting frontiers) and was the cross-session poison mechanism; redundant/halving/LRU-retire already provide pruning.

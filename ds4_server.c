@@ -17233,8 +17233,9 @@ static void test_kv_cache_retention_keeps_small_anchor(void) {
     kc.enabled = true;
     kc.dir = xstrdup(dir);
     kc.opt = kv_cache_default_options();
-    /* 6 files x (72 + 4 + 2 + 1024) = 6612 bytes.  Budget 4500 forces exactly
-     * the two redundant middle anchors out, leaving the four kept anchors. */
+    /* 6 files x (72 + 4 + text(1..6) + 1024) = 6621 bytes.  Budget 4500 forces
+     * exactly the two redundant middle anchors out, leaving the four kept
+     * anchors (4414 <= 4500). */
     kc.budget_bytes = 4500;
     kv_cache_evict(&kc, NULL, 0, NULL);
 
@@ -18195,6 +18196,190 @@ static void test_kv_cache_lineage_active_chain_never_retired(void) {
     rmdir(dir);
 }
 
+static void test_kv_cache_lineage_active_head_survives_halving(void) {
+    /* A shared head whose only on-disk descendant branch is idle must not be
+     * level-bumped or retired when that branch is halved/retired: the head is
+     * an ancestor of the incoming store text (a new session about to branch
+     * off it) even though that session has no leaf on disk yet. */
+    char tmpl[] = "/tmp/ds4-kv-active-head-halve-test.XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    TEST_ASSERT(dir != NULL);
+    if (!dir) return;
+
+    const uint64_t now = (uint64_t)time(NULL);
+    test_kv_conv_stub_file(dir, "hello", 0, 0, KV_REASON_COLD, 100000, 0, now, 512);
+    test_kv_conv_stub_file(dir, "hello there", 0, 0, KV_REASON_COLD, 150000, 0, now - 100000, 512);
+    test_kv_conv_stub_file(dir, "hello there frontier", 0, 0, KV_REASON_COLD, 250000, 0, now - 100000, 512);
+
+    kv_disk_cache kc = {0};
+    kc.enabled = true;
+    kc.dir = xstrdup(dir);
+    kc.opt = kv_cache_default_options();
+    kc.opt.min_anchors = 1; /* halve a lineage with >= 2 exclusive anchors */
+    /* ~1800 bytes total; budget 700 forces the idle branch all the way out. */
+    kc.budget_bytes = 700;
+    const char *incoming_text = "hello world, a brand new session";
+    ds4_kvstore_eviction_context incoming = {
+        .text = incoming_text, .text_len = strlen(incoming_text),
+        .model_id = 0, .quant_bits = 2, .ctx_size = 32768,
+        .reject_different_quant = false,
+    };
+    kv_cache_evict(&kc, NULL, 0, &incoming);
+
+    TEST_ASSERT(kv_file_exists(dir, "hello")); /* active-chain head survives */
+    TEST_ASSERT(!kv_file_exists(dir, "hello there"));           /* idle branch */
+    TEST_ASSERT(!kv_file_exists(dir, "hello there frontier"));  /* retired */
+
+    /* The head's level must be untouched: halving an idle branch may not leak
+     * window inflation into an ancestor the incoming session still needs. */
+    char sha[41];
+    sha1_bytes_hex("hello", 5, sha);
+    char *path = test_kv_path_for_text(dir, "hello");
+    ds4_kvstore_entry e = {0};
+    TEST_ASSERT(ds4_kvstore_read_entry_file(path, sha, &e));
+    TEST_ASSERT(e.level == 0);
+    ds4_kvstore_entry_free(&e);
+
+    kv_cache_close(&kc);
+    const char *texts[] = {"hello", "hello there", "hello there frontier"};
+    for (int i = 0; i < 3; i++) {
+        char *p = test_kv_path_for_text(dir, texts[i]);
+        unlink(p);
+        free(p);
+    }
+    free(path);
+    rmdir(dir);
+}
+
+static void test_kv_cache_lineage_active_head_survives_retirement(void) {
+    /* Same shape under default min_anchors (no halving): PHASE C retires the
+     * idle branch wholesale but the active-chain head is not part of its
+     * exclusive set and survives. */
+    char tmpl[] = "/tmp/ds4-kv-active-head-retire-test.XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    TEST_ASSERT(dir != NULL);
+    if (!dir) return;
+
+    const uint64_t now = (uint64_t)time(NULL);
+    test_kv_conv_stub_file(dir, "hello", 0, 0, KV_REASON_COLD, 100000, 0, now, 512);
+    test_kv_conv_stub_file(dir, "hello there", 0, 0, KV_REASON_COLD, 150000, 0, now - 100000, 512);
+    test_kv_conv_stub_file(dir, "hello there frontier", 0, 0, KV_REASON_COLD, 250000, 0, now - 100000, 512);
+
+    kv_disk_cache kc = {0};
+    kc.enabled = true;
+    kc.dir = xstrdup(dir);
+    kc.opt = kv_cache_default_options();
+    kc.budget_bytes = 700; /* ~1800 total -> the idle branch must go */
+    const char *incoming_text = "hello world, a brand new session";
+    ds4_kvstore_eviction_context incoming = {
+        .text = incoming_text, .text_len = strlen(incoming_text),
+        .model_id = 0, .quant_bits = 2, .ctx_size = 32768,
+        .reject_different_quant = false,
+    };
+    kv_cache_evict(&kc, NULL, 0, &incoming);
+
+    TEST_ASSERT(kv_file_exists(dir, "hello"));
+    TEST_ASSERT(!kv_file_exists(dir, "hello there"));
+    TEST_ASSERT(!kv_file_exists(dir, "hello there frontier"));
+
+    kv_cache_close(&kc);
+    const char *texts[] = {"hello", "hello there", "hello there frontier"};
+    for (int i = 0; i < 3; i++) {
+        char *p = test_kv_path_for_text(dir, texts[i]);
+        unlink(p);
+        free(p);
+    }
+    rmdir(dir);
+}
+
+static void test_kv_cache_lineage_active_head_survives_overcap(void) {
+    /* Over-cap retirement retires idle lineages down to the cap; the shared
+     * head (active-chain ancestor, extended by all of them) is never part of
+     * any single branch's exclusive set and survives every retirement. */
+    char tmpl[] = "/tmp/ds4-kv-active-head-overcap-test.XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    TEST_ASSERT(dir != NULL);
+    if (!dir) return;
+
+    const uint64_t now = (uint64_t)time(NULL);
+    test_kv_conv_stub_file(dir, "hello", 0, 0, KV_REASON_COLD, 20000, 0, now, 512);
+    test_kv_conv_stub_file(dir, "hello y1", 0, 0, KV_REASON_COLD, 100000, 0, now - 300, 512);
+    test_kv_conv_stub_file(dir, "hello y2", 0, 0, KV_REASON_COLD, 100000, 0, now - 200, 512);
+    test_kv_conv_stub_file(dir, "hello y3", 0, 0, KV_REASON_COLD, 100000, 0, now - 100, 512);
+
+    kv_disk_cache kc = {0};
+    kc.enabled = true;
+    kc.dir = xstrdup(dir);
+    kc.opt = kv_cache_default_options();
+    kc.opt.max_conversations = 1;  /* keep active + at most one idle lineage */
+    kc.budget_bytes = 1ull << 40;  /* budget is not the pressure here */
+    const char *incoming_text = "hello world, a brand new session";
+    ds4_kvstore_eviction_context incoming = {
+        .text = incoming_text, .text_len = strlen(incoming_text),
+        .model_id = 0, .quant_bits = 2, .ctx_size = 32768,
+        .reject_different_quant = false,
+    };
+    ds4_kvstore_evict(&kc, NULL, 0, &incoming);
+
+    TEST_ASSERT(kv_file_exists(dir, "hello"));   /* shared head survives */
+    TEST_ASSERT(kv_file_exists(dir, "hello y3")); /* newest idle kept (cap 1) */
+    TEST_ASSERT(!kv_file_exists(dir, "hello y1")); /* LRU retired */
+    TEST_ASSERT(!kv_file_exists(dir, "hello y2")); /* next-LRU retired */
+
+    kv_cache_close(&kc);
+    const char *texts[] = {"hello", "hello y1", "hello y2", "hello y3"};
+    for (int i = 0; i < 4; i++) {
+        char *p = test_kv_path_for_text(dir, texts[i]);
+        unlink(p);
+        free(p);
+    }
+    rmdir(dir);
+}
+
+static void test_kv_cache_lineage_active_head_not_covered_by_idle_window(void) {
+    /* PHASE A: the idle branch holds the largest anchor of the head's window,
+     * so within the idle branch's chain the head looks redundant.  It must
+     * still survive: its keep-set is also evaluated against the virtual
+     * incoming chain, where the idle branch's diverged anchor cannot cover
+     * it (that anchor can never load the incoming session). */
+    char tmpl[] = "/tmp/ds4-kv-active-head-window-test.XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    TEST_ASSERT(dir != NULL);
+    if (!dir) return;
+
+    const uint64_t now = (uint64_t)time(NULL);
+    test_kv_conv_stub_file(dir, "hello", 0, 0, KV_REASON_COLD, 100000, 0, now, 512);
+    test_kv_conv_stub_file(dir, "hello m", 0, 0, KV_REASON_COLD, 120000, 0, now - 100000, 512);
+    test_kv_conv_stub_file(dir, "hello m frontier", 0, 0, KV_REASON_COLD, 250000, 0, now - 100000, 512);
+
+    kv_disk_cache kc = {0};
+    kc.enabled = true;
+    kc.dir = xstrdup(dir);
+    kc.opt = kv_cache_default_options();
+    /* ~1792 bytes total; budget 1200 forces the idle branch out. */
+    kc.budget_bytes = 1200;
+    const char *incoming_text = "hello world, a brand new session";
+    ds4_kvstore_eviction_context incoming = {
+        .text = incoming_text, .text_len = strlen(incoming_text),
+        .model_id = 0, .quant_bits = 2, .ctx_size = 32768,
+        .reject_different_quant = false,
+    };
+    kv_cache_evict(&kc, NULL, 0, &incoming);
+
+    TEST_ASSERT(kv_file_exists(dir, "hello")); /* not redundant vs the virtual chain */
+    TEST_ASSERT(!kv_file_exists(dir, "hello m"));
+    TEST_ASSERT(!kv_file_exists(dir, "hello m frontier"));
+
+    kv_cache_close(&kc);
+    const char *texts[] = {"hello", "hello m", "hello m frontier"};
+    for (int i = 0; i < 3; i++) {
+        char *p = test_kv_path_for_text(dir, texts[i]);
+        unlink(p);
+        free(p);
+    }
+    rmdir(dir);
+}
+
 static void test_kv_cache_model_fp_routing(void) {
     /* A checkpoint written for a different weight fingerprint is neither
      * selected as a rebuild prefix nor marked stale for the current prompt. */
@@ -18788,6 +18973,10 @@ static void ds4_server_unit_tests_run(void) {
     test_kv_cache_lineage_shared_ancestor_survives_retirement();
     test_kv_cache_lineage_halving_spares_shared_and_active();
     test_kv_cache_lineage_active_chain_never_retired();
+    test_kv_cache_lineage_active_head_survives_halving();
+    test_kv_cache_lineage_active_head_survives_retirement();
+    test_kv_cache_lineage_active_head_survives_overcap();
+    test_kv_cache_lineage_active_head_not_covered_by_idle_window();
     test_kv_cache_model_fp_routing();
     test_kv_cache_eviction_legacy_lru_evicts_oldest();
     test_dsml_bare_parameters_parse_as_unknown_call();
