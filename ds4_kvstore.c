@@ -553,6 +553,8 @@ bool ds4_kvstore_read_entry_file(const char *path, const char sha[41],
     return true;
 }
 
+static void kv_text_refs_prune(ds4_kvstore *kc);
+
 static void kv_cache_refresh(ds4_kvstore *kc) {
     if (!kc->enabled) return;
     ds4_kvstore_clear(kc);
@@ -568,10 +570,11 @@ static void kv_cache_refresh(ds4_kvstore *kc) {
         free(path);
     }
     closedir(d);
+    kv_text_refs_prune(kc);
 }
 
 bool ds4_kvstore_touch_file(const char *path, uint32_t hits, bool stale,
-                            uint64_t last_used) {
+                            uint8_t level, uint64_t last_used) {
     FILE *fp = fopen(path, "r+b");
     if (!fp) return false;
     ds4_kvstore_entry e = {0};
@@ -585,10 +588,13 @@ bool ds4_kvstore_touch_file(const char *path, uint32_t hits, bool stale,
                 : DS4_KVSTORE_FIXED_HEADER;
         uint8_t h[DS4_KVSTORE_FIXED_HEADER + DS4_KVSTORE_HEADER_V2_EXTRA];
         if (e.hdr_version == KV_CACHE_VERSION2) {
+            /* level comes from the caller: re-reading it from disk here would
+             * silently discard an in-memory halving bump (the header rewrite
+             * would persist the pre-bump value). */
             ds4_kvstore_fill_header_v2(h, e.model_id, e.quant_bits, e.reason,
                                        e.ext_flags, e.tokens, hits, e.ctx_size,
                                        e.created_at, last_used, e.payload_bytes,
-                                       e.conv_id, e.model_fp, e.bucket, e.level,
+                                       e.conv_id, e.model_fp, e.bucket, level,
                                        stale);
         } else {
             ds4_kvstore_fill_header(h, e.model_id, e.quant_bits, e.reason,
@@ -602,35 +608,187 @@ bool ds4_kvstore_touch_file(const char *path, uint32_t hits, bool stale,
     return ok;
 }
 
-/* ---- Conversation-scoped retention (PLAN §3, IMPLEMENTATION-PLAN B8/B9) ----
- * The keep-set/redundant/LRU helpers are O(entries) each and re-scanned per
- * eviction pass (O(entries^2) overall).  Checkpoint counts are bounded by the
- * disk budget (tens to low hundreds), so this is comfortably cheap; revisit
- * only if counts grow large. */
+/* ---- Lineage retention by prefix-chaining (PLAN-KV-LINEAGE, Option B) ----
+ * Retention groups checkpoints by the actual byte-prefix relation of their
+ * rendered texts — the exact relation the load path uses for reuse — instead
+ * of the conv_id hash (whose fixed byte cap had a cliff: a shared preamble
+ * larger than the cap merged distinct sessions into one lineage).  A lineage
+ * is a maximal chain of texts where each is a byte-prefix of the next; chains
+ * branch where sessions diverge from a shared head.  Shared ancestors belong
+ * to every chain that extends them and are kept while ANY of those chains
+ * keeps them; retiring a branch removes only the entries exclusive to it.
+ * Legacy v1 files are never candidates of the chain path (they exit via
+ * legacy-LRU only), though their texts still extend chains. */
 
-/* Is entry idx part of its conversation's keep-set?  Keep = dense small
- * (<= small_dense_tokens) + the frontier (always) + dense tail (frontier +
- * tail_anchors-1 below) + sparse middle (the largest anchor in each
- * mid_spacing * 2^level window).  Legacy conv_id==0 singletons are always kept
- * (never redundant). */
-static bool kv_cache_conv_is_kept(ds4_kvstore *kc, int idx) {
-    const ds4_kvstore_entry *e = &kc->entry[idx];
-    if (e->conv_id == 0) return true;
-    if (e->tokens <= (uint32_t)kc->opt.small_dense_tokens) return true;
+/* -- sha-keyed text cache (files are content-addressed; text is immutable) -- */
 
-    uint32_t frontier = 0;
-    int rank = 0; /* entries in this conv with strictly more tokens */
-    for (int i = 0; i < kc->len; i++) {
-        const ds4_kvstore_entry *o = &kc->entry[i];
-        if (o->conv_id != e->conv_id) continue;
-        if (o->tokens > frontier) frontier = o->tokens;
-        if (o->tokens > e->tokens) rank++;
+static ds4_kvstore_text_ref *kv_text_ref_find(ds4_kvstore *kc, const char sha[41]) {
+    for (int i = 0; i < kc->text_ref_len; i++)
+        if (memcmp(kc->text_refs[i].sha, sha, 41) == 0) return &kc->text_refs[i];
+    return NULL;
+}
+
+/* Drop cached texts no longer referenced by any entry (post-refresh). */
+static void kv_text_refs_prune(ds4_kvstore *kc) {
+    for (int i = 0; i < kc->text_ref_len; ) {
+        bool used = false;
+        for (int j = 0; j < kc->len; j++) {
+            if (memcmp(kc->entry[j].sha, kc->text_refs[i].sha, 41) == 0) {
+                used = true;
+                break;
+            }
+        }
+        if (used) { i++; continue; }
+        free(kc->text_refs[i].text);
+        memmove(&kc->text_refs[i], &kc->text_refs[i + 1],
+                (size_t)(kc->text_ref_len - i - 1) * sizeof(kc->text_refs[0]));
+        kc->text_ref_len--;
     }
+}
+
+/* Entry idx's rendered text, read once per process and cached by sha.
+ * NULL when the text section is unreadable or fails its hash check. */
+static const char *kv_cache_entry_text(ds4_kvstore *kc, int idx) {
+    const ds4_kvstore_entry *e = &kc->entry[idx];
+    ds4_kvstore_text_ref *ref = kv_text_ref_find(kc, e->sha);
+    if (ref) return ref->text;
+    FILE *fp = fopen(e->path, "rb");
+    if (!fp) return NULL;
+    ds4_kvstore_entry hdr = {0};
+    uint32_t text_bytes = 0;
+    char *buf = NULL;
+    bool ok = ds4_kvstore_read_header(fp, &hdr, &text_bytes) &&
+              text_bytes == e->text_bytes;
+    if (ok) {
+        buf = kv_xmalloc((size_t)text_bytes + 1);
+        ok = fread(buf, 1, text_bytes, fp) == text_bytes;
+    }
+    fclose(fp);
+    if (ok) {
+        buf[text_bytes] = '\0';
+        char sha[41];
+        ds4_kvstore_sha1_bytes_hex(buf, text_bytes, sha);
+        ok = memcmp(sha, e->sha, 41) == 0;
+    }
+    if (!ok) {
+        free(buf);
+        return NULL;
+    }
+    if (kc->text_ref_len == kc->text_ref_cap) {
+        kc->text_ref_cap = kc->text_ref_cap ? kc->text_ref_cap * 2 : 16;
+        kc->text_refs = kv_xrealloc(kc->text_refs,
+                (size_t)kc->text_ref_cap * sizeof(kc->text_refs[0]));
+    }
+    ds4_kvstore_text_ref *slot = &kc->text_refs[kc->text_ref_len++];
+    memcpy(slot->sha, e->sha, 41);
+    slot->text = buf;
+    slot->text_len = text_bytes;
+    return buf;
+}
+
+/* -- prefix relation, built once per eviction pass over the current array --
+ * rel[i*len + j] == 1  <=>  entry i's text is a byte-prefix of entry j's.
+ * Unlinking entries invalidates the matrix; rebuild after structural change. */
+
+typedef struct {
+    uint8_t *rel;
+    int len;
+} kv_chain_rel;
+
+static void kv_chain_rel_build(ds4_kvstore *kc, kv_chain_rel *r) {
+    r->len = kc->len;
+    r->rel = kv_xmalloc((size_t)r->len * (size_t)r->len);
+    memset(r->rel, 0, (size_t)r->len * (size_t)r->len);
+    for (int i = 0; i < r->len; i++) r->rel[(size_t)i * r->len + i] = 1;
+    for (int i = 0; i < r->len; i++) {
+        for (int j = i + 1; j < r->len; j++) {
+            const ds4_kvstore_entry *a = &kc->entry[i];
+            const ds4_kvstore_entry *b = &kc->entry[j];
+            int anc = -1, desc = -1;
+            if (a->text_bytes < b->text_bytes) { anc = i; desc = j; }
+            else if (b->text_bytes < a->text_bytes) { anc = j; desc = i; }
+            else continue; /* equal length + distinct sha: cannot prefix */
+            const char *at = kv_cache_entry_text(kc, anc);
+            const char *dt = kv_cache_entry_text(kc, desc);
+            if (!at || !dt) continue;
+            if (memcmp(dt, at, kc->entry[anc].text_bytes) == 0)
+                r->rel[(size_t)anc * r->len + desc] = 1;
+        }
+    }
+}
+
+static void kv_chain_rel_free(kv_chain_rel *r) {
+    free(r->rel);
+    r->rel = NULL;
+    r->len = 0;
+}
+
+static bool kv_rel_prefixes(const kv_chain_rel *r, int anc, int desc) {
+    return r->rel[(size_t)anc * r->len + desc] != 0;
+}
+
+static bool kv_cache_entry_is_legacy(const ds4_kvstore_entry *e) {
+    return e->hdr_version != KV_CACHE_VERSION2;
+}
+
+/* A leaf is an entry with no strict descendant: the frontier of its branch. */
+static bool kv_rel_is_leaf(const kv_chain_rel *r, int idx) {
+    for (int i = 0; i < r->len; i++)
+        if (i != idx && kv_rel_prefixes(r, idx, i)) return false;
+    return true;
+}
+
+/* Entry idx's text is a byte-prefix of the incoming store text: idx lies on
+ * the active chain (the ancestors of the frontier about to be stored). */
+static bool kv_cache_entry_in_active_chain(ds4_kvstore *kc, int idx,
+                                           const char *text, size_t text_len) {
+    if (!text) return false;
+    const ds4_kvstore_entry *e = &kc->entry[idx];
+    if ((uint64_t)e->text_bytes > text_len) return false;
+    const char *et = kv_cache_entry_text(kc, idx);
+    if (!et) return false;
+    return memcmp(text, et, e->text_bytes) == 0;
+}
+
+/* Is entry idx exclusive to leaf's lineage: idx prefixes leaf and no OTHER
+ * leaf extends idx?  Shared ancestors (extended by >= 2 leaves) are never
+ * exclusive.  Legacy entries are never branch candidates. */
+static bool kv_rel_exclusive_to(ds4_kvstore *kc, const kv_chain_rel *r,
+                                int idx, int leaf) {
+    if (idx == leaf) return true;
+    if (kv_cache_entry_is_legacy(&kc->entry[idx])) return false;
+    if (!kv_rel_prefixes(r, idx, leaf)) return false;
+    for (int i = 0; i < r->len; i++) {
+        if (i == idx || i == leaf) continue;
+        if (!kv_rel_is_leaf(r, i)) continue;
+        if (kv_rel_prefixes(r, idx, i)) return false;
+    }
+    return true;
+}
+
+/* Is entry idx part of its lineage's keep-set, evaluated within the chain
+ * ending at leaf?  Keep = the frontier (always) + dense tail (frontier +
+ * tail_anchors-1 below) + sparse middle (the largest anchor in each
+ * mid_spacing * 2^level window). */
+static bool kv_cache_chain_kept(ds4_kvstore *kc, const kv_chain_rel *r,
+                                int idx, int leaf) {
     /* The frontier is always kept, even under degenerate config
      * (tail_anchors==0 and mid_spacing==0 would otherwise leave it unprotected
      * and evictable, defeating the active-conversation guarantee). */
+    if (idx == leaf) return true;
+    const ds4_kvstore_entry *e = &kc->entry[idx];
+    uint32_t frontier = 0;
+    int rank = 0; /* chain members with strictly more tokens */
+    for (int i = 0; i < r->len; i++) {
+        if (!kv_rel_prefixes(r, i, leaf)) continue;
+        const ds4_kvstore_entry *o = &kc->entry[i];
+        if (o->tokens > frontier) frontier = o->tokens;
+        if (o->tokens > e->tokens ||
+            (o->tokens == e->tokens && o->text_bytes > e->text_bytes))
+            rank++;
+    }
     if (e->tokens >= frontier) return true;
-    /* Dense tail: the tail_anchors largest anchors of the conversation. */
+    /* Dense tail: the tail_anchors largest anchors of the chain. */
     if (rank < kc->opt.tail_anchors) return true;
     /* Sparse middle: keep the LARGEST anchor in each mid_spacing·2^level
      * window.  Windowing (not an exact (frontier-tokens)%spacing grid) is what
@@ -642,9 +800,9 @@ static bool kv_cache_conv_is_kept(ds4_kvstore *kc, int idx) {
     if (window > 0) {
         uint64_t my_win = (uint64_t)e->tokens / window;
         bool largest_in_window = true;
-        for (int i = 0; i < kc->len; i++) {
+        for (int i = 0; i < r->len; i++) {
+            if (i == idx || !kv_rel_prefixes(r, i, leaf)) continue;
             const ds4_kvstore_entry *o = &kc->entry[i];
-            if (o->conv_id != e->conv_id) continue;
             if (o->tokens <= (uint32_t)kc->opt.small_dense_tokens) continue;
             if ((uint64_t)o->tokens / window == my_win && o->tokens > e->tokens) {
                 largest_in_window = false;
@@ -656,15 +814,32 @@ static bool kv_cache_conv_is_kept(ds4_kvstore *kc, int idx) {
     return false;
 }
 
+/* Kept = legacy singleton, or small-dense, or kept by at least one descendant
+ * chain (a shared ancestor survives while ANY chain that extends it keeps it;
+ * an entry with no readable relations is its own leaf and thus its own
+ * frontier). */
+static bool kv_cache_conv_is_kept(ds4_kvstore *kc, const kv_chain_rel *r,
+                                  int idx) {
+    const ds4_kvstore_entry *e = &kc->entry[idx];
+    if (kv_cache_entry_is_legacy(e)) return true;
+    if (e->tokens <= (uint32_t)kc->opt.small_dense_tokens) return true;
+    for (int i = 0; i < r->len; i++) {
+        if (!kv_rel_is_leaf(r, i)) continue;
+        if (!kv_rel_prefixes(r, idx, i)) continue;
+        if (kv_cache_chain_kept(kc, r, idx, i)) return true;
+    }
+    return false;
+}
+
 /* Pick a redundant victim deterministically: the redundant entry with the
  * smallest bucket (oldest position first — plan §3.3 "oldest bucket first
  * within a conversation"), tie-broken by tokens.  Evicting smallest-first keeps
  * the larger middle anchors, which are the useful ones for deep divergences,
  * and avoids readdir-order dependence. */
-static int kv_cache_find_redundant(ds4_kvstore *kc) {
+static int kv_cache_find_redundant(ds4_kvstore *kc, const kv_chain_rel *r) {
     int best = -1;
     for (int i = 0; i < kc->len; i++) {
-        if (kv_cache_conv_is_kept(kc, i)) continue;
+        if (kv_cache_conv_is_kept(kc, r, i)) continue;
         if (best < 0) { best = i; continue; }
         const ds4_kvstore_entry *b = &kc->entry[best];
         if (kc->entry[i].bucket < b->bucket ||
@@ -675,84 +850,90 @@ static int kv_cache_find_redundant(ds4_kvstore *kc) {
     return best;
 }
 
-/* LRU conversation (excluding the active one and legacy conv_id==0) whose
- * member count is >= min_count.  Returns 0 if none.  A conversation's recency is
- * the MOST-recent touch among its members (max last_used); the least-recently-
- * active conversation has the smallest such recency.  Using max (not min) stops
- * a long-running conversation's old small anchor from pinning its rank to
- * creation time and getting it halved/retired ahead of a genuinely idle one. */
-static uint64_t kv_cache_find_lru_conv(ds4_kvstore *kc, uint64_t active_conv,
-                                       int min_count) {
-    uint64_t best = 0;
-    int64_t lru_recency = INT64_MAX;
-    for (int i = 0; i < kc->len; i++) {
-        uint64_t c = kc->entry[i].conv_id;
-        if (c == 0 || c == active_conv) continue;
-        bool seen = false;
-        for (int j = 0; j < i; j++)
-            if (kc->entry[j].conv_id == c) { seen = true; break; }
-        if (seen) continue;
-        int cnt = 0;
-        int64_t conv_recency = 0;
-        for (int j = 0; j < kc->len; j++) {
-            if (kc->entry[j].conv_id != c) continue;
-            cnt++;
-            int64_t lu = (int64_t)(kc->entry[j].last_used ?
-                                   kc->entry[j].last_used :
-                                   kc->entry[j].created_at);
-            if (lu > conv_recency) conv_recency = lu;
-        }
-        if (cnt < min_count) continue;
-        if (conv_recency < lru_recency) { lru_recency = conv_recency; best = c; }
-    }
-    return best;
-}
-
-static int kv_cache_count_distinct_convs(ds4_kvstore *kc, uint64_t active_conv) {
-    int n = 0;
-    for (int i = 0; i < kc->len; i++) {
-        uint64_t c = kc->entry[i].conv_id;
-        if (c == 0 || c == active_conv) continue;
-        bool seen = false;
-        for (int j = 0; j < i; j++)
-            if (kc->entry[j].conv_id == c) { seen = true; break; }
-        if (!seen) n++;
-    }
-    return n;
-}
-
 static int64_t kv_cache_entry_last_used(const ds4_kvstore_entry *e) {
     return (int64_t)(e->last_used ? e->last_used : e->created_at);
 }
 
-/* Most-recent last_used across a conversation's members (its last activity). */
-static int64_t kv_cache_conv_recency(ds4_kvstore *kc, uint64_t conv_id) {
+/* LRU lineage leaf (excluding the active chain's leaves and legacy v1 files)
+ * whose exclusive member count is >= min_count.  Returns -1 if none.  A
+ * lineage's recency is the MOST-recent touch among its EXCLUSIVE members
+ * (max last_used): shared ancestors can be touched by other branches, so only
+ * branch-exclusive entries measure the branch's own activity.  Using max (not
+ * min) stops a long-running lineage's old small anchor from pinning its rank
+ * to creation time and getting it halved/retired ahead of a genuinely idle
+ * one. */
+static int kv_cache_find_lru_leaf(ds4_kvstore *kc, const kv_chain_rel *r,
+                                  const char *active_text, size_t active_len,
+                                  int min_count) {
+    int best = -1;
+    int64_t lru_recency = INT64_MAX;
+    for (int i = 0; i < r->len; i++) {
+        if (!kv_rel_is_leaf(r, i)) continue;
+        if (kv_cache_entry_is_legacy(&kc->entry[i])) continue;
+        if (kv_cache_entry_in_active_chain(kc, i, active_text, active_len))
+            continue;
+        int cnt = 0;
+        int64_t branch_recency = 0;
+        for (int j = 0; j < r->len; j++) {
+            if (!kv_rel_exclusive_to(kc, r, j, i)) continue;
+            cnt++;
+            int64_t lu = kv_cache_entry_last_used(&kc->entry[j]);
+            if (lu > branch_recency) branch_recency = lu;
+        }
+        if (cnt < min_count) continue;
+        if (branch_recency < lru_recency) {
+            lru_recency = branch_recency;
+            best = i;
+        }
+    }
+    return best;
+}
+
+/* Distinct non-active, non-legacy lineages (leaf count). */
+static int kv_cache_count_lineages(ds4_kvstore *kc, const kv_chain_rel *r,
+                                   const char *active_text, size_t active_len) {
+    int n = 0;
+    for (int i = 0; i < r->len; i++) {
+        if (!kv_rel_is_leaf(r, i)) continue;
+        if (kv_cache_entry_is_legacy(&kc->entry[i])) continue;
+        if (kv_cache_entry_in_active_chain(kc, i, active_text, active_len))
+            continue;
+        n++;
+    }
+    return n;
+}
+
+/* Most-recent last_used among a leaf's exclusive members (its own last
+ * activity). */
+static int64_t kv_cache_leaf_recency(ds4_kvstore *kc, const kv_chain_rel *r,
+                                     int leaf) {
     int64_t recency = 0;
-    for (int i = 0; i < kc->len; i++) {
-        if (kc->entry[i].conv_id != conv_id) continue;
+    for (int i = 0; i < r->len; i++) {
+        if (!kv_rel_exclusive_to(kc, r, i, leaf)) continue;
         int64_t lu = kv_cache_entry_last_used(&kc->entry[i]);
         if (lu > recency) recency = lu;
     }
     return recency;
 }
 
-/* Can halving this conversation still make a kept middle anchor redundant?
+/* Can halving this lineage still make a kept middle anchor redundant?
  * Halving doubles the middle window; it only merges windows (and thus creates
- * redundancy) while more than one window spans the conversation.  Once
+ * redundancy) while more than one window spans the branch.  Once
  * window >= frontier everything sits in one window and halving is pointless —
  * retire instead.  This bounds PHASE B to ~log2(frontier/mid_spacing) bumps
  * rather than up to level 255. */
-static bool kv_cache_conv_can_halve(ds4_kvstore *kc, uint64_t conv_id) {
+static bool kv_cache_leaf_can_halve(ds4_kvstore *kc, const kv_chain_rel *r,
+                                    int leaf) {
     if (kc->opt.mid_spacing_tokens <= 0) return false;
-    uint32_t frontier = 0;
+    const uint32_t frontier = kc->entry[leaf].tokens;
     uint8_t level = 0;
     bool has_middle = false;
-    for (int i = 0; i < kc->len; i++) {
-        if (kc->entry[i].conv_id != conv_id) continue;
-        if (kc->entry[i].tokens > frontier) frontier = kc->entry[i].tokens;
+    for (int i = 0; i < r->len; i++) {
+        if (!kv_rel_exclusive_to(kc, r, i, leaf)) continue;
+        if (kc->entry[i].tokens <= (uint32_t)kc->opt.small_dense_tokens)
+            continue;
+        has_middle = true;
         if (kc->entry[i].level > level) level = kc->entry[i].level;
-        if (kc->entry[i].tokens > (uint32_t)kc->opt.small_dense_tokens)
-            has_middle = true;
     }
     if (!has_middle) return false;
     uint64_t window = (uint64_t)kc->opt.mid_spacing_tokens *
@@ -760,12 +941,12 @@ static bool kv_cache_conv_can_halve(ds4_kvstore *kc, uint64_t conv_id) {
     return window < frontier;
 }
 
-/* Index of the least-recently-used legacy singleton (conv_id==0), or -1. */
+/* Index of the least-recently-used legacy v1 singleton, or -1. */
 static int kv_cache_find_lru_legacy(ds4_kvstore *kc) {
     int best = -1;
     int64_t oldest = INT64_MAX;
     for (int i = 0; i < kc->len; i++) {
-        if (kc->entry[i].conv_id != 0) continue;
+        if (!kv_cache_entry_is_legacy(&kc->entry[i])) continue;
         int64_t lu = kv_cache_entry_last_used(&kc->entry[i]);
         if (lu < oldest || (lu == oldest && best < 0)) { oldest = lu; best = i; }
     }
@@ -802,15 +983,21 @@ static void kv_cache_unlink_entry(ds4_kvstore *kc, int victim,
     kc->len--;
 }
 
-static void kv_cache_retire_conv(ds4_kvstore *kc, uint64_t conv_id,
-                                 uint64_t *total) {
-    for (int i = 0; i < kc->len; ) {
-        if (kc->entry[i].conv_id == conv_id) {
-            kv_cache_unlink_entry(kc, i, total, "conversation-retired");
-        } else {
-            i++;
-        }
-    }
+/* Retire one lineage: unlink the entries exclusive to its leaf (the leaf
+ * itself always qualifies).  Shared ancestors survive while another branch
+ * extends them.  Victims are collected before any unlink: unlinking shifts
+ * indices, and removing victims can never create new victims (a shared
+ * ancestor stays shared — no other branch's leaf is retired here). */
+static void kv_cache_retire_leaf(ds4_kvstore *kc, const kv_chain_rel *r,
+                                 int leaf, uint64_t *total) {
+    int *victims = kv_xmalloc((size_t)r->len * sizeof(int));
+    int n = 0;
+    for (int i = 0; i < r->len; i++)
+        if (kv_rel_exclusive_to(kc, r, i, leaf)) victims[n++] = i;
+    /* Unlink from the highest index so lower indices stay valid. */
+    for (int k = n - 1; k >= 0; k--)
+        kv_cache_unlink_entry(kc, victims[k], total, "conversation-retired");
+    free(victims);
 }
 
 void ds4_kvstore_evict(ds4_kvstore *kc, const ds4_tokens *live,
@@ -824,76 +1011,99 @@ void ds4_kvstore_evict(ds4_kvstore *kc, const ds4_tokens *live,
     for (int i = 0; i < kc->len; i++) total += kc->entry[i].file_size;
     const uint64_t target = kc->budget_bytes - extra_bytes;
 
-    uint64_t active_conv = 0;
-    if (incoming && incoming->text)
-        active_conv = ds4_kvstore_compute_conv_id(incoming->text,
-                                                  incoming->text_len,
-                                                  kc->model_fp);
+    /* Active chain = entries whose text byte-prefixes the incoming store
+     * text: the ancestors of the frontier about to be stored. */
+    const char *active_text = incoming && incoming->text ? incoming->text : NULL;
+    const size_t active_len = active_text ? incoming->text_len : 0;
 
-    /* Over-cap retirement: retire the LRU conversation whenever the distinct
-     * non-active conversation count exceeds the configured cap. */
+    /* Over-cap retirement: retire the LRU lineage whenever the distinct
+     * non-active lineage count exceeds the configured cap. */
     if (kc->opt.max_conversations > 0) {
-        while (kv_cache_count_distinct_convs(kc, active_conv) >
-               kc->opt.max_conversations) {
-            uint64_t lru = kv_cache_find_lru_conv(kc, active_conv, 1);
-            if (lru == 0) break;
-            kv_cache_retire_conv(kc, lru, &total);
+        for (;;) {
+            kv_chain_rel r;
+            kv_chain_rel_build(kc, &r);
+            const bool over =
+                kv_cache_count_lineages(kc, &r, active_text, active_len) >
+                kc->opt.max_conversations;
+            int leaf = over
+                ? kv_cache_find_lru_leaf(kc, &r, active_text, active_len, 1)
+                : -1;
+            if (leaf >= 0) kv_cache_retire_leaf(kc, &r, leaf, &total);
+            kv_chain_rel_free(&r);
+            if (!over || leaf < 0) break;
         }
     }
 
     while (total > target && kc->len > 0) {
-        /* PHASE A: drop redundant (applies to all convs incl. the active one —
-         * its frontier+tail+small are always in the keep-set, so only its
-         * redundant middle/compaction-collapse is dropped here).  The stale
-         * layer is decommissioned and inert. */
-        int victim = kv_cache_find_redundant(kc);
+        kv_chain_rel r;
+        kv_chain_rel_build(kc, &r);
+        /* PHASE A: drop redundant (applies to all lineages incl. the active
+         * one — its frontier+tail+small are always in the keep-set, so only
+         * its redundant middle/compaction-collapse is dropped here).  The
+         * stale layer is decommissioned and inert. */
+        int victim = kv_cache_find_redundant(kc, &r);
         if (victim >= 0) {
             kv_cache_unlink_entry(kc, victim, &total, "redundant");
+            kv_chain_rel_free(&r);
             continue;
         }
         /* PHASE B: nothing redundant left — halve the LRU non-active
-         * conversation's large-middle spacing (double mid_spacing via level).
-         * Only halve a conversation that actually has large-middle anchors;
-         * one with only small-dense + tail is already at its floor and falls
+         * lineage's large-middle spacing (double mid_spacing via level).
+         * Only the branch-exclusive entries are bumped: a shared ancestor's
+         * level would leak window inflation into every branch it extends.
+         * Only halve a lineage that actually has large-middle anchors; one
+         * with only small-dense + tail is already at its floor and falls
          * through to retirement. */
         int halve_min_count = kc->opt.min_anchors >= INT_MAX
             ? INT_MAX : kc->opt.min_anchors + 1;
-        uint64_t conv = kv_cache_find_lru_conv(kc, active_conv, halve_min_count);
-        if (conv != 0 && kv_cache_conv_can_halve(kc, conv)) {
-            bool bumped = false;
+        int leaf = kv_cache_find_lru_leaf(kc, &r, active_text, active_len,
+                                          halve_min_count);
+        bool halved = false;
+        if (leaf >= 0 && kv_cache_leaf_can_halve(kc, &r, leaf)) {
             for (int i = 0; i < kc->len; i++) {
-                if (kc->entry[i].conv_id != conv) continue;
-                /* Small-dense anchors are kept regardless of level; bumping them
-                 * would only waste a header rewrite. */
+                if (!kv_rel_exclusive_to(kc, &r, i, leaf)) continue;
+                /* Small-dense anchors are kept regardless of level; bumping
+                 * them would only waste a header rewrite. */
                 if (kc->entry[i].tokens <= (uint32_t)kc->opt.small_dense_tokens)
                     continue;
                 if (kc->entry[i].level < 255) {
                     kc->entry[i].level++;
-                    bumped = true;
+                    halved = true;
                     ds4_kvstore_touch_file(kc->entry[i].path,
                                            kc->entry[i].hits,
                                            kc->entry[i].stale,
+                                           kc->entry[i].level,
                                            kc->entry[i].last_used);
                 }
             }
-            if (bumped) continue; /* next pass evicts newly-redundant middle */
-            /* all anchors already at max level -> fall through to retire */
         }
+        if (halved) {
+            kv_chain_rel_free(&r);
+            continue; /* next pass evicts newly-redundant middle */
+        }
+        /* all anchors already at max level (or no halving candidate) ->
+         * fall through to retire */
         /* PHASE C: retire the globally least-recently-used non-active
-         * conversation at its floor, or a legacy singleton — whichever is
-         * older.  Legacy conv_id==0 files are never redundant, but they must
-         * still yield under budget pressure (migration one-time cost). */
-        conv = kv_cache_find_lru_conv(kc, active_conv, 1);
-        int64_t conv_recency = conv ? kv_cache_conv_recency(kc, conv) : INT64_MAX;
+         * lineage at its floor, or a legacy singleton — whichever is older.
+         * Legacy v1 files are never redundant, but they must still yield
+         * under budget pressure (migration one-time cost). */
+        leaf = kv_cache_find_lru_leaf(kc, &r, active_text, active_len, 1);
+        int64_t branch_recency = leaf >= 0
+            ? kv_cache_leaf_recency(kc, &r, leaf) : INT64_MAX;
         int legacy = kv_cache_find_lru_legacy(kc);
         int64_t legacy_lu = legacy >= 0 ?
             kv_cache_entry_last_used(&kc->entry[legacy]) : INT64_MAX;
-        if (conv == 0 && legacy < 0) break; /* PHASE D: active at floor -> stop */
-        if (legacy >= 0 && (conv == 0 || legacy_lu <= conv_recency)) {
+        if (leaf < 0 && legacy < 0) {
+            kv_chain_rel_free(&r);
+            break; /* PHASE D: active at floor -> stop */
+        }
+        if (legacy >= 0 && (leaf < 0 || legacy_lu <= branch_recency)) {
             kv_cache_unlink_entry(kc, legacy, &total, "legacy-lru");
+            kv_chain_rel_free(&r);
             continue;
         }
-        kv_cache_retire_conv(kc, conv, &total);
+        kv_cache_retire_leaf(kc, &r, leaf, &total);
+        kv_chain_rel_free(&r);
         continue;
     }
 }
@@ -1002,6 +1212,8 @@ bool ds4_kvstore_open(ds4_kvstore *kc, const char *dir, uint64_t budget_mb,
 
 void ds4_kvstore_close(ds4_kvstore *kc) {
     ds4_kvstore_clear(kc);
+    for (int i = 0; i < kc->text_ref_len; i++) free(kc->text_refs[i].text);
+    free(kc->text_refs);
     free(kc->dir);
     memset(kc, 0, sizeof(*kc));
 }
@@ -1243,7 +1455,8 @@ bool ds4_kvstore_existing_compatible(ds4_kvstore *kc, const char *path,
     if (compatible) {
         /* Refresh hits/recency so an actively-revalidated checkpoint is not
          * ranked as idle by the LRU/halving passes. */
-        ds4_kvstore_touch_file(path, e.hits + 1, e.stale, (uint64_t)time(NULL));
+        ds4_kvstore_touch_file(path, e.hits + 1, e.stale, e.level,
+                               (uint64_t)time(NULL));
     }
     ds4_kvstore_entry_free(&e);
     if (!compatible) {
@@ -1479,16 +1692,20 @@ bool ds4_kvstore_store_live_prefix_text(ds4_kvstore *kc,
     }
 
     const uint64_t now = (uint64_t)time(NULL);
+    /* conv_id is retained in the header for diagnostics only; retention is
+     * grouped by byte-prefix lineage, not by this hash. */
     const uint64_t conv_id =
         ds4_kvstore_compute_conv_id(text, text_len, kc->model_fp);
-    /* Inherit the conversation's current halving level so a new anchor stays
-     * consistent with the keep-set windowing of its siblings; a fresh level=0
-     * anchor in a level-L conversation would mix window sizes. */
+    /* Inherit the lineage's current halving level so a new anchor stays
+     * consistent with the keep-set windowing of its ancestors; a fresh
+     * level=0 anchor in a level-L lineage would mix window sizes. */
     uint8_t level = 0;
-    if (conv_id != 0) {
-        for (int i = 0; i < kc->len; i++)
-            if (kc->entry[i].conv_id == conv_id && kc->entry[i].level > level)
-                level = kc->entry[i].level;
+    for (int i = 0; i < kc->len; i++) {
+        const ds4_kvstore_entry *o = &kc->entry[i];
+        if (o->level <= level) continue;
+        if ((uint64_t)o->text_bytes > text_len) continue;
+        const char *ot = kv_cache_entry_text(kc, i);
+        if (ot && memcmp(text, ot, o->text_bytes) == 0) level = o->level;
     }
     const uint32_t bucket = kc->opt.anchor_step > 0
         ? (uint32_t)(store_tokens.len / (uint32_t)kc->opt.anchor_step)
@@ -1803,7 +2020,7 @@ static int kv_cache_try_load_one(ds4_kvstore *kc, ds4_engine *engine,
                     responses_protocol ? "RESPPROTO" : "",
                     loaded, text_bytes, hdr.quant_bits, key_kind, load_ms, path);
         } else {
-            ds4_kvstore_touch_file(path, hdr.hits + 1, hdr.stale,
+            ds4_kvstore_touch_file(path, hdr.hits + 1, hdr.stale, hdr.level,
                                    (uint64_t)time(NULL));
             kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
                     "%s: kv cache hit text%s%s tokens=%d text=%u quant=%u key=%s load=%.1f ms file=%s",

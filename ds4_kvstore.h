@@ -64,7 +64,8 @@ typedef struct {
     uint64_t file_size;
     /* NEW (v2 header, offset 48): conversation lineage key (per namespace),
      * weight fingerprint, token bucket, and middle-anchor halving level. */
-    uint64_t conv_id;      /* conversation lineage key; 0 = legacy singleton */
+    uint64_t conv_id;      /* diagnostic only: retention groups by byte-prefix
+                            * lineage (PLAN-KV-LINEAGE), not by this hash */
     uint64_t model_fp;     /* weight fingerprint; 0 = legacy (always accept) */
     uint32_t bucket;       /* tokens / anchor_step; orders redundant eviction
                             * (oldest/smallest bucket first, plan §3.3) */
@@ -84,12 +85,23 @@ typedef struct {
     int small_dense_tokens;     /* keep ALL anchors <= this, default 16384 */
     int tail_anchors;           /* frontier + this many below kept dense, default 2 */
     int mid_spacing_tokens;     /* large-middle spacing at level 0, default 131072 */
-    int min_anchors;            /* retire a conversation when ladder <= this, default 4 */
-    int max_conversations;      /* cap distinct conv_ids; retire LRU over the cap, 0=unlimited */
+    int min_anchors;            /* retire a lineage when ladder <= this, default 4 */
+    int max_conversations;      /* cap distinct lineages; retire LRU over the cap, 0=unlimited */
     int prefill_chunk;          /* engine prefill chunk in tokens; the continued-store
                                  * grid is aligned to it so anchors actually land.
                                  * 0 = unknown (align to boundary_align only). */
 } ds4_kvstore_options;
+
+/* Process-lifetime cache of one checkpoint's rendered text, keyed by sha.
+ * Files are content-addressed and their text section is immutable (touch
+ * rewrites only the header), so a cached text never goes stale.  Lineage
+ * grouping (byte-prefix chaining) reads texts from here instead of re-opening
+ * files on every retention pass. */
+typedef struct {
+    char sha[41];
+    char *text;
+    uint32_t text_len;
+} ds4_kvstore_text_ref;
 
 typedef struct {
     bool enabled;
@@ -108,6 +120,11 @@ typedef struct {
     void *log_ud;
     void (*log)(void *ud, ds4_kvstore_log_type type, const char *msg);
     uint64_t model_fp;   /* set once at open from the loaded weights */
+    /* Private: sha-keyed text cache for lineage grouping (see text_ref).
+     * Pruned to the on-disk set at refresh; freed at close. */
+    ds4_kvstore_text_ref *text_refs;
+    int text_ref_len;
+    int text_ref_cap;
 } ds4_kvstore;
 
 typedef struct {
@@ -244,7 +261,7 @@ void ds4_kvstore_fill_header_v2(uint8_t h[DS4_KVSTORE_FIXED_HEADER + DS4_KVSTORE
                                 uint64_t conv_id, uint64_t model_fp,
                                 uint32_t bucket, uint8_t level, bool stale);
 bool ds4_kvstore_touch_file(const char *path, uint32_t hits, bool stale,
-                            uint64_t last_used);
+                            uint8_t level, uint64_t last_used);
 /* Store-path reuse check: does the on-disk file for sha already hold a
  * compatible checkpoint?  Replaces (unlinks) incompatible files, including
  * ones written for a different weight fingerprint. */

@@ -17204,10 +17204,11 @@ static void test_kv_tool_map_restores_before_prompt_render(void) {
 }
 
 static void test_kv_cache_retention_keeps_small_anchor(void) {
-    /* One conversation with small-dense + tail + frontier anchors and two
-     * redundant middle anchors.  Under budget pressure only the redundant
-     * middle anchors are dropped; the small anchors are never evicted merely
-     * because a bigger one exists, and the frontier + tail survive. */
+    /* One lineage (a byte-prefix chain of texts) with small-dense + tail +
+     * frontier anchors and two redundant middle anchors.  Under budget
+     * pressure only the redundant middle anchors are dropped; the small
+     * anchors are never evicted merely because a bigger one exists, and the
+     * frontier + tail survive. */
     char tmpl[] = "/tmp/ds4-kv-retention-test.XXXXXX";
     char *dir = mkdtemp(tmpl);
     TEST_ASSERT(dir != NULL);
@@ -17215,13 +17216,14 @@ static void test_kv_cache_retention_keeps_small_anchor(void) {
 
     const uint64_t conv = 0xABCDull;
     const uint64_t now = (uint64_t)time(NULL);
+    /* Texts form one prefix chain: each is a byte-prefix of the next. */
     struct { const char *text; uint32_t tokens; } anchors[] = {
-        {"a0", 8192},   /* small-dense  -> kept */
-        {"a1", 16384},  /* small-dense  -> kept */
-        {"a2", 24576},  /* middle, off-grid -> redundant */
-        {"a3", 32768},  /* middle, off-grid -> redundant */
-        {"a4", 40960},  /* tail (2nd largest) -> kept */
-        {"a5", 131072}, /* frontier -> kept */
+        {"c",     8192},   /* small-dense  -> kept */
+        {"c0",    16384},  /* small-dense  -> kept */
+        {"c01",   24576},  /* middle, off-grid -> redundant */
+        {"c012",  32768},  /* middle, off-grid -> redundant */
+        {"c0123", 40960},  /* tail (2nd largest) -> kept */
+        {"c01234", 131072}, /* frontier (leaf) -> kept */
     };
     for (int i = 0; i < 6; i++)
         test_kv_conv_stub_file(dir, anchors[i].text, conv, 0, KV_REASON_COLD,
@@ -17236,12 +17238,12 @@ static void test_kv_cache_retention_keeps_small_anchor(void) {
     kc.budget_bytes = 4500;
     kv_cache_evict(&kc, NULL, 0, NULL);
 
-    TEST_ASSERT(kv_file_exists(dir, "a0"));  /* small-dense */
-    TEST_ASSERT(kv_file_exists(dir, "a1"));  /* small-dense */
-    TEST_ASSERT(!kv_file_exists(dir, "a2")); /* redundant middle */
-    TEST_ASSERT(!kv_file_exists(dir, "a3")); /* redundant middle */
-    TEST_ASSERT(kv_file_exists(dir, "a4"));  /* tail */
-    TEST_ASSERT(kv_file_exists(dir, "a5"));  /* frontier */
+    TEST_ASSERT(kv_file_exists(dir, "c"));     /* small-dense */
+    TEST_ASSERT(kv_file_exists(dir, "c0"));    /* small-dense */
+    TEST_ASSERT(!kv_file_exists(dir, "c01"));  /* redundant middle */
+    TEST_ASSERT(!kv_file_exists(dir, "c012")); /* redundant middle */
+    TEST_ASSERT(kv_file_exists(dir, "c0123")); /* tail */
+    TEST_ASSERT(kv_file_exists(dir, "c01234")); /* frontier */
 
     kv_cache_close(&kc);
     for (int i = 0; i < 6; i++) {
@@ -17468,7 +17470,8 @@ static void test_kv_cache_conv_id_distinguishes_shared_head_sessions(void) {
     TEST_ASSERT(cA != cB);          /* diverged before cap -> distinct sessions */
     TEST_ASSERT(cC == cA);          /* prefix > cap -> ladder clusters to session A */
 
-    /* A short shared-head checkpoint (16384 tokens, < cap) is small_dense-kept. */
+    /* A short shared-head checkpoint (16384 tokens, < cap) is small_dense-kept.
+     * Session A's anchors form one byte-prefix chain: "a" ⊂ "af" ⊂ "afh". */
     char tmpl[] = "/tmp/ds4-kv-convid-test.XXXXXX";
     char *dir = mkdtemp(tmpl);
     TEST_ASSERT(dir != NULL);
@@ -17477,10 +17480,10 @@ static void test_kv_cache_conv_id_distinguishes_shared_head_sessions(void) {
         /* Short prefix (16384 bytes, < cap) hashes full text -> its own conv. */
         uint64_t cShort = ds4_kvstore_compute_conv_id(textA, 16384, 0);
         test_kv_conv_stub_file(dir, "s", cShort, 0, KV_REASON_COLD, 16384, 0, now, 512);
-        /* Session A's capped conv: frontier + middle + a redundant middle. */
-        test_kv_conv_stub_file(dir, "af", cA, 0, KV_REASON_COLD, 200000, 0, now, 512);
-        test_kv_conv_stub_file(dir, "am", cA, 0, KV_REASON_COLD, 100000, 0, now, 512);
-        test_kv_conv_stub_file(dir, "ar", cA, 0, KV_REASON_COLD, 50000, 0, now, 512);
+        /* Session A's chain: frontier + middle + a redundant middle. */
+        test_kv_conv_stub_file(dir, "afh", cA, 0, KV_REASON_COLD, 200000, 0, now, 512);
+        test_kv_conv_stub_file(dir, "af", cA, 0, KV_REASON_COLD, 100000, 0, now, 512);
+        test_kv_conv_stub_file(dir, "a", cA, 0, KV_REASON_COLD, 50000, 0, now, 512);
 
         kv_disk_cache kc = {0};
         kc.enabled = true;
@@ -17492,15 +17495,15 @@ static void test_kv_cache_conv_id_distinguishes_shared_head_sessions(void) {
         kv_cache_evict(&kc, NULL, 0, NULL);
 
         TEST_ASSERT(kv_file_exists(dir, "s"));   /* small_dense -> kept */
-        TEST_ASSERT(kv_file_exists(dir, "af"));  /* frontier -> kept */
-        TEST_ASSERT(kv_file_exists(dir, "am"));  /* window-largest middle -> kept */
-        TEST_ASSERT(!kv_file_exists(dir, "ar")); /* redundant middle -> evicted */
+        TEST_ASSERT(kv_file_exists(dir, "afh")); /* frontier (leaf) -> kept */
+        TEST_ASSERT(kv_file_exists(dir, "af"));  /* tail middle -> kept */
+        TEST_ASSERT(!kv_file_exists(dir, "a"));  /* redundant middle -> evicted */
 
         kv_cache_close(&kc);
         char *ps = test_kv_path_for_text(dir, "s");
-        char *paf = test_kv_path_for_text(dir, "af");
-        char *pam = test_kv_path_for_text(dir, "am");
-        char *par = test_kv_path_for_text(dir, "ar");
+        char *paf = test_kv_path_for_text(dir, "afh");
+        char *pam = test_kv_path_for_text(dir, "af");
+        char *par = test_kv_path_for_text(dir, "a");
         unlink(ps); unlink(paf); unlink(pam); unlink(par);
         free(ps); free(paf); free(pam); free(par);
         rmdir(dir);
@@ -17511,16 +17514,17 @@ static void test_kv_cache_conv_id_distinguishes_shared_head_sessions(void) {
 }
 
 static void test_kv_cache_keep_set_per_session(void) {
-    /* Two sessions sharing a head get distinct conv_ids, so each keeps its own
-     * frontier under budget pressure — no cross-session redundant eviction.
-     * (Under the old 512-byte head, both shared one conv_id and session B's
-     * frontier could be dropped as redundant against session A's anchors.) */
+    /* Two sessions sharing a head form two distinct prefix lineages, so each
+     * keeps its own frontier under budget pressure — no cross-session
+     * redundant eviction.  (Under the old 512-byte conv_id head, both shared
+     * one lineage and session B's frontier could be dropped as redundant
+     * against session A's anchors.) */
     char tmpl[] = "/tmp/ds4-kv-per-session-test.XXXXXX";
     char *dir = mkdtemp(tmpl);
     TEST_ASSERT(dir != NULL);
     if (!dir) return;
 
-    /* Two representative texts sharing a 512-byte head, diverging before cap. */
+    /* Two representative texts sharing a 512-byte head, diverging after it. */
     char head[512];
     for (size_t i = 0; i < sizeof(head); i++) head[i] = (char)('H' + (i % 26));
     char repA[512 + 64], repB[512 + 64];
@@ -17530,47 +17534,55 @@ static void test_kv_cache_keep_set_per_session(void) {
         repA[512 + i] = (char)('A' + i);
         repB[512 + i] = (char)('B' + i);
     }
-    const uint64_t convA = ds4_kvstore_compute_conv_id(repA, sizeof(repA), 0);
-    const uint64_t convB = ds4_kvstore_compute_conv_id(repB, sizeof(repB), 0);
-    TEST_ASSERT(convA != convB);   /* shared head, divergent -> distinct sessions */
+    /* Each session's anchors are byte-prefixes of its representative text,
+     * i.e. two chains that share the head and diverge at byte 512.  All
+     * prefixes extend past the divergence point so the two chains never
+     * collide on a shared-head sha. */
+    char ar_t[521], am_t[541], af_t[561], bm_t[521], bf_t[541];
+    memcpy(ar_t, repA, 520); ar_t[520] = '\0';
+    memcpy(am_t, repA, 540); am_t[540] = '\0';
+    memcpy(af_t, repA, 560); af_t[560] = '\0';
+    memcpy(bm_t, repB, 520); bm_t[520] = '\0';
+    memcpy(bf_t, repB, 540); bf_t[540] = '\0';
 
     const uint64_t now = (uint64_t)time(NULL);
     /* Session A (active): frontier + middle + redundant middle. */
-    test_kv_conv_stub_file(dir, "af", convA, 0, KV_REASON_COLD, 400000, 0, now, 512);
-    test_kv_conv_stub_file(dir, "am", convA, 0, KV_REASON_COLD, 390000, 0, now, 512);
-    test_kv_conv_stub_file(dir, "ar", convA, 0, KV_REASON_COLD, 380000, 0, now, 512);
+    test_kv_conv_stub_file(dir, af_t, 0, 0, KV_REASON_COLD, 400000, 0, now, 512);
+    test_kv_conv_stub_file(dir, am_t, 0, 0, KV_REASON_COLD, 390000, 0, now, 512);
+    test_kv_conv_stub_file(dir, ar_t, 0, 0, KV_REASON_COLD, 380000, 0, now, 512);
     /* Session B: frontier + middle.  B's frontier must survive. */
-    test_kv_conv_stub_file(dir, "bf", convB, 0, KV_REASON_COLD, 360000, 0, now, 512);
-    test_kv_conv_stub_file(dir, "bm", convB, 0, KV_REASON_COLD, 150000, 0, now, 512);
+    test_kv_conv_stub_file(dir, bf_t, 0, 0, KV_REASON_COLD, 360000, 0, now, 512);
+    test_kv_conv_stub_file(dir, bm_t, 0, 0, KV_REASON_COLD, 150000, 0, now, 512);
 
     kv_disk_cache kc = {0};
     kc.enabled = true;
     kc.dir = xstrdup(dir);
     kc.opt = kv_cache_default_options();
     kc.opt.tail_anchors = 1;
-    /* 5 files x ~590 = 2950; budget 2360 evicts exactly one redundant anchor:
-     * session A's 380000 (B's frontier is kept in its own conv). */
-    kc.budget_bytes = 2360;
+    /* 5 files (1108..1148 B each) = 5620; budget 4520 evicts exactly one
+     * redundant anchor: session A's 380000 (B's frontier is kept in its own
+     * lineage). */
+    kc.budget_bytes = 4520;
 
     ds4_kvstore_eviction_context incoming = {0};
-    incoming.text = repA;            /* active conversation = session A */
+    incoming.text = repA;            /* active chain = session A's ancestors */
     incoming.text_len = sizeof(repA);
     incoming.model_id = 0;
     incoming.quant_bits = 2;
     incoming.ctx_size = 32768;
     kv_cache_evict(&kc, NULL, 0, &incoming);
 
-    TEST_ASSERT(kv_file_exists(dir, "af"));  /* A frontier */
-    TEST_ASSERT(kv_file_exists(dir, "bf"));  /* B frontier survives (no cross-session evict) */
-    TEST_ASSERT(kv_file_exists(dir, "bm"));  /* B middle kept */
-    TEST_ASSERT(!kv_file_exists(dir, "ar")); /* A redundant middle evicted */
+    TEST_ASSERT(kv_file_exists(dir, af_t));  /* A frontier */
+    TEST_ASSERT(kv_file_exists(dir, bf_t));  /* B frontier survives (no cross-session evict) */
+    TEST_ASSERT(kv_file_exists(dir, bm_t));  /* B middle kept */
+    TEST_ASSERT(!kv_file_exists(dir, ar_t)); /* A redundant middle evicted */
 
     kv_cache_close(&kc);
-    char *p1 = test_kv_path_for_text(dir, "af");
-    char *p2 = test_kv_path_for_text(dir, "am");
-    char *p3 = test_kv_path_for_text(dir, "ar");
-    char *p4 = test_kv_path_for_text(dir, "bf");
-    char *p5 = test_kv_path_for_text(dir, "bm");
+    char *p1 = test_kv_path_for_text(dir, af_t);
+    char *p2 = test_kv_path_for_text(dir, am_t);
+    char *p3 = test_kv_path_for_text(dir, ar_t);
+    char *p4 = test_kv_path_for_text(dir, bf_t);
+    char *p5 = test_kv_path_for_text(dir, bm_t);
     unlink(p1); unlink(p2); unlink(p3); unlink(p4); unlink(p5);
     free(p1); free(p2); free(p3); free(p4); free(p5);
     rmdir(dir);
@@ -17743,18 +17755,17 @@ static void test_kv_cache_lru_uses_last_activity_not_creation(void) {
     TEST_ASSERT(dir != NULL);
     if (!dir) return;
 
-    const char *a_old = "conv A old small anchor";
-    const char *a_new = "conv A recent frontier anchor";
+    /* Lineage A is a byte-prefix chain (old anchor ⊂ recent frontier); B is
+     * a separate lineage. */
+    const char *a_old = "conv A anchor";
+    const char *a_new = "conv A anchor recent frontier";
     const char *b_mid = "conv B medium anchor";
     const char *active = "conv C active prompt";
     const uint64_t now = (uint64_t)time(NULL);
-    const uint64_t cA = ds4_kvstore_compute_conv_id(a_old, strlen(a_old), 0);
-    const uint64_t cB = ds4_kvstore_compute_conv_id(b_mid, strlen(b_mid), 0);
-    TEST_ASSERT(cA != cB);
-    /* Two members of one conversation A (old + recent), one member of B. */
-    test_kv_conv_stub_file(dir, a_old, cA, 0, KV_REASON_COLD, 8192,  0, now - 1000, 64);
-    test_kv_conv_stub_file(dir, a_new, cA, 0, KV_REASON_COLD, 90000, 0, now - 10,   64);
-    test_kv_conv_stub_file(dir, b_mid, cB, 0, KV_REASON_COLD, 40000, 0, now - 500,  64);
+    /* Two members of one lineage A (old + recent), one member of B. */
+    test_kv_conv_stub_file(dir, a_old, 0, 0, KV_REASON_COLD, 8192,  0, now - 1000, 64);
+    test_kv_conv_stub_file(dir, a_new, 0, 0, KV_REASON_COLD, 90000, 0, now - 10,   64);
+    test_kv_conv_stub_file(dir, b_mid, 0, 0, KV_REASON_COLD, 40000, 0, now - 500,  64);
 
     kv_disk_cache kc = {0};
     kc.enabled = true;
@@ -17854,12 +17865,13 @@ static void test_kv_cache_middle_anchor_per_window(void) {
 
     const uint64_t conv = 0xAAull;
     const uint64_t now = (uint64_t)time(NULL);
+    /* One byte-prefix chain: each text prefixes the next. */
     struct { const char *text; uint32_t tokens; } a[] = {
-        {"m0", 10240},   /* small-dense -> kept */
-        {"m1", 51200},   /* window 0, not largest -> redundant */
-        {"m2", 102400},  /* window 0, largest -> kept */
-        {"m3", 153600},  /* tail (2nd largest) -> kept */
-        {"m4", 204800},  /* frontier -> kept */
+        {"M",     10240},   /* small-dense -> kept */
+        {"M0",    51200},   /* window 0, not largest -> redundant */
+        {"M01",   102400},  /* window 0, largest -> kept */
+        {"M012",  153600},  /* tail (2nd largest) -> kept */
+        {"M0123", 204800},  /* frontier (leaf) -> kept */
     };
     for (int i = 0; i < 5; i++)
         test_kv_conv_stub_file(dir, a[i].text, conv, 0, KV_REASON_COLD,
@@ -17874,11 +17886,11 @@ static void test_kv_cache_middle_anchor_per_window(void) {
     kc.budget_bytes = 2500;
     kv_cache_evict(&kc, NULL, 0, NULL);
 
-    TEST_ASSERT(kv_file_exists(dir, "m0"));  /* small-dense */
-    TEST_ASSERT(!kv_file_exists(dir, "m1")); /* redundant middle */
-    TEST_ASSERT(kv_file_exists(dir, "m2"));  /* window-largest middle */
-    TEST_ASSERT(kv_file_exists(dir, "m3"));  /* tail */
-    TEST_ASSERT(kv_file_exists(dir, "m4"));  /* frontier */
+    TEST_ASSERT(kv_file_exists(dir, "M"));     /* small-dense */
+    TEST_ASSERT(!kv_file_exists(dir, "M0"));   /* redundant middle */
+    TEST_ASSERT(kv_file_exists(dir, "M01"));   /* window-largest middle */
+    TEST_ASSERT(kv_file_exists(dir, "M012"));  /* tail */
+    TEST_ASSERT(kv_file_exists(dir, "M0123")); /* frontier */
 
     kv_cache_close(&kc);
     for (int i = 0; i < 5; i++) {
@@ -17900,18 +17912,16 @@ static void test_kv_cache_halving_doubles_window(void) {
 
     const char *a_text = "A_frontier";
     const uint64_t now = (uint64_t)time(NULL);
-    const uint64_t active_conv =
-        ds4_kvstore_compute_conv_id(a_text, strlen(a_text), 0);
-    const uint64_t b_conv = 0xB0Bull;
 
     /* Active conversation A: a single frontier anchor. */
-    test_kv_conv_stub_file(dir, a_text, active_conv, 0, KV_REASON_COLD,
+    test_kv_conv_stub_file(dir, a_text, 0, 0, KV_REASON_COLD,
                            100000, 0, now, 512);
-    /* LRU conversation B: one anchor per level-0 window (no redundancy yet). */
-    test_kv_conv_stub_file(dir, "bs", b_conv, 0, KV_REASON_COLD, 10240, 0, now - 100000, 512);
-    test_kv_conv_stub_file(dir, "b0", b_conv, 0, KV_REASON_COLD, 51200, 0, now - 100000, 512);
-    test_kv_conv_stub_file(dir, "b1", b_conv, 0, KV_REASON_COLD, 153600, 0, now - 100000, 512);
-    test_kv_conv_stub_file(dir, "b2", b_conv, 0, KV_REASON_COLD, 256000, 0, now - 100000, 512);
+    /* LRU lineage B: a byte-prefix chain, one anchor per level-0 window
+     * (no redundancy yet). */
+    test_kv_conv_stub_file(dir, "B",    0, 0, KV_REASON_COLD, 10240,  0, now - 100000, 512);
+    test_kv_conv_stub_file(dir, "B0",   0, 0, KV_REASON_COLD, 51200,  0, now - 100000, 512);
+    test_kv_conv_stub_file(dir, "B01",  0, 0, KV_REASON_COLD, 153600, 0, now - 100000, 512);
+    test_kv_conv_stub_file(dir, "B012", 0, 0, KV_REASON_COLD, 256000, 0, now - 100000, 512);
 
     kv_disk_cache kc = {0};
     kc.enabled = true;
@@ -17927,13 +17937,13 @@ static void test_kv_cache_halving_doubles_window(void) {
     kv_cache_evict(&kc, NULL, 0, &incoming);
 
     TEST_ASSERT(kv_file_exists(dir, a_text)); /* active frontier kept */
-    TEST_ASSERT(kv_file_exists(dir, "bs"));   /* B small-dense kept */
-    TEST_ASSERT(kv_file_exists(dir, "b1"));   /* B tail kept */
-    TEST_ASSERT(kv_file_exists(dir, "b2"));   /* B frontier kept */
-    TEST_ASSERT(!kv_file_exists(dir, "b0"));  /* B middle, redundant after halving */
+    TEST_ASSERT(kv_file_exists(dir, "B"));    /* B small-dense kept */
+    TEST_ASSERT(kv_file_exists(dir, "B01"));  /* B tail kept */
+    TEST_ASSERT(kv_file_exists(dir, "B012")); /* B frontier kept */
+    TEST_ASSERT(!kv_file_exists(dir, "B0"));  /* B middle, redundant after halving */
 
     kv_cache_close(&kc);
-    const char *texts[] = {a_text, "bs", "b0", "b1", "b2"};
+    const char *texts[] = {a_text, "B", "B0", "B01", "B012"};
     for (int i = 0; i < 5; i++) {
         char *p = test_kv_path_for_text(dir, texts[i]);
         unlink(p);
@@ -17953,15 +17963,13 @@ static void test_kv_cache_retirement_at_floor(void) {
 
     const char *a_text = "A_frontier";
     const uint64_t now = (uint64_t)time(NULL);
-    const uint64_t active_conv =
-        ds4_kvstore_compute_conv_id(a_text, strlen(a_text), 0);
-    const uint64_t b_conv = 0xBEEFull;
 
-    test_kv_conv_stub_file(dir, a_text, active_conv, 0, KV_REASON_COLD,
+    test_kv_conv_stub_file(dir, a_text, 0, 0, KV_REASON_COLD,
                            100000, 0, now, 512);
-    /* LRU conversation B: 2 anchors (<= default min_anchors=4). */
-    test_kv_conv_stub_file(dir, "b0", b_conv, 0, KV_REASON_COLD, 10240, 0, now - 100000, 512);
-    test_kv_conv_stub_file(dir, "b1", b_conv, 0, KV_REASON_COLD, 204800, 0, now - 100000, 512);
+    /* LRU lineage B: a byte-prefix chain of 2 anchors
+     * (<= default min_anchors=4). */
+    test_kv_conv_stub_file(dir, "B",  0, 0, KV_REASON_COLD, 10240,  0, now - 100000, 512);
+    test_kv_conv_stub_file(dir, "B1", 0, 0, KV_REASON_COLD, 204800, 0, now - 100000, 512);
 
     kv_disk_cache kc = {0};
     kc.enabled = true;
@@ -17976,11 +17984,209 @@ static void test_kv_cache_retirement_at_floor(void) {
     kv_cache_evict(&kc, NULL, 0, &incoming);
 
     TEST_ASSERT(kv_file_exists(dir, a_text)); /* active conversation kept */
-    TEST_ASSERT(!kv_file_exists(dir, "b0"));  /* B retired entirely */
-    TEST_ASSERT(!kv_file_exists(dir, "b1"));
+    TEST_ASSERT(!kv_file_exists(dir, "B"));   /* B retired entirely */
+    TEST_ASSERT(!kv_file_exists(dir, "B1"));
 
     kv_cache_close(&kc);
-    const char *texts[] = {a_text, "b0", "b1"};
+    const char *texts[] = {a_text, "B", "B1"};
+    for (int i = 0; i < 3; i++) {
+        char *p = test_kv_path_for_text(dir, texts[i]);
+        unlink(p);
+        free(p);
+    }
+    rmdir(dir);
+}
+
+static void test_kv_cache_lineage_three_branches_keep_frontiers(void) {
+    /* Three lineages branch off a shared head.  Under budget pressure each
+     * keeps its own frontier — the case that breaks when the grouping key
+     * merges the branches (one shared conv_id ranked two of the frontiers as
+     * redundant tail/middle of a single chain). */
+    char tmpl[] = "/tmp/ds4-kv-three-branch-test.XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    TEST_ASSERT(dir != NULL);
+    if (!dir) return;
+
+    const uint64_t now = (uint64_t)time(NULL);
+    /* Shared head (small-dense): a byte-prefix of every branch anchor. */
+    test_kv_conv_stub_file(dir, "HHHH", 0, 0, KV_REASON_COLD, 8192, 0, now, 512);
+    /* Branch X/Y/Z: middle ⊂ frontier chains extending the head. */
+    test_kv_conv_stub_file(dir, "HHHHx",  0, 0, KV_REASON_COLD, 60000,  0, now, 512);
+    test_kv_conv_stub_file(dir, "HHHHxf", 0, 0, KV_REASON_COLD, 100000, 0, now, 512);
+    test_kv_conv_stub_file(dir, "HHHHy",  0, 0, KV_REASON_COLD, 60000,  0, now, 512);
+    test_kv_conv_stub_file(dir, "HHHHyf", 0, 0, KV_REASON_COLD, 100000, 0, now, 512);
+    test_kv_conv_stub_file(dir, "HHHHz",  0, 0, KV_REASON_COLD, 60000,  0, now, 512);
+    test_kv_conv_stub_file(dir, "HHHHzf", 0, 0, KV_REASON_COLD, 100000, 0, now, 512);
+
+    kv_disk_cache kc = {0};
+    kc.enabled = true;
+    kc.dir = xstrdup(dir);
+    kc.opt = kv_cache_default_options();
+    kc.opt.tail_anchors = 1;
+    /* 7 files x ~590 = ~4130; budget 2400 forces exactly the three redundant
+     * middles out, leaving the shared head and all three frontiers. */
+    kc.budget_bytes = 2400;
+    kv_cache_evict(&kc, NULL, 0, NULL);
+
+    TEST_ASSERT(kv_file_exists(dir, "HHHH"));   /* shared head, small-dense */
+    TEST_ASSERT(kv_file_exists(dir, "HHHHxf")); /* branch X frontier */
+    TEST_ASSERT(kv_file_exists(dir, "HHHHyf")); /* branch Y frontier */
+    TEST_ASSERT(kv_file_exists(dir, "HHHHzf")); /* branch Z frontier */
+    TEST_ASSERT(!kv_file_exists(dir, "HHHHx")); /* redundant middle */
+    TEST_ASSERT(!kv_file_exists(dir, "HHHHy"));
+    TEST_ASSERT(!kv_file_exists(dir, "HHHHz"));
+
+    kv_cache_close(&kc);
+    const char *texts[] = {"HHHH", "HHHHx", "HHHHxf", "HHHHy", "HHHHyf",
+                           "HHHHz", "HHHHzf"};
+    for (int i = 0; i < 7; i++) {
+        char *p = test_kv_path_for_text(dir, texts[i]);
+        unlink(p);
+        free(p);
+    }
+    rmdir(dir);
+}
+
+static void test_kv_cache_lineage_shared_ancestor_survives_retirement(void) {
+    /* A shared ancestor ABOVE small_dense survives a branch's retirement:
+     * only the entries exclusive to the retired leaf are unlinked.  The
+     * ancestor's own keep-set membership comes from the surviving branch. */
+    char tmpl[] = "/tmp/ds4-kv-shared-ancestor-test.XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    TEST_ASSERT(dir != NULL);
+    if (!dir) return;
+
+    const uint64_t now = (uint64_t)time(NULL);
+    /* Shared head, above small_dense so it participates in window logic. */
+    test_kv_conv_stub_file(dir, "HHHH", 0, 0, KV_REASON_COLD, 20000, 0, now, 512);
+    /* Branch A (fresh): a single frontier extending the head. */
+    test_kv_conv_stub_file(dir, "HHHHa", 0, 0, KV_REASON_COLD, 200000, 0, now, 512);
+    /* Branch B (idle): middle ⊂ frontier extending the head. */
+    test_kv_conv_stub_file(dir, "HHHHb",  0, 0, KV_REASON_COLD, 150000, 0, now - 100000, 512);
+    test_kv_conv_stub_file(dir, "HHHHbf", 0, 0, KV_REASON_COLD, 250000, 0, now - 100000, 512);
+
+    kv_disk_cache kc = {0};
+    kc.enabled = true;
+    kc.dir = xstrdup(dir);
+    kc.opt = kv_cache_default_options();
+    kc.opt.tail_anchors = 1;
+    /* ~2370 bytes total; budget 1200 forces B's redundant middle out, then
+     * retires B's (idle) branch entirely — but never the shared head. */
+    kc.budget_bytes = 1200;
+    kv_cache_evict(&kc, NULL, 0, NULL);
+
+    TEST_ASSERT(kv_file_exists(dir, "HHHH"));   /* shared ancestor survives */
+    TEST_ASSERT(kv_file_exists(dir, "HHHHa"));  /* branch A frontier kept */
+    TEST_ASSERT(!kv_file_exists(dir, "HHHHb")); /* B middle: redundant, then retired */
+    TEST_ASSERT(!kv_file_exists(dir, "HHHHbf")); /* B frontier: branch retired */
+
+    kv_cache_close(&kc);
+    const char *texts[] = {"HHHH", "HHHHa", "HHHHb", "HHHHbf"};
+    for (int i = 0; i < 4; i++) {
+        char *p = test_kv_path_for_text(dir, texts[i]);
+        unlink(p);
+        free(p);
+    }
+    rmdir(dir);
+}
+
+static void test_kv_cache_lineage_halving_spares_shared_and_active(void) {
+    /* Halving targets the idle branch only: its exclusive middle anchors are
+     * level-bumped and the newly redundant one evicted, while the active
+     * chain's anchors and the shared head keep their level and files. */
+    char tmpl[] = "/tmp/ds4-kv-halve-shared-test.XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    TEST_ASSERT(dir != NULL);
+    if (!dir) return;
+
+    const uint64_t now = (uint64_t)time(NULL);
+    /* Shared head (small-dense), extended by both branches. */
+    test_kv_conv_stub_file(dir, "H4HEAD", 0, 0, KV_REASON_COLD, 10240, 0, now, 512);
+    /* Active branch A: a single frontier. */
+    test_kv_conv_stub_file(dir, "H4HEADaf", 0, 0, KV_REASON_COLD, 100000, 0, now, 512);
+    /* Idle branch B: a middle chain (no redundancy yet at level 0). */
+    test_kv_conv_stub_file(dir, "H4HEADb0",   0, 0, KV_REASON_COLD, 51200,  0, now - 100000, 512);
+    test_kv_conv_stub_file(dir, "H4HEADb01",  0, 0, KV_REASON_COLD, 153600, 0, now - 100000, 512);
+    test_kv_conv_stub_file(dir, "H4HEADb012", 0, 0, KV_REASON_COLD, 256000, 0, now - 100000, 512);
+
+    kv_disk_cache kc = {0};
+    kc.enabled = true;
+    kc.dir = xstrdup(dir);
+    kc.opt = kv_cache_default_options();
+    kc.opt.min_anchors = 2; /* halve a lineage with >= 3 exclusive anchors */
+    kc.budget_bytes = 2400;
+    const char *a_text = "H4HEADaf";
+    ds4_kvstore_eviction_context incoming = {
+        .text = a_text, .text_len = strlen(a_text),
+        .model_id = 0, .quant_bits = 2, .ctx_size = 32768,
+        .reject_different_quant = false,
+    };
+    kv_cache_evict(&kc, NULL, 0, &incoming);
+
+    TEST_ASSERT(kv_file_exists(dir, "H4HEAD"));     /* shared head kept */
+    TEST_ASSERT(kv_file_exists(dir, "H4HEADaf"));   /* active frontier kept */
+    TEST_ASSERT(kv_file_exists(dir, "H4HEADb01"));  /* B tail kept */
+    TEST_ASSERT(kv_file_exists(dir, "H4HEADb012")); /* B frontier kept */
+    TEST_ASSERT(!kv_file_exists(dir, "H4HEADb0"));  /* redundant after halving */
+
+    /* Level bump hit only B's exclusive middles: the shared head and the
+     * active anchor stay at level 0, B's survivors are at level 1. */
+    const struct { const char *text; uint8_t level; } expect[] = {
+        {"H4HEAD", 0}, {"H4HEADaf", 0}, {"H4HEADb01", 1}, {"H4HEADb012", 1},
+    };
+    for (int i = 0; i < 4; i++) {
+        char sha[41];
+        sha1_bytes_hex(expect[i].text, strlen(expect[i].text), sha);
+        char *path = test_kv_path_for_text(dir, expect[i].text);
+        ds4_kvstore_entry e = {0};
+        TEST_ASSERT(ds4_kvstore_read_entry_file(path, sha, &e));
+        TEST_ASSERT(e.level == expect[i].level);
+        ds4_kvstore_entry_free(&e);
+        unlink(path);
+        free(path);
+    }
+    kv_cache_close(&kc);
+    char *pg = test_kv_path_for_text(dir, "H4HEADb0");
+    unlink(pg);
+    free(pg);
+    rmdir(dir);
+}
+
+static void test_kv_cache_lineage_active_chain_never_retired(void) {
+    /* The incoming store text marks its ancestors as the active chain: even
+     * the globally oldest lineage is never retired while it is active; the
+     * over-cap retirement takes the idle lineages instead. */
+    char tmpl[] = "/tmp/ds4-kv-active-chain-test.XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    TEST_ASSERT(dir != NULL);
+    if (!dir) return;
+
+    const uint64_t now = (uint64_t)time(NULL);
+    test_kv_conv_stub_file(dir, "AAold", 0, 0, KV_REASON_COLD, 100000, 0, now - 100000, 512);
+    test_kv_conv_stub_file(dir, "BBnew", 0, 0, KV_REASON_COLD, 100000, 0, now, 512);
+    test_kv_conv_stub_file(dir, "CCnew", 0, 0, KV_REASON_COLD, 100000, 0, now - 50, 512);
+
+    kv_disk_cache kc = {0};
+    kc.enabled = true;
+    kc.dir = xstrdup(dir);
+    kc.opt = kv_cache_default_options();
+    kc.opt.max_conversations = 1;  /* keep active + at most one idle lineage */
+    kc.budget_bytes = 1ull << 40;  /* budget is not the pressure here */
+
+    const char *incoming_text = "AAold extended with a new user turn";
+    ds4_kvstore_eviction_context incoming = {
+        .text = incoming_text, .text_len = strlen(incoming_text),
+        .model_id = 0, .quant_bits = 2, .ctx_size = 32768,
+        .reject_different_quant = false,
+    };
+    ds4_kvstore_evict(&kc, NULL, 0, &incoming);
+
+    TEST_ASSERT(kv_file_exists(dir, "AAold"));  /* oldest but active -> kept */
+    TEST_ASSERT(kv_file_exists(dir, "BBnew"));  /* newest idle lineage kept */
+    TEST_ASSERT(!kv_file_exists(dir, "CCnew")); /* LRU idle lineage retired */
+
+    kv_cache_close(&kc);
+    const char *texts[] = {"AAold", "BBnew", "CCnew"};
     for (int i = 0; i < 3; i++) {
         char *p = test_kv_path_for_text(dir, texts[i]);
         unlink(p);
@@ -18578,6 +18784,10 @@ static void ds4_server_unit_tests_run(void) {
     test_kv_cache_middle_anchor_per_window();
     test_kv_cache_halving_doubles_window();
     test_kv_cache_retirement_at_floor();
+    test_kv_cache_lineage_three_branches_keep_frontiers();
+    test_kv_cache_lineage_shared_ancestor_survives_retirement();
+    test_kv_cache_lineage_halving_spares_shared_and_active();
+    test_kv_cache_lineage_active_chain_never_retired();
     test_kv_cache_model_fp_routing();
     test_kv_cache_eviction_legacy_lru_evicts_oldest();
     test_dsml_bare_parameters_parse_as_unknown_call();

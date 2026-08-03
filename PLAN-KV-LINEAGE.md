@@ -1,7 +1,9 @@
 # PLAN: KV Retention Lineage by Prefix-Chaining (Option B)
 
-Status: PLANNED — not started. Written before /compact so context survives.
-Repo state: branch `main`, clean tree at `9149525`.
+Status: IMPLEMENTED + VERIFIED (unit tests + live 1GB-budget stress).
+Built on: `99c497f`, `9149525`. Extra bug fixed en route: `ds4_kvstore_touch_file`
+re-read `level` from disk and wrote it back, silently discarding halving level
+bumps — it now takes an explicit level argument.
 
 ## How we got here (completed work — all committed)
 

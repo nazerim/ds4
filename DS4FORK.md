@@ -42,7 +42,7 @@ Override model: `DS4_TEST_MODEL=/path/to/model.gguf ./ds4_test --server`
 
 - **Never break these paths silently:** Metal resident, SSD streaming, CUDA, distributed inference, ROCm. Test or ask user before changes touching them.
 - **DSML is the tool-call format.** `<｜DSML｜tool_calls>`, `<｜DSML｜invoke name="...">`. Server renders OpenAI/Anthropic tool schemas into DSML and maps DSML back. Do not confuse with XML-like tags.
-- **KV cache checkpoints matter.** Long agent sessions rely on disk KV persistence (`ds4_kvstore.c`). The live KV state must stay consistent with the rendered token prefix. The new conversation-scoped retention (commits `4f4a486`, `fa035a0`, `4e5a8de`) bounds tool-call divergence rebuilds to ≤ `anchor_step`; see `PLAN-KVCACHE.md` and the KVCACHE section below. The recovery-injection token-mismatch is resolved (commits `531314e`/`125ea97`/`8c91512`).
+- **KV cache checkpoints matter.** Long agent sessions rely on disk KV persistence (`ds4_kvstore.c`). The live KV state must stay consistent with the rendered token prefix. Conversation-scoped retention (`4f4a486`, `fa035a0`, `4e5a8de`), now grouped by **prefix-chaining lineage** (see `PLAN-KV-LINEAGE.md` and the KVCACHE section below), bounds tool-call divergence rebuilds to ≤ `anchor_step`. The recovery-injection token-mismatch is resolved (commits `531314e`/`125ea97`/`8c91512`).
 - **Thinking mode has a recovery path.** When the model emits tool calls inside ` thinking`, `chat_think_tool_recovery()` injects ` response`. This can cause downstream KV cache misses if the injected tokens diverge from what the next request expects.
 - **No C++.** Ever.
 - **Preserve correctness over speed.** Do not keep a faster path with unexplained attention/KV/logits drift.
@@ -939,7 +939,10 @@ Key references: `ds4_tensor_mtp_stage` (`ds4.c:2544`), `tensor_by_mtp_stage_suff
 - `4f4a486` — feat: conversation-scoped KV disk-cache retention (the redesign)
 - `fa035a0` — fix: harden KV disk-cache retention (stale scoping, anchor grid, eviction, load fallback)
 - `4e5a8de` — fix: kv cache load-fallback, min_tokens warning, and last_used sync
-**Design docs:** `PLAN-KVCACHE.md` (design), `IMPLEMENTATION-PLAN.md` (scaffold)
+- `99c497f` — fix: cross-session poisoning (conv_id hash cap 512B→128KB; stale layer decommissioned)
+- `9149525` — fix: review hardening (model_fp zombies, payload-less fallback, chunk wiring, watermarks, orphan temps)
+- lineage commit — feat: retention lineage by prefix-chaining (replaces conv_id grouping; see PLAN-KV-LINEAGE.md)
+**Design docs:** `PLAN-KVCACHE.md` (original design), `PLAN-KV-LINEAGE.md` (current lineage design)
 **Files:** `ds4_kvstore.c`, `ds4_kvstore.h`, `ds4_server.c`
 
 ## Problem it solves
@@ -950,19 +953,22 @@ The old disk cache kept only the *largest* checkpoints (keep-largest eviction). 
 
 ## Design
 
-Checkpoint file headers are now **v2** (72 bytes = base 48 + 24), persisting `conv_id`, `model_fp`, `bucket` (`tokens / anchor_step`), `level` (halving), and `stale` so eviction can act on them without reading multi-hundred-MB payloads. v1 files still load (legacy defaults) and are never upgraded in place.
+Checkpoint file headers are now **v2** (72 bytes = base 48 + 24), persisting `conv_id` (diagnostic only), `model_fp`, `bucket` (`tokens / anchor_step`), and `level` (halving) so eviction can act on them without reading multi-hundred-MB payloads. The `stale` byte is inert (layer decommissioned in `99c497f`). v1 files still load (legacy defaults) and are never upgraded in place.
 
-Retention is **per conversation lineage** (keyed by `conv_id`, a fold of the SHA1 of the conversation head + `model_fp`), non-uniform and age-tiered:
+Retention is **per lineage by prefix-chaining**: a lineage is a maximal chain of checkpoint texts where each is a byte-prefix of the next — the exact relation the load path uses for reuse, so grouping can never disagree with loadability. Chains branch where sessions diverge from a shared head (parent session / sibling session / subagent); shared ancestors belong to every chain that extends them and survive while ANY of those chains keeps them. Retiring a branch removes only the entries exclusive to it. (`conv_id`, the SHA1-of-head hash, proved a cliff: a shared preamble larger than its byte cap merged distinct sessions into one lineage and re-opened cross-session eviction — `99c497f` raised the cap to 128KB as a stopgap; prefix-chaining removes the cap entirely. Checkpoint texts are read once per process into a sha-keyed cache for the chain computations.) Retention within a lineage is non-uniform and age-tiered:
 
 - **Dense small:** keep ALL anchors ≤ `small_dense` (default 16k) — cheap, good coverage.
-- **Dense tail:** keep the frontier + `tail_anchors` (default 2) below — bounds the common tool-call divergence to ≤ `step`.
-- **Sparse middle:** every `mid_spacing` (default 128k); on budget pressure **halve** (double the spacing) the LRU conversation's large-middle anchors.
-- **Age tier:** an LRU conversation downgrades to a few largest anchors; retire it entirely at `min_anchors` (default 4).
-- Never evict a small anchor merely because a bigger one exists; never strip one conversation's floor for another's budget.
+- **Dense tail:** keep the frontier (a chain leaf, always) + `tail_anchors` (default 2) below — bounds the common tool-call divergence to ≤ `step`.
+- **Sparse middle:** the largest anchor per `mid_spacing` (default 128k) window; on budget pressure **halve** (double the spacing of) the LRU idle lineage's exclusive large-middle anchors — shared-ancestor levels are never bumped, so halving cannot leak into other branches.
+- **Age tier:** retire the LRU idle lineage (exclusive entries only) when halving is exhausted; legacy v1 files exit only via legacy-LRU.
+- The **active chain** (ancestors of the incoming store text) is never halved or retired.
+- Never evict a small anchor merely because a bigger one exists; never strip one lineage's floor for another's budget.
 
-**Stale detection at load:** `mark_stale_at_load` flags candidates in the active namespace whose text fails the byte-prefix test, scoped to the active `conv_id` (H-1) so batched conversations don't poison each other. Stale entries evict first.
+**Stale layer decommissioned (`99c497f`):** `mark_stale_at_load` is an intentional no-op. Stale marking overrode keep-set protection (evicting frontiers) and was the cross-session poison mechanism; redundant/halving/LRU-retire already provide pruning.
 
-**Anchor grid (H-2):** continued checkpoints now write on the `anchor_step` grid (not the legacy `continued_interval`) aligned to the prefill chunk via `lcm(boundary_align, prefill_chunk)`, so they populate the dense-small ladder. This fixed the "checkpoints every 20k" bug (step 10240 + chunk 4096 → lcm 20480 > small_dense → no dense-small anchors). The startup log shows `anchor_step=8192 continued_step=8192 prefill_chunk=0` — prefill_chunk=0 is the expected default for non-CUDA-TP engines.
+**Known non-bug — volatile prompt bytes:** prompts embedding volatile content (e.g. OpenCode's `Today's date:` inside a subagent `<env>` block in history) diverge mid-history at rollover. The cache then hits the deepest true prefix and rebuilds the ladder in one prefill (one-time cost per affected session). Inherent to byte-exact caching; not special-cased.
+
+**Anchor grid (H-2):** continued checkpoints write on the `anchor_step` grid aligned to the engine's effective prefill chunk (`ds4_engine_effective_prefill_chunk`: explicit chunk → `DS4_METAL_PREFILL_CHUNK` → variant default), so anchors actually land. The startup log shows `anchor_step=8192 continued_step=8192 prefill_chunk=4096`.
 
 **Load fallback (M-5):** `try_load_text` tries the largest candidate first; on pre-payload verification failure (corrupt body, hash/prefix mismatch, fopen failure) it falls back to the next-largest valid candidate instead of forcing a full prefill.
 
@@ -982,7 +988,8 @@ Plus existing: `--kv-cache-min-tokens`, `--kv-cache-cold-max-tokens`, `--kv-cach
 
 ## Verification
 
-- `make ds4_test && ./ds4_test --server` passes (incl. new tests: stale isolation, chunk alignment, max-conversations retirement, LRU last-activity).
+- `make test` green (server KV suite incl. lineage tests, agent tests, eval extractors, layer_pack 97, mgpu 98, gpu_args CLI 44).
+- Lineage tests: three branches sharing a head keep all frontiers; shared ancestor survives branch retirement; halving spares shared ancestors + active chain; active chain never retired; plus the original keep-set/halving/retirement/legacy-LRU geometry on prefix-chain fixtures.
+- Live stress (1GB budget, 3 interleaved synthetic sessions): cross-session frontier hits on switch-back, idle-lineage whole-branch retirement under pressure, active chain never touched, cold rebuild after retirement, clean shutdown store. Log signature: `reason=redundant` (middle pruning), `reason=conversation-retired` (branch/lineage), `reason=legacy-lru` (v1 singletons).
 - `make ds4-server` builds clean (0 warnings under `-Wall -Wextra -std=c99`).
-- Two code-review passes: no Critical/High; all findings fixed and re-verified (fopen retryable, min_tokens warning, last_used sync).
-- Startup banner now logs `continued_step` and `prefill_chunk` so the effective anchor grid is observable.
+- Startup banner logs `continued_step` and `prefill_chunk` so the effective anchor grid is observable.
