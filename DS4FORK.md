@@ -941,7 +941,7 @@ Key references: `ds4_tensor_mtp_stage` (`ds4.c:2544`), `tensor_by_mtp_stage_suff
 - `4e5a8de` — fix: kv cache load-fallback, min_tokens warning, and last_used sync
 - `99c497f` — fix: cross-session poisoning (conv_id hash cap 512B→128KB; stale layer decommissioned)
 - `9149525` — fix: review hardening (model_fp zombies, payload-less fallback, chunk wiring, watermarks, orphan temps)
-- lineage commit — feat: retention lineage by prefix-chaining (replaces conv_id grouping; see PLAN-KV-LINEAGE.md)
+- `8f5b783` — feat: retention lineage by prefix-chaining (replaces conv_id grouping; see PLAN-KV-LINEAGE.md)
 **Design docs:** `PLAN-KVCACHE.md` (original design), `PLAN-KV-LINEAGE.md` (current lineage design)
 **Files:** `ds4_kvstore.c`, `ds4_kvstore.h`, `ds4_server.c`
 
