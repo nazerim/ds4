@@ -352,10 +352,16 @@ static void print_kv_cache(FILE *fp, const help_colors *c) {
     opt(fp, c, "--kv-disk-dir DIR", "Enable disk KV checkpoints in DIR.");
     opt(fp, c, "--kv-disk-space-mb N", "Disk budget. Default when enabled: 4096");
     opt(fp, c, "--kv-cache-min-tokens N", "Do not save/load checkpoints shorter than N. Default: 512");
-    opt(fp, c, "--kv-cache-cold-max-tokens N", "Save cold first prompts up to N tokens. 0 disables. Default: 30000");
+    opt(fp, c, "--kv-cache-cold-max-tokens N", "Save cold first prompts up to N tokens; larger checkpoints are one-shot (unlinked after one load). 0 disables. Default: 30000");
     opt(fp, c, "--kv-cache-continued-interval-tokens N", "Save aligned continued frontiers. 0 disables. Default: 10000");
     opt(fp, c, "--kv-cache-boundary-trim-tokens N", "Trim tail tokens for cold boundary saves. Default: 32");
     opt(fp, c, "--kv-cache-boundary-align-tokens N", "Align cold boundary saves to this multiple. Default: 2048");
+    opt(fp, c, "--kv-cache-anchor-step N", "Continued-anchor grid spacing in tokens. 0 falls back to the continued interval. Default: 8192");
+    opt(fp, c, "--kv-cache-small-dense N", "Keep every anchor of a conversation up to N tokens. Default: 16384");
+    opt(fp, c, "--kv-cache-tail-anchors N", "Dense anchors kept behind each conversation frontier. Default: 2");
+    opt(fp, c, "--kv-cache-mid-spacing N", "Sparse middle-anchor window in tokens (one kept anchor per window). Default: 131072");
+    opt(fp, c, "--kv-cache-min-anchors N", "Minimum anchors a conversation keeps before halving/retirement. Default: 4");
+    opt(fp, c, "--kv-cache-max-conversations N", "Cap on distinct cached conversations; LRU retired beyond it. 0 = unlimited. Default: 0");
     opt(fp, c, "--kv-cache-reject-different-quant", "Reject checkpoints written with different routed-expert quantization.");
     opt(fp, c, "--disable-exact-dsml-tool-replay", "Disable exact sampled DSML tool replay map.");
     opt(fp, c, "--tool-memory-max-ids N", "Exact tool-call IDs kept in RAM. Default: 100000");

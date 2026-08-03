@@ -9137,25 +9137,27 @@ static bool kv_tool_map_write(server *s, FILE *fp, const char *text,
     return ok;
 }
 
+/* Returns the number of entries loaded; a negative value means the trailer is
+ * corrupt (as opposed to absent), so the caller can log the degradation. */
 static int kv_tool_map_load_from_pos(server *s, FILE *fp, const stop_list *wanted) {
     if (!s || s->disable_exact_dsml_tool_replay || !fp) return 0;
     uint8_t h[KV_TOOL_MAP_HEADER];
     size_t n = fread(h, 1, sizeof(h), fp);
     if (n == 0 && feof(fp)) return 0;
-    if (n != sizeof(h)) return 0;
+    if (n != sizeof(h)) return -1;
     if (h[0] != KV_TOOL_MAP_MAGIC0 || h[1] != KV_TOOL_MAP_MAGIC1 ||
-        h[2] != KV_TOOL_MAP_MAGIC2 || h[3] != KV_TOOL_MAP_VERSION) return 0;
+        h[2] != KV_TOOL_MAP_MAGIC2 || h[3] != KV_TOOL_MAP_VERSION) return -1;
 
     uint32_t count = le_get32(h + 4);
-    if ((uint64_t)count > (uint64_t)tool_memory_max_entries(&s->tool_mem) * 4u) return 0;
+    if ((uint64_t)count > (uint64_t)tool_memory_max_entries(&s->tool_mem) * 4u) return -1;
     int loaded = 0;
     for (uint32_t i = 0; i < count; i++) {
         uint8_t lens[8];
-        if (fread(lens, 1, sizeof(lens), fp) != sizeof(lens)) return loaded;
+        if (fread(lens, 1, sizeof(lens), fp) != sizeof(lens)) return -1;
         uint32_t id_len = le_get32(lens);
         uint32_t dsml_len = le_get32(lens + 4);
         if (id_len == 0 || id_len > 256 || dsml_len == 0 ||
-            dsml_len > DS4_TOOL_MEMORY_MAX_BYTES) return loaded;
+            dsml_len > DS4_TOOL_MEMORY_MAX_BYTES) return -1;
         char *id = xmalloc((size_t)id_len + 1);
         char *dsml = xmalloc((size_t)dsml_len + 1);
         bool ok = fread(id, 1, id_len, fp) == id_len &&
@@ -9436,7 +9438,13 @@ static void kv_cache_restore_suppressed_continued(kv_disk_cache *kc,
 static int kv_cache_slot_continued_target(server *s, server_slot *slot,
                                           int live_tokens) {
     if (!s || !slot) return 0;
-    kv_disk_cache view = s->kv;
+    /* Copy only the immutable bits under kv_mu; a whole-struct copy would
+     * race with the entry array mutated by store/evict. */
+    kv_disk_cache view = {0};
+    pthread_mutex_lock(&s->kv_mu);
+    view.enabled = s->kv.enabled;
+    view.opt = s->kv.opt;
+    pthread_mutex_unlock(&s->kv_mu);
     view.continued_last_store_tokens = slot->continued_last_store_tokens;
     return kv_cache_continued_store_target(&view, live_tokens);
 }
@@ -10794,6 +10802,10 @@ static void canonicalize_tool_checkpoint(server *s, server_slot *slot,
                                         err, sizeof(err));
     pthread_mutex_unlock(&s->inference_mu);
     if (rr == DS4_SESSION_REWRITE_OK) {
+        /* The live timeline was rewritten (possibly shorter); the old
+         * continued-store watermark refers to the pre-rewrite frontier and
+         * would suppress anchors until it is passed again. */
+        slot->continued_last_store_tokens = 0;
         server_log(DS4_LOG_KVCACHE,
                    "ds4-server: tool checkpoint canonicalized ctx=%s common=%d live=%d canonical=%d",
                    ctx, common, live_len, canonical.len);
@@ -10867,6 +10879,9 @@ static void canonicalize_tool_checkpoint(server *s, server_slot *slot,
                                 sync_err, sizeof(sync_err)) == 0) {
             ds4_session_set_progress(slot->session, NULL, NULL);
             ds4_session_set_display_progress(slot->session, NULL, NULL);
+            /* Restore the slot watermark to the rebuilt base (the main load
+             * path does the same at disk-hit time); 0 on a full replay. */
+            slot->continued_last_store_tokens = loaded;
             const double rebuild_sec = now_sec() - rebuild_t0;
             if (loaded > 0) {
                 server_log(DS4_LOG_KVCACHE,
@@ -13275,9 +13290,10 @@ int main(int argc, char **argv) {
 
     if (cfg.kv_disk_dir) {
         uint64_t model_fp = ds4_kvstore_model_fingerprint(cfg.engine.model_path);
-        /* Align the continued-checkpoint grid to the engine's prefill chunk so
-         * anchors actually land on chunk boundaries (kv_cache_continued_step). */
-        cfg.kv_cache.prefill_chunk = (int)ds4_engine_prefill_chunk(engine);
+        /* Align the continued-checkpoint grid to the engine's effective prefill
+         * chunk (explicit setting, env override, or backend default) so anchors
+         * actually land on chunk boundaries (kv_cache_continued_step). */
+        cfg.kv_cache.prefill_chunk = (int)ds4_engine_effective_prefill_chunk(engine);
         kv_cache_open(&s.kv, cfg.kv_disk_dir, cfg.kv_disk_space_mb,
                       cfg.kv_cache_reject_different_quant, model_fp, cfg.kv_cache);
     }
@@ -16947,8 +16963,8 @@ static void test_kv_cache_lookup_uses_longest_text_prefix(void) {
 
     const char *short_text = "transcript prefix";
     const char *long_text = "transcript prefix with sampled token bytes";
-    test_kv_text_stub_file(dir, short_text, KV_REASON_COLD, 512, 0);
-    test_kv_text_stub_file(dir, long_text, KV_REASON_COLD, 768, 0);
+    test_kv_text_stub_file(dir, short_text, KV_REASON_COLD, 512, 64);
+    test_kv_text_stub_file(dir, long_text, KV_REASON_COLD, 768, 64);
 
     kv_disk_cache kc = {0};
     kc.enabled = true;
@@ -16986,7 +17002,7 @@ static void test_kv_cache_lookup_rejects_wrong_model(void) {
     if (!dir) return;
 
     const char *text = "shared rendered prefix";
-    test_kv_text_stub_file_model(dir, text, 1, KV_REASON_COLD, 512, 0);
+    test_kv_text_stub_file_model(dir, text, 1, KV_REASON_COLD, 512, 64);
 
     kv_disk_cache kc = {0};
     kc.enabled = true;
@@ -17557,6 +17573,90 @@ static void test_kv_cache_keep_set_per_session(void) {
     char *p5 = test_kv_path_for_text(dir, "bm");
     unlink(p1); unlink(p2); unlink(p3); unlink(p4); unlink(p5);
     free(p1); free(p2); free(p3); free(p4); free(p5);
+    rmdir(dir);
+}
+
+static void test_kv_cache_store_compat_rejects_stale_model_fp(void) {
+    /* After a weight swap a same-text file carries the old fingerprint.  The
+     * store path must not declare it compatible (that would silently disable
+     * disk caching for the prefix until budget pressure evicted the zombie);
+     * it must replace it.  Legacy fp==0 files stay compatible. */
+    char tmpl[] = "/tmp/ds4-kv-compat-fp-test.XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    TEST_ASSERT(dir != NULL);
+    if (!dir) return;
+
+    const char *text = "checkpoint text reused across a weight swap";
+    char sha[41];
+    sha1_bytes_hex(text, strlen(text), sha);
+    const uint64_t now = (uint64_t)time(NULL);
+
+    kv_disk_cache kc = {0};
+    kc.enabled = true;
+    kc.dir = xstrdup(dir);
+    kc.opt = kv_cache_default_options();
+    kc.budget_bytes = 1ull << 30;
+    kc.model_fp = 222; /* the freshly loaded weights */
+
+    char *path = test_kv_path_for_text(dir, text);
+
+    /* Old-fingerprint file: incompatible and replaced. */
+    test_kv_conv_stub_file(dir, text, 0, 111, KV_REASON_COLD, 1024, 0, now, 64);
+    TEST_ASSERT(!ds4_kvstore_existing_compatible(&kc, path, sha, text,
+                                                 strlen(text), 0, 2, 32768));
+    TEST_ASSERT(access(path, F_OK) != 0);
+
+    /* Matching fingerprint: reusable. */
+    test_kv_conv_stub_file(dir, text, 0, 222, KV_REASON_COLD, 1024, 0, now, 64);
+    TEST_ASSERT(ds4_kvstore_existing_compatible(&kc, path, sha, text,
+                                                strlen(text), 0, 2, 32768));
+    unlink(path);
+
+    /* Legacy fp==0 file: accepted. */
+    test_kv_conv_stub_file(dir, text, 0, 0, KV_REASON_COLD, 1024, 0, now, 64);
+    TEST_ASSERT(ds4_kvstore_existing_compatible(&kc, path, sha, text,
+                                                strlen(text), 0, 2, 32768));
+
+    kv_cache_close(&kc);
+    unlink(path);
+    free(path);
+    rmdir(dir);
+}
+
+static void test_kv_cache_find_skips_payload_less_files(void) {
+    /* Payload-less (agent /strip'd) checkpoints pass header/text verification
+     * but can never load a session; lookup must skip them instead of letting
+     * them terminate the fallback chain in front of a valid smaller anchor. */
+    char tmpl[] = "/tmp/ds4-kv-stripped-test.XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    TEST_ASSERT(dir != NULL);
+    if (!dir) return;
+
+    const char *prompt = "stripped checkpoint prefix text that continues further";
+    const char *text_big = "stripped checkpoint prefix text";  /* stripped */
+    const char *text_small = "stripped checkpoint prefix";     /* loadable */
+    const uint64_t now = (uint64_t)time(NULL);
+    test_kv_conv_stub_file(dir, text_big, 0, 0, KV_REASON_COLD, 1024, 0, now, 0);
+    test_kv_conv_stub_file(dir, text_small, 0, 0, KV_REASON_COLD, 1024, 0, now, 64);
+
+    kv_disk_cache kc = {0};
+    kc.enabled = true;
+    kc.dir = xstrdup(dir);
+    kc.opt = kv_cache_default_options();
+    kc.budget_bytes = 1ull << 30;
+
+    const int idx = ds4_kvstore_find_text_prefix(&kc, prompt, 0, 2, 32768);
+    TEST_ASSERT(idx >= 0);
+    if (idx >= 0)
+        TEST_ASSERT(kc.entry[idx].text_bytes == strlen(text_small));
+
+    kv_cache_close(&kc);
+    char *p1 = test_kv_path_for_text(dir, text_big);
+    char *p2 = test_kv_path_for_text(dir, text_small);
+    unlink(p1);
+    unlink(p2);
+    free(p1);
+    free(p2);
     rmdir(dir);
 }
 
@@ -18468,6 +18568,8 @@ static void ds4_server_unit_tests_run(void) {
     test_kv_cache_stale_at_load_isolates_conversations();
     test_kv_cache_conv_id_distinguishes_shared_head_sessions();
     test_kv_cache_keep_set_per_session();
+    test_kv_cache_store_compat_rejects_stale_model_fp();
+    test_kv_cache_find_skips_payload_less_files();
     test_kv_cache_continued_step_aligns_to_prefill_chunk();
     test_kv_cache_max_conversations_retires_lru();
     test_kv_cache_lru_uses_last_activity_not_creation();

@@ -900,6 +900,31 @@ void ds4_kvstore_evict(ds4_kvstore *kc, const ds4_tokens *live,
 
 static int kv_cache_continued_step(const ds4_kvstore *kc);
 
+/* Crash-orphaned store temps (<sha>.kv.tmp.<pid>) never match the <sha>.kv
+ * name filter in kv_cache_refresh, so they would accumulate forever.  Reap the
+ * old ones at open; an age guard keeps a concurrent writer's in-flight temp
+ * untouched. */
+static void kv_cache_sweep_orphan_temps(ds4_kvstore *kc) {
+    DIR *d = opendir(kc->dir);
+    if (!d) return;
+    const uint64_t now = (uint64_t)time(NULL);
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        if (!strstr(de->d_name, ".kv.tmp.")) continue;
+        char *path = ds4_kvstore_path_join(kc->dir, de->d_name);
+        struct stat st;
+        if (stat(path, &st) == 0 && st.st_mtime > 0 &&
+            (uint64_t)st.st_mtime + 3600ull <= now) {
+            if (unlink(path) == 0)
+                kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
+                        "%s: kv cache reaped orphaned temp %s",
+                        kv_log_name(kc), path);
+        }
+        free(path);
+    }
+    closedir(d);
+}
+
 bool ds4_kvstore_open(ds4_kvstore *kc, const char *dir, uint64_t budget_mb,
                       bool reject_different_quant, uint64_t model_fp,
                       ds4_kvstore_options opt,
@@ -946,6 +971,7 @@ bool ds4_kvstore_open(ds4_kvstore *kc, const char *dir, uint64_t budget_mb,
         kv_logf(kc, DS4_KVSTORE_LOG_WARNING,
                 "%s: kv cache min_tokens=%d; anchors shorter than min_tokens are never cached",
                 kv_log_name(kc), kc->opt.min_tokens);
+    kv_cache_sweep_orphan_temps(kc);
     ds4_kvstore_evict(kc, NULL, 0, NULL);
     kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
             "%s: KV disk cache %s (budget=%llu MiB, cross-quant=%s, min=%d, cold_max=%d, continued=%d, trim=%d, align=%d, hit_half_life=%llus)",
@@ -1197,18 +1223,28 @@ static bool kv_cache_file_text_matches(const char *path, const char sha[41],
     return ok;
 }
 
-static bool kv_cache_existing_compatible(ds4_kvstore *kc, const char *path,
-                                         const char sha[41],
-                                         const char *text, size_t text_len,
-                                         int model_id, int quant_bits, int ctx_size) {
+bool ds4_kvstore_existing_compatible(ds4_kvstore *kc, const char *path,
+                                     const char sha[41],
+                                     const char *text, size_t text_len,
+                                     int model_id, int quant_bits, int ctx_size) {
     if (access(path, F_OK) != 0) return false;
     ds4_kvstore_entry e = {0};
     if (!ds4_kvstore_read_entry_file(path, sha, &e)) return false;
+    /* model_fp must match the load-side guard (find_text_prefix_skip): after a
+     * weight swap a same-text file carries a stale fingerprint; the load path
+     * rejects it, so reusing it here would silently disable disk caching for
+     * this prefix until budget pressure happened to evict the zombie. */
     bool compatible = e.model_id == (uint8_t)model_id &&
+                      (!e.model_fp || e.model_fp == kc->model_fp) &&
                       (!kc->reject_different_quant ||
                        e.quant_bits == (uint8_t)quant_bits) &&
                       e.ctx_size <= (uint32_t)ctx_size &&
                       kv_cache_file_text_matches(path, sha, text, text_len);
+    if (compatible) {
+        /* Refresh hits/recency so an actively-revalidated checkpoint is not
+         * ranked as idle by the LRU/halving passes. */
+        ds4_kvstore_touch_file(path, e.hits + 1, e.stale, (uint64_t)time(NULL));
+    }
     ds4_kvstore_entry_free(&e);
     if (!compatible) {
         if (unlink(path) == 0) {
@@ -1367,9 +1403,9 @@ bool ds4_kvstore_store_live_prefix_text(ds4_kvstore *kc,
     char *path = ds4_kvstore_path_for_sha(kc, sha);
     const uint8_t reason_code = ds4_kvstore_reason_code(reason);
 
-    if (kv_cache_existing_compatible(kc, path, sha, text, text_len,
-                                     model_id,
-                                     quant_bits, ds4_session_ctx(session))) {
+    if (ds4_kvstore_existing_compatible(kc, path, sha, text, text_len,
+                                        model_id,
+                                        quant_bits, ds4_session_ctx(session))) {
         kv_cache_rewrite_trailer(kc, path, text, hooks);
         free(text);
         free(path);
@@ -1531,7 +1567,8 @@ bool ds4_kvstore_store_live_prefix_text(ds4_kvstore *kc,
                 original_len - store_tokens.len,
                 reason,
                 text_override ? (cache_text_key ? cache_text_key : "visible-transcript") : "token-text",
-                (double)(DS4_KVSTORE_FIXED_HEADER + 4ull + text_len + payload_bytes + trailer_bytes) / (1024.0 * 1024.0),
+                (double)(DS4_KVSTORE_FIXED_HEADER + DS4_KVSTORE_HEADER_V2_EXTRA +
+                         4ull + text_len + payload_bytes + trailer_bytes) / (1024.0 * 1024.0),
                 save_ms);
     }
     ds4_session_payload_file_free(&staged);
@@ -1588,6 +1625,10 @@ static int kv_cache_find_text_prefix_skip(ds4_kvstore *kc, const char *prompt_te
             if (skip[s] == i) { skipped = true; break; }
         if (skipped) continue;
         if (e->text_bytes > prompt_bytes) continue;
+        /* Payload-less (agent /strip'd) files pass header/text verification but
+         * can never load a session; skipping them here keeps them from
+         * terminating the fallback chain in front of a valid smaller anchor. */
+        if (e->payload_bytes == 0) continue;
         if ((int)e->tokens < kc->opt.min_tokens) continue;
         if (e->model_id != (uint8_t)model_id) continue;
         if (e->model_fp && e->model_fp != kc->model_fp) continue;
@@ -1716,7 +1757,15 @@ static int kv_cache_try_load_one(ds4_kvstore *kc, ds4_engine *engine,
                     effective_prompt);
             }
             if (hooks && hooks->load && (hdr.ext_flags & hooks->ext_flag)) {
-                hooks->load(hooks->ud, fp, hooks->load_wanted);
+                if (hooks->load(hooks->ud, fp, hooks->load_wanted) < 0) {
+                    /* The KV payload itself restored fine; only the trailer
+                     * (e.g. tool map) is corrupt.  Degrade to canonical
+                     * re-render, but say so — otherwise a corrupt checkpoint is
+                     * indistinguishable from an ordinary miss. */
+                    kv_logf(kc, DS4_KVSTORE_LOG_WARNING,
+                            "%s: kv cache trailer corrupt, continuing without it %s",
+                            kv_log_name(kc), path);
+                }
             }
         } else {
             ds4_session_invalidate(session);
@@ -1754,7 +1803,7 @@ static int kv_cache_try_load_one(ds4_kvstore *kc, ds4_engine *engine,
                     responses_protocol ? "RESPPROTO" : "",
                     loaded, text_bytes, hdr.quant_bits, key_kind, load_ms, path);
         } else {
-            ds4_kvstore_touch_file(path, hdr.hits + 1, false,
+            ds4_kvstore_touch_file(path, hdr.hits + 1, hdr.stale,
                                    (uint64_t)time(NULL));
             kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
                     "%s: kv cache hit text%s%s tokens=%d text=%u quant=%u key=%s load=%.1f ms file=%s",

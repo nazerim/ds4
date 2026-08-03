@@ -245,6 +245,13 @@ void ds4_kvstore_fill_header_v2(uint8_t h[DS4_KVSTORE_FIXED_HEADER + DS4_KVSTORE
                                 uint32_t bucket, uint8_t level, bool stale);
 bool ds4_kvstore_touch_file(const char *path, uint32_t hits, bool stale,
                             uint64_t last_used);
+/* Store-path reuse check: does the on-disk file for sha already hold a
+ * compatible checkpoint?  Replaces (unlinks) incompatible files, including
+ * ones written for a different weight fingerprint. */
+bool ds4_kvstore_existing_compatible(ds4_kvstore *kc, const char *path,
+                                     const char sha[41],
+                                     const char *text, size_t text_len,
+                                     int model_id, int quant_bits, int ctx_size);
 uint64_t ds4_kvstore_compute_conv_id(const char *text, size_t text_len,
                                      uint64_t model_fp);
 uint64_t ds4_kvstore_model_fingerprint(const char *model_path);

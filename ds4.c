@@ -56374,6 +56374,25 @@ uint32_t ds4_engine_prefill_chunk(ds4_engine *e) {
     return e ? e->prefill_chunk : 0;
 }
 
+/* The chunk the engine will actually use for long-prompt prefill when no
+ * explicit chunk was configured.  Metal chooses per prompt
+ * (ds4_prefill_cap_for_prompt): the DS4_METAL_PREFILL_CHUNK override, else a
+ * variant default for prompts > 4096 tokens.  The KV continued-anchor grid
+ * aligns to this value; using the configured-only chunk (0) there leaves the
+ * lcm protection blind and an env-override chunk silently defeats anchoring. */
+uint32_t ds4_engine_effective_prefill_chunk(ds4_engine *e) {
+    if (!e) return 0;
+    if (e->prefill_chunk) return e->prefill_chunk;
+    if (e->backend != DS4_BACKEND_METAL) return 0;
+    const char *env = getenv("DS4_METAL_PREFILL_CHUNK");
+    if (env && env[0]) {
+        char *endp = NULL;
+        const long v = strtol(env, &endp, 10);
+        if (endp != env && v > 0) return (uint32_t)v;
+    }
+    return DS4_MODEL_VARIANT == DS4_VARIANT_PRO ? 8192u : 4096u;
+}
+
 
 int ds4_engine_power(ds4_engine *e) {
     return e ? e->power_percent : 100;

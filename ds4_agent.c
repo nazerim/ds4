@@ -4089,7 +4089,8 @@ static bool agent_kv_write_title_trailer(FILE *fp, const char *title,
                                          char *err, size_t err_len) {
     size_t title_len = title ? strlen(title) : 0;
     if (title_len > UINT32_MAX) {
-        snprintf(err, err_len, "agent session title is too large");
+        if (err && err_len)
+            snprintf(err, err_len, "agent session title is too large");
         return false;
     }
     uint8_t tb[4];
@@ -5653,7 +5654,14 @@ static bool agent_worker_strip_session(agent_worker *w, const char *prefix,
                                        char sha_out[41],
                                        uint32_t *tokens_out,
                                        char *err, size_t err_len) {
-    if (err && err_len) err[0] = '\0';
+    /* Callers may pass NULL; route every message through a scratch buffer so
+     * the many snprintf/deref sites below stay unconditional. */
+    char err_scratch[1];
+    if (!err) {
+        err = err_scratch;
+        err_len = sizeof(err_scratch);
+    }
+    if (err_len) err[0] = '\0';
     char sha[41];
     char *path = NULL;
     if (!agent_worker_find_session(w, prefix, sha, &path, err, err_len))
@@ -5722,16 +5730,30 @@ static bool agent_worker_strip_session(agent_worker *w, const char *prefix,
         return false;
     }
 
-    uint8_t h[DS4_KVSTORE_FIXED_HEADER];
+    /* Keep the source header version: rewriting a v2 file with a v1 header
+     * would silently drop its conversation metadata (conv_id/model_fp/level),
+     * which matters when the agent session dir is shared with the server. */
+    uint8_t h[DS4_KVSTORE_FIXED_HEADER + DS4_KVSTORE_HEADER_V2_EXTRA];
+    size_t h_len;
     uint64_t now = (uint64_t)time(NULL);
-    ds4_kvstore_fill_header(h, hdr.model_id, hdr.quant_bits, hdr.reason, hdr.ext_flags,
-                            stripped_token_count, hdr.hits, hdr.ctx_size,
-                            hdr.created_at, now, 0);
+    if (hdr.hdr_version == 2) {
+        ds4_kvstore_fill_header_v2(h, hdr.model_id, hdr.quant_bits, hdr.reason,
+                                   hdr.ext_flags, stripped_token_count, hdr.hits,
+                                   hdr.ctx_size, hdr.created_at, now, 0,
+                                   hdr.conv_id, hdr.model_fp, hdr.bucket,
+                                   hdr.level, hdr.stale);
+        h_len = DS4_KVSTORE_FIXED_HEADER + DS4_KVSTORE_HEADER_V2_EXTRA;
+    } else {
+        ds4_kvstore_fill_header(h, hdr.model_id, hdr.quant_bits, hdr.reason, hdr.ext_flags,
+                                stripped_token_count, hdr.hits, hdr.ctx_size,
+                                hdr.created_at, now, 0);
+        h_len = DS4_KVSTORE_FIXED_HEADER;
+    }
     uint8_t tb[4];
     ds4_kvstore_le_put32(tb, text_bytes);
 
     errno = 0;
-    ok = fwrite(h, 1, sizeof(h), fp) == sizeof(h) &&
+    ok = fwrite(h, 1, h_len, fp) == h_len &&
          fwrite(tb, 1, sizeof(tb), fp) == sizeof(tb) &&
          fwrite(text, 1, text_bytes, fp) == text_bytes &&
          (!(hdr.ext_flags & DS4_KVSTORE_EXT_SESSION_TITLE) ||
