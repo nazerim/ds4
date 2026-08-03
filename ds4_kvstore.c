@@ -322,14 +322,20 @@ void ds4_kvstore_sha1_bytes_hex(const void *ptr, size_t len, char out[41]) {
 }
 
 /* A conversation's HEAD (system + early turns) is stable across its own turns
- * and across compaction; new sessions have a different head.  Hash the head
- * window and fold in the weight fingerprint so distinct namespaces cannot
- * collide.  Two conversations sharing an identical head window are treated as
- * one lineage — identical to prefix-clustering. */
+ * and across compaction; new sessions have a different head.  Hash the text up
+ * to MAX_BYTES and fold in the weight fingerprint so distinct namespaces cannot
+ * collide.  Hashing [0, min(text_len, MAX_BYTES)) makes every anchor of one
+ * session that is long enough to include the cap cluster to one conv_id (since
+ * anchors are byte-prefixes of one another), while two sessions sharing a head
+ * but diverging before MAX_BYTES get distinct conv_ids.  Short anchors
+ * (< MAX_BYTES) hash their full text and fall into their own/shared conv, which
+ * is fine because they are small_dense (always kept) or loadable via
+ * conv-agnostic prefix matching.  Content-based, so it works for GLM and other
+ * models. */
 uint64_t ds4_kvstore_compute_conv_id(const char *text, size_t text_len,
                                      uint64_t model_fp) {
     size_t n = text_len;
-    if (n > DS4_KVSTORE_CONV_ID_HEAD_BYTES) n = DS4_KVSTORE_CONV_ID_HEAD_BYTES;
+    if (n > DS4_KVSTORE_CONV_ID_MAX_BYTES) n = DS4_KVSTORE_CONV_ID_MAX_BYTES;
     uint8_t digest[20];
     sha1_ctx c;
     sha1_init(&c);
@@ -610,14 +616,13 @@ bool ds4_kvstore_touch_file(const char *path, uint32_t hits, bool stale,
 static bool kv_cache_conv_is_kept(ds4_kvstore *kc, int idx) {
     const ds4_kvstore_entry *e = &kc->entry[idx];
     if (e->conv_id == 0) return true;
-    if (e->stale) return false;
     if (e->tokens <= (uint32_t)kc->opt.small_dense_tokens) return true;
 
     uint32_t frontier = 0;
     int rank = 0; /* entries in this conv with strictly more tokens */
     for (int i = 0; i < kc->len; i++) {
         const ds4_kvstore_entry *o = &kc->entry[i];
-        if (o->conv_id != e->conv_id || o->stale) continue;
+        if (o->conv_id != e->conv_id) continue;
         if (o->tokens > frontier) frontier = o->tokens;
         if (o->tokens > e->tokens) rank++;
     }
@@ -639,7 +644,7 @@ static bool kv_cache_conv_is_kept(ds4_kvstore *kc, int idx) {
         bool largest_in_window = true;
         for (int i = 0; i < kc->len; i++) {
             const ds4_kvstore_entry *o = &kc->entry[i];
-            if (o->conv_id != e->conv_id || o->stale) continue;
+            if (o->conv_id != e->conv_id) continue;
             if (o->tokens <= (uint32_t)kc->opt.small_dense_tokens) continue;
             if ((uint64_t)o->tokens / window == my_win && o->tokens > e->tokens) {
                 largest_in_window = false;
@@ -651,12 +656,6 @@ static bool kv_cache_conv_is_kept(ds4_kvstore *kc, int idx) {
     return false;
 }
 
-static int kv_cache_find_stale(ds4_kvstore *kc) {
-    for (int i = 0; i < kc->len; i++)
-        if (kc->entry[i].stale) return i;
-    return -1;
-}
-
 /* Pick a redundant victim deterministically: the redundant entry with the
  * smallest bucket (oldest position first — plan §3.3 "oldest bucket first
  * within a conversation"), tie-broken by tokens.  Evicting smallest-first keeps
@@ -665,7 +664,7 @@ static int kv_cache_find_stale(ds4_kvstore *kc) {
 static int kv_cache_find_redundant(ds4_kvstore *kc) {
     int best = -1;
     for (int i = 0; i < kc->len; i++) {
-        if (kc->entry[i].stale || kv_cache_conv_is_kept(kc, i)) continue;
+        if (kv_cache_conv_is_kept(kc, i)) continue;
         if (best < 0) { best = i; continue; }
         const ds4_kvstore_entry *b = &kc->entry[best];
         if (kc->entry[i].bucket < b->bucket ||
@@ -843,17 +842,16 @@ void ds4_kvstore_evict(ds4_kvstore *kc, const ds4_tokens *live,
     }
 
     while (total > target && kc->len > 0) {
-        /* PHASE A: drop stale, then redundant (applies to all convs incl. the
-         * active one — its frontier+tail+small are always in the keep-set, so
-         * only its redundant middle/compaction-collapse is dropped here). */
-        int victim = kv_cache_find_stale(kc);
-        if (victim < 0) victim = kv_cache_find_redundant(kc);
+        /* PHASE A: drop redundant (applies to all convs incl. the active one —
+         * its frontier+tail+small are always in the keep-set, so only its
+         * redundant middle/compaction-collapse is dropped here).  The stale
+         * layer is decommissioned and inert. */
+        int victim = kv_cache_find_redundant(kc);
         if (victim >= 0) {
-            kv_cache_unlink_entry(kc, victim, &total,
-                                  kc->entry[victim].stale ? "stale" : "redundant");
+            kv_cache_unlink_entry(kc, victim, &total, "redundant");
             continue;
         }
-        /* PHASE B: nothing stale/redundant left — halve the LRU non-active
+        /* PHASE B: nothing redundant left — halve the LRU non-active
          * conversation's large-middle spacing (double mid_spacing via level).
          * Only halve a conversation that actually has large-middle anchors;
          * one with only small-dense + tail is already at its floor and falls
@@ -944,10 +942,10 @@ bool ds4_kvstore_open(ds4_kvstore *kc, const char *dir, uint64_t budget_mb,
         kv_logf(kc, DS4_KVSTORE_LOG_WARNING,
                 "%s: kv cache tail_anchors=0; only the frontier anchor is kept dense",
                 kv_log_name(kc));
-    if ((unsigned)kc->opt.min_tokens < DS4_KVSTORE_CONV_ID_HEAD_BYTES)
+    if ((unsigned)kc->opt.min_tokens < 512)
         kv_logf(kc, DS4_KVSTORE_LOG_WARNING,
-                "%s: kv cache min_tokens=%d < conv_id head=%u; anchors shorter than the head window may be mis-scoped by conv_id filtering",
-                kv_log_name(kc), kc->opt.min_tokens, DS4_KVSTORE_CONV_ID_HEAD_BYTES);
+                "%s: kv cache min_tokens=%d; anchors shorter than min_tokens are never cached",
+                kv_log_name(kc), kc->opt.min_tokens);
     ds4_kvstore_evict(kc, NULL, 0, NULL);
     kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
             "%s: KV disk cache %s (budget=%llu MiB, cross-quant=%s, min=%d, cold_max=%d, continued=%d, trim=%d, align=%d, hit_half_life=%llus)",
@@ -1614,55 +1612,15 @@ int ds4_kvstore_find_text_prefix(ds4_kvstore *kc, const char *prompt_text,
                                           ctx_size, NULL, 0);
 }
 
-/* Mark stale at load time: for every candidate in the current namespace whose
- * text is NOT a byte-prefix of the incoming prompt, flag it stale for this
- * prompt and persist.  This is agnostic to compaction vs tool-call — the prefix
- * test does the work.  Cheap: one SHA1 over the prefix bytes, no payload reads,
- * and (via the conv_id filter below) scoped to the active conversation's own
- * anchors rather than every checkpoint in the namespace.  A checkpoint that
- * fails to prefix a forward-moving prompt can never match a later one, so
- * evicting it first is safe. */
+/* Decommissioned: the stale layer overrode keep-set protection (evicting
+ * frontiers) and was the cross-session poison mechanism.  Redundant (keep-set),
+ * halving, and LRU-retire already provide pruning and budget control, so stale
+ * marking is inert.  Signature retained because tests and exports reference it. */
 void ds4_kvstore_mark_stale_at_load(ds4_kvstore *kc, const char *prompt_text,
                                     int model_id, int quant_bits, int ctx_size) {
-    if (!kc->enabled || !prompt_text) return;
-    const size_t prompt_bytes = strlen(prompt_text);
-    const uint64_t now = (uint64_t)time(NULL);
-    /* Only the ACTIVE conversation's own anchors can be stale for this prompt.
-     * In batched mode many conversations share one namespace; an anchor of
-     * conversation B that does not prefix conversation A's prompt is still valid
-     * for B's next turn, so it must NOT be poisoned when A loads.  conv_id==0
-     * legacy singletons have no lineage and stay in scope.  (conv_id hashes the
-     * first CONV_ID_HEAD_BYTES bytes; any candidate that survives the min_tokens
-     * filter below is long enough to hash the full head window, so a same-lineage
-     * anchor's conv_id matches active_conv.) */
-    const uint64_t active_conv =
-        ds4_kvstore_compute_conv_id(prompt_text, prompt_bytes, kc->model_fp);
-    for (int i = 0; i < kc->len; i++) {
-        ds4_kvstore_entry *e = &kc->entry[i];
-        if (e->conv_id != 0 && e->conv_id != active_conv) continue;
-        if (e->model_fp && e->model_fp != kc->model_fp) continue;
-        if (e->model_id != (uint8_t)model_id) continue;
-        if (kc->reject_different_quant &&
-            e->quant_bits != (uint8_t)quant_bits) continue;
-        if ((uint32_t)ctx_size < e->ctx_size) continue;
-        if (e->text_bytes == 0 || e->text_bytes > prompt_bytes) continue;
-        if ((int)e->tokens < kc->opt.min_tokens) continue;
-        if (e->stale) continue;
-        char sha[41];
-        ds4_kvstore_sha1_bytes_hex(prompt_text, (size_t)e->text_bytes, sha);
-        if (strcmp(sha, e->sha) != 0) {
-            e->stale = true;
-            e->last_used = now;
-            if (!ds4_kvstore_touch_file(e->path, e->hits, true, now)) {
-                /* In-memory stays stale (it is stale for this prompt and will
-                 * be evicted first this session), but the on-disk flag did not
-                 * persist; a future refresh would see it as healthy. */
-                kv_logf(kc, DS4_KVSTORE_LOG_WARNING,
-                        "%s: kv cache failed to persist stale flag %s",
-                        kv_log_name(kc), e->path ? e->path : "?");
-            }
-        }
-    }
+    (void)kc; (void)prompt_text; (void)model_id;
+    (void)quant_bits; (void)ctx_size;
+    return;
 }
 
 /* Attempt to load one candidate checkpoint (entry idx).  Returns the loaded
@@ -1838,9 +1796,8 @@ int ds4_kvstore_try_load_text(ds4_kvstore *kc,
     const int ctx_size = ds4_session_ctx(session);
 
     kv_cache_refresh(kc);
-    /* Flag same-namespace checkpoints that no longer prefix this prompt; they
-     * are evicted first on the next budget pass. */
-    ds4_kvstore_mark_stale_at_load(kc, prompt_text, model_id, quant_bits, ctx_size);
+    /* Stale marking was decommissioned (see ds4_kvstore_mark_stale_at_load);
+     * keep-set, halving, and LRU-retire handle pruning and budget control. */
 
     /* Try candidates largest-first; if the selected checkpoint fails pre-payload
      * verification (corrupt body, hash/prefix mismatch), fall back to the next

@@ -17345,20 +17345,17 @@ static void test_kv_cache_eviction_ignores_oversize_incoming(void) {
 }
 
 static void test_kv_cache_stale_at_load(void) {
-    /* A checkpoint whose text is a byte-prefix of the incoming prompt stays
-     * healthy; one whose text diverges (same conversation) is flagged stale and
-     * persisted. */
+    /* mark_stale_at_load is decommissioned (inert): it must NOT set a stale
+     * flag on any checkpoint, whether it byte-prefixes the prompt or not. */
     char tmpl[] = "/tmp/ds4-kv-stale-load-test.XXXXXX";
     char *dir = mkdtemp(tmpl);
     TEST_ASSERT(dir != NULL);
     if (!dir) return;
 
     const char *prefix_text = "hello world";      /* byte-prefix of prompt */
-    const char *diverged_text = "goodbye world";  /* not a prefix -> stale */
+    const char *diverged_text = "goodbye world";  /* not a prefix */
     const char *prompt = "hello world more stuff";
     const uint64_t now = (uint64_t)time(NULL);
-    /* Both checkpoints belong to the prompt's conversation; mark_stale scopes
-     * stale-marking to the active conv_id, so they must share it. */
     const uint64_t conv = ds4_kvstore_compute_conv_id(prompt, strlen(prompt), 0);
     test_kv_conv_stub_file(dir, prefix_text, conv, 0, KV_REASON_COLD, 1024, 0, now, 64);
     test_kv_conv_stub_file(dir, diverged_text, conv, 0, KV_REASON_COLD, 1024, 0, now, 64);
@@ -17372,7 +17369,7 @@ static void test_kv_cache_stale_at_load(void) {
     ds4_kvstore_mark_stale_at_load(&kc, prompt, 0, 2, 32768);
 
     TEST_ASSERT(kv_file_stale_flag(dir, prefix_text) == 0);
-    TEST_ASSERT(kv_file_stale_flag(dir, diverged_text) == 1);
+    TEST_ASSERT(kv_file_stale_flag(dir, diverged_text) == 0);
 
     kv_cache_close(&kc);
     char *p1 = test_kv_path_for_text(dir, prefix_text);
@@ -17385,9 +17382,9 @@ static void test_kv_cache_stale_at_load(void) {
 }
 
 static void test_kv_cache_stale_at_load_isolates_conversations(void) {
-    /* In batched mode many conversations share one namespace.  Loading
-     * conversation A must NOT poison conversation B's anchors just because they
-     * do not prefix A's prompt; only A's own diverged anchors are marked stale. */
+    /* In batched mode many conversations share one namespace.  mark_stale_at_load
+     * is decommissioned (inert), so it must NOT set a stale flag on any anchor,
+     * whether it belongs to the active conversation or another one. */
     char tmpl[] = "/tmp/ds4-kv-stale-iso-test.XXXXXX";
     char *dir = mkdtemp(tmpl);
     TEST_ASSERT(dir != NULL);
@@ -17411,8 +17408,8 @@ static void test_kv_cache_stale_at_load_isolates_conversations(void) {
     (void)ds4_kvstore_find_text_prefix(&kc, prompt_a, 0, 2, 32768);
     ds4_kvstore_mark_stale_at_load(&kc, prompt_a, 0, 2, 32768);
 
-    TEST_ASSERT(kv_file_stale_flag(dir, text_b) == 0);     /* other conv: untouched */
-    TEST_ASSERT(kv_file_stale_flag(dir, text_a_div) == 1); /* same conv: stale */
+    TEST_ASSERT(kv_file_stale_flag(dir, text_b) == 0);
+    TEST_ASSERT(kv_file_stale_flag(dir, text_a_div) == 0);
 
     kv_cache_close(&kc);
     char *p1 = test_kv_path_for_text(dir, text_b);
@@ -17421,6 +17418,145 @@ static void test_kv_cache_stale_at_load_isolates_conversations(void) {
     unlink(p2);
     free(p1);
     free(p2);
+    rmdir(dir);
+}
+
+static void test_kv_cache_conv_id_distinguishes_shared_head_sessions(void) {
+    /* Two sessions sharing the same first 512 bytes (head) but diverging before
+     * the 131072 cap must hash to DISTINCT conv_ids.  A third text that is a
+     * byte-prefix of one of them and longer than the cap clusters to that
+     * session's conv_id (ladder).  A short (< cap) shared-head checkpoint
+     * (16384 tokens) falls into its own conv but is small_dense-kept. */
+
+    /* Common 512-byte head shared by both sessions. */
+    char head[512];
+    for (size_t i = 0; i < sizeof(head); i++) head[i] = (char)('A' + (i % 26));
+
+    /* Session A text: head + divergence A + filler, length 200000 (> cap). */
+    char *textA = malloc(200000);
+    memcpy(textA, head, sizeof(head));
+    for (size_t i = sizeof(head); i < 200000; i++) textA[i] = (char)('a' + (i % 26));
+
+    /* Session B text: head + divergence B + filler, length 100000 (< cap). */
+    char *textB = malloc(100000);
+    memcpy(textB, head, sizeof(head));
+    for (size_t i = sizeof(head); i < 100000; i++) textB[i] = (char)('b' + (i % 26));
+
+    /* textC: byte-prefix of textA, length 150000 (> cap). */
+    char *textC = malloc(150000);
+    memcpy(textC, textA, 150000);
+
+    uint64_t cA = ds4_kvstore_compute_conv_id(textA, 200000, 0);
+    uint64_t cB = ds4_kvstore_compute_conv_id(textB, 100000, 0);
+    uint64_t cC = ds4_kvstore_compute_conv_id(textC, 150000, 0);
+    TEST_ASSERT(cA != cB);          /* diverged before cap -> distinct sessions */
+    TEST_ASSERT(cC == cA);          /* prefix > cap -> ladder clusters to session A */
+
+    /* A short shared-head checkpoint (16384 tokens, < cap) is small_dense-kept. */
+    char tmpl[] = "/tmp/ds4-kv-convid-test.XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    TEST_ASSERT(dir != NULL);
+    if (dir) {
+        const uint64_t now = (uint64_t)time(NULL);
+        /* Short prefix (16384 bytes, < cap) hashes full text -> its own conv. */
+        uint64_t cShort = ds4_kvstore_compute_conv_id(textA, 16384, 0);
+        test_kv_conv_stub_file(dir, "s", cShort, 0, KV_REASON_COLD, 16384, 0, now, 512);
+        /* Session A's capped conv: frontier + middle + a redundant middle. */
+        test_kv_conv_stub_file(dir, "af", cA, 0, KV_REASON_COLD, 200000, 0, now, 512);
+        test_kv_conv_stub_file(dir, "am", cA, 0, KV_REASON_COLD, 100000, 0, now, 512);
+        test_kv_conv_stub_file(dir, "ar", cA, 0, KV_REASON_COLD, 50000, 0, now, 512);
+
+        kv_disk_cache kc = {0};
+        kc.enabled = true;
+        kc.dir = xstrdup(dir);
+        kc.opt = kv_cache_default_options();
+        /* 4 files x ~590 = 2360; budget 2000 evicts only the redundant middle
+         * (50000), keeping the small-dense 16384 short checkpoint. */
+        kc.budget_bytes = 2000;
+        kv_cache_evict(&kc, NULL, 0, NULL);
+
+        TEST_ASSERT(kv_file_exists(dir, "s"));   /* small_dense -> kept */
+        TEST_ASSERT(kv_file_exists(dir, "af"));  /* frontier -> kept */
+        TEST_ASSERT(kv_file_exists(dir, "am"));  /* window-largest middle -> kept */
+        TEST_ASSERT(!kv_file_exists(dir, "ar")); /* redundant middle -> evicted */
+
+        kv_cache_close(&kc);
+        char *ps = test_kv_path_for_text(dir, "s");
+        char *paf = test_kv_path_for_text(dir, "af");
+        char *pam = test_kv_path_for_text(dir, "am");
+        char *par = test_kv_path_for_text(dir, "ar");
+        unlink(ps); unlink(paf); unlink(pam); unlink(par);
+        free(ps); free(paf); free(pam); free(par);
+        rmdir(dir);
+    }
+    free(textA);
+    free(textB);
+    free(textC);
+}
+
+static void test_kv_cache_keep_set_per_session(void) {
+    /* Two sessions sharing a head get distinct conv_ids, so each keeps its own
+     * frontier under budget pressure — no cross-session redundant eviction.
+     * (Under the old 512-byte head, both shared one conv_id and session B's
+     * frontier could be dropped as redundant against session A's anchors.) */
+    char tmpl[] = "/tmp/ds4-kv-per-session-test.XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    TEST_ASSERT(dir != NULL);
+    if (!dir) return;
+
+    /* Two representative texts sharing a 512-byte head, diverging before cap. */
+    char head[512];
+    for (size_t i = 0; i < sizeof(head); i++) head[i] = (char)('H' + (i % 26));
+    char repA[512 + 64], repB[512 + 64];
+    memcpy(repA, head, sizeof(head));
+    memcpy(repB, head, sizeof(head));
+    for (int i = 0; i < 64; i++) {
+        repA[512 + i] = (char)('A' + i);
+        repB[512 + i] = (char)('B' + i);
+    }
+    const uint64_t convA = ds4_kvstore_compute_conv_id(repA, sizeof(repA), 0);
+    const uint64_t convB = ds4_kvstore_compute_conv_id(repB, sizeof(repB), 0);
+    TEST_ASSERT(convA != convB);   /* shared head, divergent -> distinct sessions */
+
+    const uint64_t now = (uint64_t)time(NULL);
+    /* Session A (active): frontier + middle + redundant middle. */
+    test_kv_conv_stub_file(dir, "af", convA, 0, KV_REASON_COLD, 400000, 0, now, 512);
+    test_kv_conv_stub_file(dir, "am", convA, 0, KV_REASON_COLD, 390000, 0, now, 512);
+    test_kv_conv_stub_file(dir, "ar", convA, 0, KV_REASON_COLD, 380000, 0, now, 512);
+    /* Session B: frontier + middle.  B's frontier must survive. */
+    test_kv_conv_stub_file(dir, "bf", convB, 0, KV_REASON_COLD, 360000, 0, now, 512);
+    test_kv_conv_stub_file(dir, "bm", convB, 0, KV_REASON_COLD, 150000, 0, now, 512);
+
+    kv_disk_cache kc = {0};
+    kc.enabled = true;
+    kc.dir = xstrdup(dir);
+    kc.opt = kv_cache_default_options();
+    kc.opt.tail_anchors = 1;
+    /* 5 files x ~590 = 2950; budget 2360 evicts exactly one redundant anchor:
+     * session A's 380000 (B's frontier is kept in its own conv). */
+    kc.budget_bytes = 2360;
+
+    ds4_kvstore_eviction_context incoming = {0};
+    incoming.text = repA;            /* active conversation = session A */
+    incoming.text_len = sizeof(repA);
+    incoming.model_id = 0;
+    incoming.quant_bits = 2;
+    incoming.ctx_size = 32768;
+    kv_cache_evict(&kc, NULL, 0, &incoming);
+
+    TEST_ASSERT(kv_file_exists(dir, "af"));  /* A frontier */
+    TEST_ASSERT(kv_file_exists(dir, "bf"));  /* B frontier survives (no cross-session evict) */
+    TEST_ASSERT(kv_file_exists(dir, "bm"));  /* B middle kept */
+    TEST_ASSERT(!kv_file_exists(dir, "ar")); /* A redundant middle evicted */
+
+    kv_cache_close(&kc);
+    char *p1 = test_kv_path_for_text(dir, "af");
+    char *p2 = test_kv_path_for_text(dir, "am");
+    char *p3 = test_kv_path_for_text(dir, "ar");
+    char *p4 = test_kv_path_for_text(dir, "bf");
+    char *p5 = test_kv_path_for_text(dir, "bm");
+    unlink(p1); unlink(p2); unlink(p3); unlink(p4); unlink(p5);
+    free(p1); free(p2); free(p3); free(p4); free(p5);
     rmdir(dir);
 }
 
@@ -18330,6 +18466,8 @@ static void ds4_server_unit_tests_run(void) {
     test_kv_cache_eviction_ignores_oversize_incoming();
     test_kv_cache_stale_at_load();
     test_kv_cache_stale_at_load_isolates_conversations();
+    test_kv_cache_conv_id_distinguishes_shared_head_sessions();
+    test_kv_cache_keep_set_per_session();
     test_kv_cache_continued_step_aligns_to_prefill_chunk();
     test_kv_cache_max_conversations_retires_lru();
     test_kv_cache_lru_uses_last_activity_not_creation();

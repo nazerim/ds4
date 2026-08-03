@@ -10,7 +10,7 @@
 
 #define DS4_KVSTORE_FIXED_HEADER 48u
 #define DS4_KVSTORE_HEADER_V2_EXTRA 24u
-#define DS4_KVSTORE_CONV_ID_HEAD_BYTES 512u
+#define DS4_KVSTORE_CONV_ID_MAX_BYTES 131072u
 #define DS4_KVSTORE_DEFAULT_MB 4096
 #define DS4_KVSTORE_HIT_HALF_LIFE_SECONDS (6ull * 60ull * 60ull)
 
@@ -70,7 +70,7 @@ typedef struct {
                             * (oldest/smallest bucket first, plan §3.3) */
     uint8_t  level;        /* halving level of this conversation's large-middle spacing */
     uint8_t  hdr_version;  /* 1 or 2, from the file's version byte */
-    bool     stale;        /* failed byte_prefix_match at load, same namespace */
+    bool     stale;        /* decommissioned: never set, never acted on (inert) */
 } ds4_kvstore_entry;
 
 typedef struct {
