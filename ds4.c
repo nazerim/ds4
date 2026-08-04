@@ -48600,7 +48600,17 @@ static void ds4_session_dspark_scheduler_note(
         uint32_t     accepted_drafts,
         bool         no_draft,
         double       extra_ms) {
-    if (!s || !ds4_dspark_scheduler_enabled()) return;
+    if (!s) return;
+    /* saved_ms accounting must not depend on the scheduler being enabled:
+     * it reports the real decode-time saved by accepted drafts. */
+    if (accepted_drafts != 0 &&
+        s->dspark_last_target_eval_ms > 0.0 &&
+        isfinite(s->dspark_last_target_eval_ms) &&
+        ds4_dspark_stats_enabled()) {
+        s->dspark_stats.saved_ms +=
+            s->dspark_last_target_eval_ms * (double)accepted_drafts;
+    }
+    if (!ds4_dspark_scheduler_enabled()) return;
     if (s->dspark_sched_skipped_cycle) {
         s->dspark_sched_skipped_cycle = false;
         return;
@@ -48629,9 +48639,6 @@ static void ds4_session_dspark_scheduler_note(
         const double saved_ms =
             s->dspark_last_target_eval_ms * (double)accepted_drafts;
         s->dspark_sched_saved_ms += saved_ms;
-        if (ds4_dspark_stats_enabled()) {
-            s->dspark_stats.saved_ms += saved_ms;
-        }
     }
 
     const uint32_t no_draft_skip =
@@ -61900,6 +61907,36 @@ static int ds4_session_eval_dspark_speculative_sample(
         return n_accept;
     }
     if (drafts[0] == eos_token) draft_n = 1;
+
+    /* Len-1 short-circuit: a single accepted draft saves no decode — the
+     * verify pass computes exactly one new row (the next position), the
+     * same work as a plain eval.  Skip the snapshot/frontier/verify
+     * machinery and commit the accepted draft with a plain eval, which also
+     * populates target_ms/saved_ms accounting correctly.  This removes the
+     * per-cycle overhead from the 40-75% of cycles that are len-1 drafts. */
+    if (draft_n <= 1) {
+        if (stats_enabled) {
+            s->dspark_stats.sample_full_accepts++;
+            s->dspark_stats.accepted_draft_tokens += 1u;
+            ds4_dspark_stats_note_len(s->dspark_stats.accepted_len_hist, 1);
+        }
+        if (ds4_session_eval(s, drafts[0], err, errlen) != 0) {
+            s->checkpoint_valid = false;
+            if (stats_enabled) s->dspark_stats.verifier_errors++;
+            DS4_SPEC_SAMPLE_FINISH();
+            return -1;
+        }
+        if (n_accept < accepted_cap) accepted[n_accept++] = drafts[0];
+        ds4_session_dspark_scheduler_note(s, 1, false,
+                                          DS4_SPEC_SAMPLE_EXTRA_MS());
+        if (spec_log) {
+            fprintf(stderr,
+                    "ds4: DSpark sample-spec len-1 short-circuit accepted=%d\n",
+                    drafts[0]);
+        }
+        DS4_SPEC_SAMPLE_FINISH();
+        return n_accept;
+    }
 
     ds4_engine *e = s->engine;
     ds4_spec_frontier frontier;
