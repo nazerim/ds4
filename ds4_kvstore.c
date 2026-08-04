@@ -1625,7 +1625,7 @@ bool ds4_kvstore_store_live_prefix_text(ds4_kvstore *kc,
     char save_err[160] = {0};
     const ds4_tokens *live_tokens = ds4_session_tokens(session);
     if (!live_tokens ||
-        live_tokens->len != store_tokens.len ||
+        live_tokens->len < store_tokens.len ||
         !ds4_tokens_starts_with(live_tokens, &store_tokens))
     {
         kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
