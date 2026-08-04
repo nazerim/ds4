@@ -66,8 +66,13 @@ Override model: `DS4_TEST_MODEL=/path/to/model.gguf ./ds4_test --server`
 ## Upstream & Fork
 
 - **Upstream:** `antirez/ds4` (origin remote)
-- **Fork:** `nazerim/ds4` (nazerim remote) — has DSML recovery hardening commits ahead of upstream
+- **Fork:** `nazerim/ds4` (nazerim remote) — KV retention lineage, DSML recovery hardening, DSpark/agent tooling ahead of upstream
 - **Local mirror:** `/Users/naz/Projects/ds4-upstream` tracks `antirez/ds4` for comparison
+- **Merged 2026-08-04:** upstream through `b7e9f00` (merge `e23cb2f`): MXFP4 (CUDA native + portable Metal experts + GGUF format), CUDA TP/HMMA work, decode-island graphs, batched-serving knobs (`--mixed-prefill-quantum` replaces the `DS4_SERVER_MIXED_PREFILL_QUANTUM` env var), checkpoint-versioned test fixtures. Merge was conflict-free; upstream never touched `ds4_kvstore.c/h` or the agent path.
+- **Engine tests vs fork quant:** 4 engine tests fail with the fork's custom quant (`ds4flash.gguf`), and fail identically on pure upstream — they are fixture/weight-tuned, not merge regressions:
+  - `--logprob-vectors`, `--local-golden-vectors`: pass with the retained pre-0731 fixtures:
+    `DS4_TEST_VECTOR_FILE=tests/test-vectors/flash-pre-0731/official.vec DS4_TEST_LOCAL_GOLDEN_FILE=tests/test-vectors/flash-pre-0731/local-golden.vec ./ds4_test --logprob-vectors --local-golden-vectors`
+  - `--think-tool-recovery`, `--metal-ssd-streaming-cache-pressure`: behavioral under the fork quant after upstream's kernel/fusion changes; no fixture knob. Accepted as known-fork-quant divergence (all other suites green).
 
 ## Known Issues
 
