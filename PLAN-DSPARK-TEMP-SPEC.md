@@ -278,9 +278,7 @@ State: `misc/experiment-a-state.md`.
 No Metal changes. CPU acceptance math. Two draft-path capture plumbing sites.
 M1 next: pure acceptance kernel + unit tests.
 
-## M4 results (2026-08-04)
-
-### M4.1 — Greedy regression: PASS
+## M4 results (2026-08-04)### M4.1 — Greedy regression: PASS
 temp-0 outputs byte-identical to the pre-change baseline (e0e5f40) on a fixed
 chat prompt, with the gate both OFF and ON (gate ON at temp 0 routes to the
 unchanged argmax verifier).
@@ -489,3 +487,68 @@ is tracked in `~/Projects/Scratch/TODO.md`.
 **32k is the sweet spot** for DSpark speculation at temp 1.0 — 21% faster than
 plain sampling. Next: Experiment B to see if lowering `--dspark-confidence` to
 0.5/0.3 (longer drafts) pushes the 32k ratio even higher.
+
+---
+
+## Recalibration (2026-08-05) — thermal-controlled re-measurement
+
+### CRITICAL: the 1.21× result was a thermal artifact
+
+Experiment A's 1.21× at 32k was measured WITHOUT thermal control. On the M5 Max
+in "Automatic" energy mode, decode t/s varies ±30% purely from GPU throttling:
+- Cool GPU (after idle): 30-39 t/s
+- Throttled GPU (sustained load): 20-26 t/s
+
+OFF and ON were measured in separate time blocks, so a cool ON window vs a
+throttled OFF window produced a spurious speedup. The GPU thermal signature was
+visible in the old logs (fast runs always followed idle gaps).
+
+### Recalibrated protocol
+
+1. Energy mode set to **High Power** (`pmset -a lowpowermode 0`, `powermode 2`), AC attached.
+2. **Thermal warmup**: ~90s sustained decode before measurement.
+3. **Interleaved A/B**: OFF/ON alternate within each round (round, mode × size).
+4. Decode-only t/s from server log `avg=` lines (gen>=190), never wall time.
+
+### Recalibrated results (conf 0.6 and 0.9, 3 rounds interleaved)
+
+| size | OFF | ON 0.6 | ON/OFF | ON 0.9 | ON/OFF |
+|------|-----|--------|--------|--------|--------|
+| 64k  | 29.5 | 26.2 | 0.89 | 25.8 | 0.89 |
+| 32k  | 31.9 | 27.3 | 0.86 | 26.8 | 0.86 |
+| 16k  | 33.3 | 28.6 | 0.86 | 27.9 | 0.86 |
+
+**The sampling verifier is a net LOSS at every size and confidence**: ON is
+11-14% slower than plain sampling. The old 1.21× does not reproduce.
+
+### Why: draft-length economics
+
+- conf 0.9 → 73% len-1 drafts (avg 1.34): a len-1 accepted draft costs the same
+  1 eval as plain sampling PLUS propose overhead → can never win.
+- conf 0.6 → 41% len-1, avg 2.0.
+- conf 0.3 + `DS4_DSPARK_SCHEDULER=0` → len-5 reached (avg 3.3) but acceptance
+  drops to 47.6% → avg accepted/cycle = 1.36, **below the ~1.4 break-even**.
+- Verify pass costs ~1 decode per len≥2 cycle; propose is pure overhead.
+
+### Optimizations (committed `389a708`)
+
+1. **Len-1 short-circuit**: 1-token drafts skip snapshot/frontier/verify and
+   commit via plain eval. verify_ms cut 4.2× (9503→2241 at conf 0.9). Does NOT
+   change decode t/s (removes overhead, not decodes) but is correct and keeps
+   the accounting honest.
+2. **saved_ms bug fix**: accounting was gated behind the scheduler-enabled check,
+   so `DS4_DSPARK_SCHEDULER=0` runs reported saved=0. Now accumulates always.
+
+### Revalidation
+
+- M4.2 distribution equivalence RE-PASSED with optimized build: all 12 positions
+  p≥0.996, unigram KS p=1.997 (N=200 per mode, permutation test).
+- M1 kernel tests pass (`test_spec_rejection: ok`).
+
+### Honest conclusion
+
+The temperature-aware sampling verifier is **correctness-clean but performance-
+negative** on this hardware/workload. The DSpark drafter's confidence head
+collapses after 1-2 tokens on creative text, so drafts are too short to amortize
+the fixed verify cost. Keeping it opt-in (`DS4_DSPARK_SPEC_SAMPLE=1`) is
+reasonable; upstreaming as a performance win is NOT supported by data.
