@@ -69,10 +69,31 @@ Override model: `DS4_TEST_MODEL=/path/to/model.gguf ./ds4_test --server`
 - **Fork:** `nazerim/ds4` (nazerim remote) — KV retention lineage, DSML recovery hardening, DSpark/agent tooling ahead of upstream
 - **Local mirror:** `/Users/naz/Projects/ds4-upstream` tracks `antirez/ds4` for comparison
 - **Merged 2026-08-04:** upstream through `b7e9f00` (merge `e23cb2f`): MXFP4 (CUDA native + portable Metal experts + GGUF format), CUDA TP/HMMA work, decode-island graphs, batched-serving knobs (`--mixed-prefill-quantum` replaces the `DS4_SERVER_MIXED_PREFILL_QUANTUM` env var), checkpoint-versioned test fixtures. Merge was conflict-free; upstream never touched `ds4_kvstore.c/h` or the agent path.
-- **Engine tests vs fork quant:** 4 engine tests fail with the fork's custom quant (`ds4flash.gguf`), and fail identically on pure upstream — they are fixture/weight-tuned, not merge regressions:
-  - `--logprob-vectors`, `--local-golden-vectors`: pass with the retained pre-0731 fixtures:
-    `DS4_TEST_VECTOR_FILE=tests/test-vectors/flash-pre-0731/official.vec DS4_TEST_LOCAL_GOLDEN_FILE=tests/test-vectors/flash-pre-0731/local-golden.vec ./ds4_test --logprob-vectors --local-golden-vectors`
-  - `--think-tool-recovery`, `--metal-ssd-streaming-cache-pressure`: behavioral under the fork quant after upstream's kernel/fusion changes; no fixture knob. Accepted as known-fork-quant divergence (all other suites green).
+
+### Engine test divergence after the 2026-08-04 merge
+
+**Model under test is the official quant:** `ds4flash.gguf` → `gguf/DeepSeek-V4-Flash-Layers37-42Q4KExperts-OtherExpertLayersIQ2XXSGateUp-Q2KDown-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-fixed.gguf`, byte-for-byte the `q2-q4-imatrix` release of `antirez/deepseek-v4-gguf` (`download_model.sh q2-q4-imatrix`). Not a custom quant.
+
+**None of the 4 failures are caused by the fork's KV lineage work.** `ds4_kvstore.c/h` is untouched by upstream, all 17 KV retention/lineage server tests pass on the merged tree, and none of the failing tests reference the conversation KV store (the SSD test exercises the *routed-expert streaming cache*, a different subsystem).
+
+| Failing test (defaults) | Root cause | Evidence |
+|---|---|---|
+| `--logprob-vectors` | Fixture/checkpoint mismatch. Default fixtures are `flash-0731` (captured from the official API's July-31 checkpoint). Our GGUF is undated → pre-0731 checkpoint per `tests/test-vectors/README.md` ("A mismatch between checkpoint and fixture is an invalid test"). | **OK** with pre-0731 overrides below |
+| `--local-golden-vectors` | Same checkpoint mismatch (golden captured from the matching GGUF/checkpoint). | **OK** with pre-0731 overrides |
+| `--metal-ssd-streaming-cache-pressure` | Also fixture-driven: it runs the `short_code_completion` official.vec case under 16GiB SSD-streaming cache pressure (`test_official_logprob_vectors_run`), so it inherits the 0731 default. | **OK** with `DS4_TEST_VECTOR_FILE` override; proves issue-#384 path is sound on the merged tree |
+| `--think-tool-recovery` | Behavioral, stale vs post-merge numerics (fails identically on pure upstream `b7e9f00`). Post-merge kernels/fusions change generation: the model's natural turn now closes `</think>` before the tool call (`DS4_TEST_RECOVERY_PROBE=1` shows a clean, well-formed `list_files` call), so the test's force-fed malformed prefix (tool call inside unclosed thinking) no longer continues — `gen_tokens=2, calls=0`. Recovery detection itself still works (`recovered=1`). | Fork-era test tuned to pre-merge numerics; needs retuning to the new engine, not a regression in serving |
+
+**Canonical test invocation for this machine (official pre-0731 quant):**
+
+```sh
+DS4_TEST_VECTOR_FILE=tests/test-vectors/flash-pre-0731/official.vec \
+DS4_TEST_LOCAL_GOLDEN_FILE=tests/test-vectors/flash-pre-0731/local-golden.vec \
+./ds4_test --logprob-vectors --local-golden-vectors --metal-ssd-streaming-cache-pressure
+```
+
+(3/4 green; `make test` otherwise fully green. The 0731 defaults would only be valid with a `0731`-named GGUF such as the ~156GB MXFP4 release, which exceeds this machine's RAM.)
+
+**Follow-up:** retune `test_think_tool_recovery` to post-merge numerics (force a prefix the current model can continue from, or assert on the natural-turn path), then this section reduces to "use pre-0731 fixtures with undated GGUFs".
 
 ## Known Issues
 
