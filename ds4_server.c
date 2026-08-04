@@ -11560,7 +11560,13 @@ decode_again:
 
         int toks[17];
         int ntok = 0;
-        if (!s->batched_mode && temperature <= 0.0f &&
+        /* Temperature-aware DSpark speculation admits non-greedy generations
+         * (PLAN-DSPARK-TEMP-SPEC.md); everything else keeps the greedy-only
+         * gate. */
+        const bool spec_sample_gate =
+            temperature > 0.0f &&
+            ds4_engine_dspark_spec_sample_enabled(s->engine);
+        if (!s->batched_mode && (temperature <= 0.0f || spec_sample_gate) &&
             dsml_token_id < 0 &&
             ds4_engine_mtp_draft_tokens(s->engine) > 1 &&
             getenv("DS4_MTP_SPEC_DISABLE") == NULL)

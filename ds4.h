@@ -437,6 +437,8 @@ int ds4_session_prefill_cap(ds4_session *s);
 int ds4_engine_routed_quant_bits(ds4_engine *e);
 bool ds4_engine_has_output_head(ds4_engine *e);
 bool ds4_engine_has_mtp(ds4_engine *e);
+/* DSpark active + temperature-aware speculation enabled (env gate). */
+bool ds4_engine_dspark_spec_sample_enabled(ds4_engine *e);
 int ds4_engine_mtp_draft_tokens(ds4_engine *e);
 const ds4_tokens *ds4_session_tokens(ds4_session *s);
 

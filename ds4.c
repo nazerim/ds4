@@ -32356,6 +32356,11 @@ static bool dspark_disable_reuse_confidence0_markov(void) {
     return cache != 0;
 }
 
+/* Softmax probability of one token within a raw-logits row (defined with
+ * the speculative-sampling kernel below); used for drafter q capture. */
+static float ds4_spec_row_token_prob(const float *row, uint32_t n_vocab,
+                                     uint32_t token);
+
 static bool dspark_apply_markov_greedy_probe(
         float                  *logits,
         const ds4_model        *dspark_model,
@@ -32364,7 +32369,9 @@ static bool dspark_apply_markov_greedy_probe(
         float                  *markov_state,
         float                  *markov_bias,
         int32_t                 proposal[DS4_DSPARK_MAX_BLOCK_SIZE],
-        uint32_t               *proposal_len) {
+        uint32_t               *proposal_len,
+        float                  *q_out,
+        float                  *rows_out) {
     if (proposal_len) *proposal_len = 0;
     if (!logits ||
         !dspark_model ||
@@ -32398,6 +32405,13 @@ static bool dspark_apply_markov_greedy_probe(
         }
         const uint32_t token = dspark_argmax_f32(row, DS4_N_VOCAB);
         proposal[draft] = (int32_t)token;
+        if (q_out) {
+            q_out[draft] = ds4_spec_row_token_prob(row, DS4_N_VOCAB, token);
+        }
+        if (rows_out) {
+            memcpy(rows_out + (uint64_t)draft * DS4_N_VOCAB, row,
+                   (uint64_t)DS4_N_VOCAB * sizeof(float));
+        }
         prev_token = (int32_t)token;
     }
 
@@ -32490,7 +32504,9 @@ static bool dspark_apply_markov_confidence_lazy_runtime(
         uint32_t               *confidence_len,
         uint32_t               *confidence_prefix_len,
         bool                    reuse_first_confidence,
-        float                  *confidence0) {
+        float                  *confidence0,
+        float                  *q_out,
+        float                  *rows_out) {
     if (proposal_len) *proposal_len = 0;
     if (confidence_len) *confidence_len = 0;
     if (confidence_prefix_len) *confidence_prefix_len = 0;
@@ -32563,8 +32579,10 @@ static bool dspark_apply_markov_confidence_lazy_runtime(
         int32_t token = -1;
 #ifndef __APPLE__
         /* CUDA can apply the Markov bias and argmax without reading back the
-         * full logits row. Metal currently falls through to the CPU path. */
-        if (ok && !dspark_markov_bias_disabled() &&
+         * full logits row. Metal currently falls through to the CPU path.
+         * q_out capture needs the biased row on the CPU, so stay on the CPU
+         * path when it is requested. */
+        if (ok && !q_out && !dspark_markov_bias_disabled() &&
             getenv("DS4_DSPARK_NO_GPU_MARKOV") == NULL &&
             g->dspark_draft_tokens &&
             dw->markov_rank != 0 && (dw->markov_rank & 31u) == 0 &&
@@ -32611,7 +32629,8 @@ static bool dspark_apply_markov_confidence_lazy_runtime(
                 uint32_t fused_token = 0;
                 if (dspark_markov_bias_disabled()) {
                     token = (int32_t)dspark_argmax_f32(logits, DS4_N_VOCAB);
-                } else if (!dspark_disable_fused_cpu_markov_argmax() &&
+                } else if (!q_out &&
+                    !dspark_disable_fused_cpu_markov_argmax() &&
                     dspark_markov_q8_0_argmax(&fused_token,
                                               dspark_model,
                                               final->markov_w2,
@@ -32624,6 +32643,19 @@ static bool dspark_apply_markov_confidence_lazy_runtime(
                         logits[i] += markov_bias[i];
                     }
                     token = (int32_t)dspark_argmax_f32(logits, DS4_N_VOCAB);
+                }
+                /* Capture the drafter's proposal probability and the biased
+                 * logits row for rejection-sampling verification.  logits
+                 * holds the biased row here (unless bias is disabled). */
+                if (token >= 0 && (uint32_t)token < DS4_N_VOCAB) {
+                    if (q_out) {
+                        q_out[draft] = ds4_spec_row_token_prob(
+                                logits, DS4_N_VOCAB, (uint32_t)token);
+                    }
+                    if (rows_out) {
+                        memcpy(rows_out + (uint64_t)draft * DS4_N_VOCAB,
+                               logits, logits_bytes);
+                    }
                 }
             }
         }
@@ -37610,10 +37642,12 @@ static int ds4_spec_accept_token(float p_token, float q_token, uint64_t *rng) {
     return sample_rng_f32(rng) < alpha ? 1 : 0;
 }
 
+#ifdef DS4_TEST_HOOKS
 /* Sample from the adjusted residual distribution norm(max(0, p - q)) over
  * the full vocabulary.  Both inputs are normalized distributions (zeros are
  * allowed).  If the residual mass degenerates, falls back to sampling p so
- * the call always returns a valid token. */
+ * the call always returns a valid token.  (Reference implementation used by
+ * the kernel tests; production uses ds4_spec_residual_sample_row.) */
 static int ds4_spec_residual_sample(const float *p, const float *q,
                                     uint32_t n_vocab, uint64_t *rng) {
     if (!p || !q || n_vocab == 0) return 0;
@@ -37651,9 +37685,8 @@ static int ds4_spec_residual_sample(const float *p, const float *q,
     return best;
 }
 
-/* Full-vocabulary softmax of raw logits at temperature 1.0.  This is the
- * drafter's proposal distribution q (a target logits row plus the Markov
- * bias); the caller adds the bias before calling.  Returns 0 on success. */
+/* Full-vocabulary softmax of raw logits at temperature 1.0 (reference
+ * helper for the kernel tests).  Returns 0 on success. */
 static int ds4_spec_softmax_full(const float *logits, uint32_t n_vocab,
                                  float *out) {
     if (!logits || !out || n_vocab == 0) return -1;
@@ -37676,6 +37709,96 @@ static int ds4_spec_softmax_full(const float *logits, uint32_t n_vocab,
     const float inv = 1.0f / sum;
     for (uint32_t i = 0; i < n_vocab; i++) out[i] *= inv;
     return 0;
+}
+
+#endif /* DS4_TEST_HOOKS */
+
+/* Softmax probability of one token within a raw-logits row.  Used to capture
+ * the drafter's proposal probability q(x_i) for the drafted token. */
+static float ds4_spec_row_token_prob(const float *row, uint32_t n_vocab,
+                                     uint32_t token) {
+    if (!row || n_vocab == 0 || token >= n_vocab) return 0.0f;
+    float max_v = DS4_NEG_INF;
+    for (uint32_t i = 0; i < n_vocab; i++) {
+        if (isfinite(row[i]) && row[i] > max_v) max_v = row[i];
+    }
+    if (!isfinite(max_v)) return 0.0f;
+    float sum = 0.0f;
+    for (uint32_t i = 0; i < n_vocab; i++) {
+        if (!isfinite(row[i])) continue;
+        sum += expf(row[i] - max_v);
+    }
+    if (sum <= 0.0f || !isfinite(sum) || !isfinite(row[token])) return 0.0f;
+    return expf(row[token] - max_v) / sum;
+}
+
+
+/* Same adjusted-residual sample as ds4_spec_residual_sample, but the
+ * proposal distribution q is given as a raw logits row (the drafter's biased
+ * row) and is normalized on the fly, avoiding a full-vocabulary scratch
+ * buffer. */
+static int ds4_spec_residual_sample_row(const float *p, const float *row,
+                                        uint32_t n_vocab, uint64_t *rng) {
+    if (!p || !row || n_vocab == 0) return 0;
+    float max_v = DS4_NEG_INF;
+    for (uint32_t i = 0; i < n_vocab; i++) {
+        if (isfinite(row[i]) && row[i] > max_v) max_v = row[i];
+    }
+    if (!isfinite(max_v)) {
+        /* q undefined: fall back to sampling p. */
+        float psum = 0.0f;
+        for (uint32_t i = 0; i < n_vocab; i++) if (p[i] > 0.0f) psum += p[i];
+        if (psum <= 0.0f) return 0;
+        float r = sample_rng_f32(rng) * psum;
+        for (uint32_t i = 0; i < n_vocab; i++) {
+            if (p[i] <= 0.0f) continue;
+            r -= p[i];
+            if (r <= 0.0f) return (int)i;
+        }
+        return 0;
+    }
+    float z = 0.0f;
+    for (uint32_t i = 0; i < n_vocab; i++) {
+        if (!isfinite(row[i])) continue;
+        z += expf(row[i] - max_v);
+    }
+    if (z <= 0.0f || !isfinite(z)) return 0;
+    const float inv_z = 1.0f / z;
+
+    float sum = 0.0f;
+    int best = -1;
+    float best_mass = 0.0f;
+    for (uint32_t i = 0; i < n_vocab; i++) {
+        if (p[i] <= 0.0f) continue;
+        const float q = isfinite(row[i]) ? expf(row[i] - max_v) * inv_z : 0.0f;
+        const float d = p[i] - q;
+        if (d > 0.0f) {
+            sum += d;
+            if (d > best_mass) { best_mass = d; best = (int)i; }
+        }
+    }
+    if (best < 0 || sum <= 0.0f || !isfinite(sum)) {
+        float psum = 0.0f;
+        for (uint32_t i = 0; i < n_vocab; i++) if (p[i] > 0.0f) psum += p[i];
+        if (psum <= 0.0f) return best >= 0 ? best : 0;
+        float r = sample_rng_f32(rng) * psum;
+        for (uint32_t i = 0; i < n_vocab; i++) {
+            if (p[i] <= 0.0f) continue;
+            r -= p[i];
+            if (r <= 0.0f) return (int)i;
+        }
+        return best >= 0 ? best : 0;
+    }
+    float r = sample_rng_f32(rng) * sum;
+    for (uint32_t i = 0; i < n_vocab; i++) {
+        if (p[i] <= 0.0f) continue;
+        const float q = isfinite(row[i]) ? expf(row[i] - max_v) * inv_z : 0.0f;
+        const float d = p[i] - q;
+        if (d <= 0.0f) continue;
+        r -= d;
+        if (r <= 0.0f) return (int)i;
+    }
+    return best;
 }
 
 typedef struct {
@@ -48277,6 +48400,10 @@ typedef struct ds4_dspark_spec_stats {
     uint64_t accepted_draft_tokens;
     uint64_t full_accepts;
     uint64_t partial_accepts;
+    uint64_t sample_cycles;
+    uint64_t sample_full_accepts;
+    uint64_t sample_partial_accepts;
+    uint64_t sample_rejects;
     uint64_t first_misses;
     uint64_t no_draft;
     uint64_t no_room;
@@ -48336,6 +48463,13 @@ struct ds4_session {
     token_vec greedy_splitkv_segment;
     float *logits;
     float *sample_probs;
+    /* Sampling parameters from the most recent ds4_session_sample* call, so
+     * the speculative-verification path can check drafts against the exact
+     * distribution the caller requested (PLAN-DSPARK-TEMP-SPEC.md). */
+    float sample_temperature;
+    int sample_top_k;
+    float sample_top_p;
+    float sample_min_p;
     float *mtp_logits;
     int greedy_splitkv_anchor_len;
 #ifndef DS4_NO_GPU
@@ -48348,6 +48482,16 @@ struct ds4_session {
 #ifndef DS4_NO_GPU
     int dspark_draft_tokens[DS4_DSPARK_MAX_BLOCK_SIZE];
     uint32_t dspark_draft_len;
+    /* Drafter proposal probabilities q(x_i) and the biased draft logits rows
+     * used to draw each draft token, captured at draft time for
+     * rejection-sampling verification (PLAN-DSPARK-TEMP-SPEC.md).  Rows are
+     * dspark_draft_rows[draft * DS4_N_VOCAB + token]; NULL until first use. */
+    float dspark_draft_q[DS4_DSPARK_MAX_BLOCK_SIZE];
+    float *dspark_draft_rows;
+    uint32_t dspark_draft_q_len;
+    /* Session-local rng for rejection-sampling residual draws (any uniform
+     * stream is distribution-correct; kept per-session for determinism). */
+    uint64_t dspark_spec_rng;
     uint32_t dspark_sched_cycles;
     uint32_t dspark_sched_accepted;
     uint32_t dspark_sched_no_draft;
@@ -48383,6 +48527,7 @@ struct ds4_session {
 
 #ifndef DS4_NO_GPU
 static bool ds4_dspark_stats_enabled(void);
+static bool ds4_dspark_spec_sample_enabled(void);
 
 static void ds4_dspark_stats_note_len(
         uint64_t hist[DS4_DSPARK_MAX_BLOCK_SIZE + 1u],
@@ -50010,6 +50155,22 @@ bool ds4_engine_has_mtp(ds4_engine *e) {
     return e && e->backend != DS4_BACKEND_CPU &&
            e->distributed.role == DS4_DISTRIBUTED_NONE &&
            e->mtp_ready;
+}
+
+/* True when this engine runs DSpark and temperature-aware (rejection
+ * sampling) speculation is enabled via DS4_DSPARK_SPEC_SAMPLE=1.  The server
+ * uses this to admit non-greedy generations into the speculative path. */
+bool ds4_engine_dspark_spec_sample_enabled(ds4_engine *e) {
+#ifndef DS4_NO_GPU
+    if (!e || e->backend == DS4_BACKEND_CPU ||
+        e->distributed.role != DS4_DISTRIBUTED_NONE) return false;
+    if (e->support_kind != DS4_SUPPORT_DSPARK || !e->dspark) return false;
+    if (e->dspark_weights.block_size <= 1) return false;
+    return ds4_dspark_spec_sample_enabled();
+#else
+    (void)e;
+    return false;
+#endif
 }
 
 int ds4_engine_mtp_draft_tokens(ds4_engine *e) {
@@ -57396,6 +57557,13 @@ static bool ds4_dspark_stats_enabled(void) {
     return env && env[0] && strcmp(env, "0") != 0;
 }
 
+/* Opt-in gate for temperature-aware (rejection-sampling) DSpark
+ * verification; see PLAN-DSPARK-TEMP-SPEC.md. */
+static bool ds4_dspark_spec_sample_enabled(void) {
+    const char *env = getenv("DS4_DSPARK_SPEC_SAMPLE");
+    return env && env[0] && strcmp(env, "0") != 0;
+}
+
 static void ds4_format_len_hist(
         char           *buf,
         size_t          buflen,
@@ -57443,8 +57611,9 @@ static void ds4_session_print_dspark_stats(const ds4_session *s) {
     fprintf(stderr,
             "ds4: DSpark stats cycles=%llu first_tokens=%llu proposed=%llu "
             "accepted_draft=%llu accept_rate=%.2f%% avg_accept=%.3f "
-            "full=%llu partial=%llu miss_first=%llu no_draft=%llu "
-            "no_room=%llu invalid=%llu scheduler_skips=%llu "
+            "full=%llu partial=%llu "
+            "sample_cycles=%llu sample_full=%llu sample_partial=%llu sample_rejects=%llu "
+            "miss_first=%llu no_draft=%llu no_room=%llu invalid=%llu scheduler_skips=%llu "
             "tail_skips=%llu verifier_unavailable=%llu errors=%llu time_ms propose=%.3f "
             "prop_stage0=%.3f prop_setup=%.3f prop_cache=%.3f "
             "prop_chain=%.3f prop_hidden=%.3f prop_conf0=%.3f "
@@ -57462,6 +57631,10 @@ static void ds4_session_print_dspark_stats(const ds4_session *s) {
             avg_accept,
             (unsigned long long)st->full_accepts,
             (unsigned long long)st->partial_accepts,
+            (unsigned long long)st->sample_cycles,
+            (unsigned long long)st->sample_full_accepts,
+            (unsigned long long)st->sample_partial_accepts,
+            (unsigned long long)st->sample_rejects,
             (unsigned long long)st->first_misses,
             (unsigned long long)st->no_draft,
             (unsigned long long)st->no_room,
@@ -57801,6 +57974,7 @@ int ds4_session_create(ds4_session **out, ds4_engine *e, int ctx_size) {
             free(s->spec_row_logits);
             free(s->dspark_markov_bias);
             free(s->dspark_conf_features);
+            free(s->dspark_draft_rows);
             free(s);
             return 1;
         }
@@ -57858,6 +58032,7 @@ void ds4_session_free(ds4_session *s) {
     free(s->spec_row_logits);
     free(s->dspark_markov_bias);
     free(s->dspark_conf_features);
+    free(s->dspark_draft_rows);
 #endif
     free(s);
 }
@@ -59760,6 +59935,12 @@ int ds4_sample_logits(const float *logits, int n_vocab, float temperature,
 }
 
 int ds4_session_sample(ds4_session *s, float temperature, int top_k, float top_p, float min_p, uint64_t *rng) {
+    if (s) {
+        s->sample_temperature = temperature;
+        s->sample_top_k = top_k;
+        s->sample_top_p = top_p;
+        s->sample_min_p = min_p;
+    }
     return sample_top_p_min_p(s->logits, DS4_N_VOCAB, temperature, top_k,
                               top_p, min_p, rng, s->sample_probs);
 }
@@ -59768,6 +59949,10 @@ int ds4_session_sample_excluding(ds4_session *s, float temperature, int top_k,
                                  float top_p, float min_p, uint64_t *rng,
                                  int excluded_id) {
     if (!s || !s->logits) return -1;
+    s->sample_temperature = temperature;
+    s->sample_top_k = top_k;
+    s->sample_top_p = top_p;
+    s->sample_min_p = min_p;
     float original = DS4_NEG_INF;
     if (excluded_id >= 0 && (uint32_t)excluded_id < DS4_N_VOCAB) {
         original = s->logits[excluded_id];
@@ -59972,8 +60157,28 @@ static bool ds4_session_prepare_dspark_draft_impl(ds4_session *s,
     } while (0)
     s->dspark_draft_valid = false;
     s->dspark_draft_len = 0;
+    s->dspark_draft_q_len = 0;
     s->dspark_last_confidence0 = 0.0f;
     s->dspark_last_confidence0_valid = false;
+    /* Capture drafter proposal probabilities (and biased rows) for
+     * rejection-sampling verification only when it is enabled and the
+     * current generation is non-greedy.  Rows are allocated lazily once. */
+    bool capture_spec_q =
+        ds4_dspark_spec_sample_enabled() && s->sample_temperature > 0.0f;
+    if (capture_spec_q) {
+        const uint64_t rows_count =
+            (uint64_t)s->engine->dspark_weights.block_size *
+            (uint64_t)DS4_N_VOCAB;
+        if (rows_count == 0 || rows_count > (uint64_t)SIZE_MAX / sizeof(float)) {
+            capture_spec_q = false;
+        } else if (!s->dspark_draft_rows) {
+            s->dspark_draft_rows =
+                xmalloc((size_t)rows_count * sizeof(float));
+            if (!s->dspark_draft_rows) capture_spec_q = false;
+        }
+    }
+    float *capture_q = capture_spec_q ? s->dspark_draft_q : NULL;
+    float *capture_rows = capture_spec_q ? s->dspark_draft_rows : NULL;
     if (scheduler_enabled) s->dspark_last_propose_ms = 0.0;
     if (enabled && !fake_argmax_enabled &&
         ds4_session_dspark_scheduler_should_skip(s)) {
@@ -60210,7 +60415,9 @@ static bool ds4_session_prepare_dspark_draft_impl(ds4_session *s,
                         &confidence_len,
                         &confidence_prefix_len,
                         reuse_confidence0_markov,
-                        &confidence0);
+                        &confidence0,
+                        capture_q,
+                        capture_rows);
             DS4_DSPARK_PROP_ADD(propose_markov_ms, markov_t0);
             confidence_ok = markov_ok;
         } else if (markov_ready) {
@@ -60237,7 +60444,9 @@ static bool ds4_session_prepare_dspark_draft_impl(ds4_session *s,
                                                      markov_state,
                                                      markov_bias,
                                                      markov_proposal,
-                                                     &markov_proposal_len);
+                                                     &markov_proposal_len,
+                                                     capture_q,
+                                                     capture_rows);
                 if (markov_ok && probe_log) {
                     /* Runtime only needs the greedy proposal. Keep the GPU
                      * writeback for probe mode, where spec_logits may be
@@ -60316,6 +60525,9 @@ static bool ds4_session_prepare_dspark_draft_impl(ds4_session *s,
                 s->dspark_draft_tokens[i] = markov_proposal[i];
             }
             s->dspark_draft_valid = s->dspark_draft_len != 0;
+            if (capture_q && s->dspark_draft_valid) {
+                s->dspark_draft_q_len = s->dspark_draft_len;
+            }
         }
         if (confidence_ok && confidence_len != 0) {
             s->dspark_last_confidence0 = confidence0;
@@ -61613,6 +61825,351 @@ int ds4_sessions_eval_batch_with_prefill(
 }
 
 #ifndef DS4_NO_GPU
+/* Temperature-aware DSpark verification (PLAN-DSPARK-TEMP-SPEC.md).  Same
+ * skeleton as the argmax verifier, but draft tokens are accepted with
+ * probability min(1, p/q) and the first rejection samples the adjusted
+ * residual norm(max(0, p - q)) instead of truncating, which reproduces the
+ * caller's requested sampling distribution exactly.  Only used when
+ * non-greedy sampling is active and proposal probabilities were captured at
+ * draft time (dspark_draft_q_len). */
+static int ds4_session_eval_dspark_speculative_sample(
+        ds4_session *s,
+        int          n_accept,
+        int          max_tokens,
+        int          eos_token,
+        int         *accepted,
+        int          accepted_cap,
+        char        *err,
+        size_t       errlen) {
+    const bool spec_log = getenv("DS4_DSPARK_SPEC_LOG") != NULL;
+    const bool stats_enabled = s && ds4_dspark_stats_enabled();
+    const bool scheduler_enabled = s && ds4_dspark_scheduler_enabled();
+    const double stats_t0 =
+        (stats_enabled ||
+         (scheduler_enabled && ds4_dspark_scheduler_timing_enabled()))
+            ? now_sec() : 0.0;
+#define DS4_SPEC_SAMPLE_FINISH() do {                                       \
+        if (stats_enabled) {                                                \
+            s->dspark_stats.total_ms += (now_sec() - stats_t0) * 1000.0;    \
+        }                                                                   \
+    } while (0)
+#define DS4_SPEC_SAMPLE_EXTRA_MS()                                          \
+    ((scheduler_enabled && stats_t0 != 0.0) ?                                \
+     s->dspark_last_propose_ms + (now_sec() - stats_t0) * 1000.0 : 0.0)
+
+    if (!s || !s->dspark_draft_valid || s->dspark_draft_len == 0) {
+        DS4_SPEC_SAMPLE_FINISH();
+        return n_accept;
+    }
+    /* Sampling-mode verification needs captured proposal probabilities and
+     * a non-greedy target distribution. */
+    if (s->sample_temperature <= 0.0f ||
+        s->dspark_draft_q_len < s->dspark_draft_len ||
+        !s->dspark_draft_rows ||
+        !s->sample_probs) {
+        DS4_SPEC_SAMPLE_FINISH();
+        return n_accept;
+    }
+    if (!s->dspark_spec_rng) {
+        s->dspark_spec_rng =
+            ((uint64_t)(uintptr_t)s * 0x9e3779b97f4a7c15ULL) | 1u;
+    }
+    if (stats_enabled) s->dspark_stats.sample_cycles++;
+
+    int draft_n = (int)s->dspark_draft_len;
+    if (draft_n > max_tokens - n_accept) draft_n = max_tokens - n_accept;
+    if (draft_n > accepted_cap - n_accept) draft_n = accepted_cap - n_accept;
+    int room = s->ctx_size - s->checkpoint.len;
+    if (draft_n > room - 1) draft_n = room - 1;
+    if (draft_n <= 0) {
+        s->dspark_draft_valid = false;
+        s->dspark_draft_len = 0;
+        s->dspark_draft_q_len = 0;
+        DS4_SPEC_SAMPLE_FINISH();
+        return n_accept;
+    }
+
+    int drafts[DS4_DSPARK_MAX_BLOCK_SIZE];
+    for (int i = 0; i < draft_n; i++) {
+        drafts[i] = s->dspark_draft_tokens[i];
+        if (drafts[i] < 0 || drafts[i] >= (int)DS4_N_VOCAB) {
+            s->dspark_draft_valid = false;
+            s->dspark_draft_len = 0;
+            s->dspark_draft_q_len = 0;
+            DS4_SPEC_SAMPLE_FINISH();
+            return n_accept;
+        }
+    }
+    if (stats_enabled) {
+        s->dspark_stats.proposed_tokens += (uint64_t)draft_n;
+        ds4_dspark_stats_note_len(s->dspark_stats.draft_len_hist,
+                                  (uint32_t)draft_n);
+    }
+    s->dspark_draft_valid = false;
+    s->dspark_draft_len = 0;
+    s->dspark_draft_q_len = 0;
+
+    const float temperature = s->sample_temperature;
+    const int top_k = s->sample_top_k;
+    const float top_p = s->sample_top_p;
+    const float min_p = s->sample_min_p;
+    float *p_dist = s->sample_probs;
+    uint64_t *rng = &s->dspark_spec_rng;
+
+    /* Accept the first draft against the live logits (the row predicting
+     * drafts[0]).  On rejection, sample the residual and continue with that
+     * token; no verify pass is needed. */
+    if (ds4_spec_target_dist(s->logits, DS4_N_VOCAB, temperature, top_k,
+                             top_p, min_p, p_dist) <= 0) {
+        DS4_SPEC_SAMPLE_FINISH();
+        return n_accept;
+    }
+    if (!ds4_spec_accept_token(p_dist[drafts[0]], s->dspark_draft_q[0], rng)) {
+        const int x_star = ds4_spec_residual_sample_row(
+                p_dist,
+                s->dspark_draft_rows,
+                DS4_N_VOCAB,
+                rng);
+        if (ds4_session_eval(s, x_star, err, errlen) != 0) {
+            DS4_SPEC_SAMPLE_FINISH();
+            return -1;
+        }
+        accepted[n_accept++] = x_star;
+        if (stats_enabled) {
+            s->dspark_stats.sample_rejects++;
+            ds4_dspark_stats_note_len(s->dspark_stats.accepted_len_hist, 0);
+        }
+        ds4_session_dspark_scheduler_note(s, 0, false,
+                                          DS4_SPEC_SAMPLE_EXTRA_MS());
+        if (spec_log) {
+            fprintf(stderr,
+                    "ds4: DSpark sample-spec reject first draft=%d residual=%d\n",
+                    drafts[0], x_star);
+        }
+        DS4_SPEC_SAMPLE_FINISH();
+        return n_accept;
+    }
+    if (drafts[0] == eos_token) draft_n = 1;
+
+    ds4_engine *e = s->engine;
+    ds4_spec_frontier frontier;
+    memset(&frontier, 0, sizeof(frontier));
+    int row_tops_buf[DS4_DSPARK_MAX_BLOCK_SIZE];
+    int *row_tops = draft_n > 1 ? row_tops_buf : NULL;
+    float *row_logits = s->spec_row_logits;
+    const int start = s->checkpoint.len;
+    const double snapshot_t0 = stats_enabled ? now_sec() : 0.0;
+    bool have_frontier = spec_frontier_snapshot(&frontier, s);
+    if (stats_enabled) {
+        s->dspark_stats.snapshot_ms += (now_sec() - snapshot_t0) * 1000.0;
+    }
+    bool ok = have_frontier && row_logits != NULL && (draft_n <= 1 || row_tops);
+    bool verifier_may_have_mutated = false;
+
+    if (ok) {
+        for (int i = 0; i < draft_n; i++) token_vec_push(&s->checkpoint, drafts[i]);
+        verifier_may_have_mutated = true;
+        ds4_verify_suffix_timing verify_timing;
+        const double verify_t0 = stats_enabled ? now_sec() : 0.0;
+        ok = metal_graph_verify_suffix_tops(&s->graph,
+                                            &e->model,
+                                            &e->weights,
+                                            &s->checkpoint,
+                                            (uint32_t)start,
+                                            (uint32_t)draft_n,
+                                            draft_n > 1 &&
+                                                draft_n <=
+                                                    (int)DS4_SPEC_PREFIX_SLOTS + 1,
+                                            true,
+                                            row_tops,
+                                            NULL,
+                                            stats_enabled ? &verify_timing : NULL);
+        if (stats_enabled) {
+            s->dspark_stats.verify_ms += (now_sec() - verify_t0) * 1000.0;
+            s->dspark_stats.verify_upload_ms += verify_timing.upload_ms;
+            s->dspark_stats.verify_layer_ms += verify_timing.layer_ms;
+            s->dspark_stats.verify_head_ms += verify_timing.head_ms;
+            s->dspark_stats.verify_read_ms += verify_timing.read_ms;
+        }
+    }
+
+    /* Rollback helper for any failure after the verifier mutated the
+     * checkpoint. */
+#define DS4_SPEC_SAMPLE_ROLLBACK() do {                                     \
+        if (verifier_may_have_mutated) {                                    \
+            s->checkpoint.len = start;                                      \
+            ds4_session_dspark_capture_invalidate(s);                       \
+            if (!have_frontier || !spec_frontier_restore(&frontier, s)) {   \
+                snprintf(err, errlen, "DSpark sample verifier rollback failed"); \
+                s->checkpoint_valid = false;                                \
+                if (stats_enabled) s->dspark_stats.verifier_errors++;       \
+                spec_frontier_free(&frontier);                              \
+                DS4_SPEC_SAMPLE_FINISH();                                   \
+                return -1;                                                  \
+            }                                                               \
+            verifier_may_have_mutated = false;                              \
+        }                                                                   \
+    } while (0)
+
+    if (!ok) {
+        if (stats_enabled) {
+            s->dspark_stats.verifier_unavailable++;
+            ds4_dspark_stats_note_len(s->dspark_stats.accepted_len_hist, 0);
+        }
+        DS4_SPEC_SAMPLE_ROLLBACK();
+        spec_frontier_free(&frontier);
+        DS4_SPEC_SAMPLE_FINISH();
+        return n_accept;
+    }
+
+    /* Sequential acceptance of drafts[1..].  Row i-1 holds the target
+     * distribution predicting drafts[i]. */
+    for (int i = 1; i < draft_n; i++) {
+        if (!metal_graph_read_spec_logits_row(&s->graph, (uint32_t)(i - 1),
+                                              row_logits)) {
+            ok = false;
+            break;
+        }
+        if (ds4_spec_target_dist(row_logits, DS4_N_VOCAB, temperature, top_k,
+                                 top_p, min_p, p_dist) <= 0) {
+            ok = false;
+            break;
+        }
+        if (ds4_spec_accept_token(p_dist[drafts[i]], s->dspark_draft_q[i],
+                                  rng)) {
+            if (drafts[i] == eos_token) break;
+            continue;
+        }
+
+        /* Rejection at position i: keep drafts[0..i-1], then emit one token
+         * sampled from the adjusted residual at row i-1. */
+        const int x_star = ds4_spec_residual_sample_row(
+                p_dist,
+                s->dspark_draft_rows + (uint64_t)i * DS4_N_VOCAB,
+                DS4_N_VOCAB,
+                rng);
+        int emitted = 0;
+        bool committed = false;
+        if (i <= (int)DS4_SPEC_PREFIX_SLOTS) {
+            s->checkpoint.len = start;
+            ds4_session_dspark_capture_invalidate(s);
+            verifier_may_have_mutated = false;
+            if (spec_frontier_commit_prefix(s, (uint32_t)i)) {
+                memcpy(s->logits, row_logits,
+                       (size_t)DS4_N_VOCAB * sizeof(s->logits[0]));
+                committed = true;
+            }
+        }
+        if (!committed) {
+            /* Prefix slots unavailable: roll back and replay the accepted
+             * prefix token by token, exactly like the argmax fallback. */
+            DS4_SPEC_SAMPLE_ROLLBACK();
+            for (int j = 0; j < i; j++) {
+                if (!metal_graph_eval_token_raw_swa(&s->graph,
+                                                    &e->model,
+                                                    &e->weights,
+                                                    drafts[j],
+                                                    (uint32_t)s->checkpoint.len,
+                                                    row_logits)) {
+                    snprintf(err, errlen, "%s decode failed",
+                             ds4_backend_name(e->backend));
+                    s->checkpoint_valid = false;
+                    if (stats_enabled) s->dspark_stats.verifier_errors++;
+                    spec_frontier_free(&frontier);
+                    DS4_SPEC_SAMPLE_FINISH();
+                    return -1;
+                }
+                token_vec_push(&s->checkpoint, drafts[j]);
+            }
+        }
+        /* Consume the residual token; this also prepares the next draft. */
+        if (ds4_session_eval(s, x_star, err, errlen) != 0) {
+            spec_frontier_free(&frontier);
+            DS4_SPEC_SAMPLE_FINISH();
+            return -1;
+        }
+        for (int j = 0; j < i && n_accept < accepted_cap; j++) {
+            accepted[n_accept++] = drafts[j];
+            emitted++;
+        }
+        if (n_accept < accepted_cap) {
+            accepted[n_accept++] = x_star;
+            emitted++;
+        }
+        if (stats_enabled) {
+            s->dspark_stats.sample_partial_accepts++;
+            s->dspark_stats.sample_rejects++;
+            s->dspark_stats.accepted_draft_tokens += (uint64_t)(emitted - 1);
+            ds4_dspark_stats_note_len(s->dspark_stats.accepted_len_hist,
+                                      (uint32_t)(emitted - 1));
+        }
+        ds4_session_dspark_scheduler_note(s, (uint32_t)(emitted - 1), false,
+                                          DS4_SPEC_SAMPLE_EXTRA_MS());
+        if (spec_log) {
+            fprintf(stderr,
+                    "ds4: DSpark sample-spec partial accepted=%d residual=%d\n",
+                    i, x_star);
+        }
+        spec_frontier_free(&frontier);
+        DS4_SPEC_SAMPLE_FINISH();
+        return n_accept;
+    }
+
+    if (!ok) {
+        if (stats_enabled) {
+            s->dspark_stats.verifier_errors++;
+            ds4_dspark_stats_note_len(s->dspark_stats.accepted_len_hist, 0);
+        }
+        DS4_SPEC_SAMPLE_ROLLBACK();
+        spec_frontier_free(&frontier);
+        DS4_SPEC_SAMPLE_FINISH();
+        return n_accept;
+    }
+
+    /* Full acceptance: the verify pass already consumed every draft; take
+     * the final row as the live logits so the caller's next sample is the
+     * bonus token from the correct distribution. */
+    if (!metal_graph_read_spec_logits_row(&s->graph, (uint32_t)(draft_n - 1),
+                                          row_logits)) {
+        if (stats_enabled) {
+            s->dspark_stats.verifier_errors++;
+            ds4_dspark_stats_note_len(s->dspark_stats.accepted_len_hist, 0);
+        }
+        DS4_SPEC_SAMPLE_ROLLBACK();
+        spec_frontier_free(&frontier);
+        DS4_SPEC_SAMPLE_FINISH();
+        return n_accept;
+    }
+    memcpy(s->logits, row_logits,
+           (size_t)DS4_N_VOCAB * sizeof(s->logits[0]));
+    s->checkpoint_valid = true;
+    ds4_session_dspark_capture_note_checkpoint(s);
+    int emitted_drafts = 0;
+    for (int i = 0; i < draft_n && n_accept < accepted_cap; i++) {
+        accepted[n_accept++] = drafts[i];
+        emitted_drafts++;
+        if (drafts[i] == eos_token) break;
+    }
+    if (stats_enabled) {
+        s->dspark_stats.sample_full_accepts++;
+        s->dspark_stats.accepted_draft_tokens += (uint64_t)emitted_drafts;
+        ds4_dspark_stats_note_len(s->dspark_stats.accepted_len_hist,
+                                  (uint32_t)emitted_drafts);
+    }
+    ds4_session_dspark_scheduler_note(s, (uint32_t)emitted_drafts, false,
+                                      DS4_SPEC_SAMPLE_EXTRA_MS());
+    if (spec_log) {
+        fprintf(stderr, "ds4: DSpark sample-spec full accept accepted=%d\n",
+                emitted_drafts);
+    }
+    spec_frontier_free(&frontier);
+    DS4_SPEC_SAMPLE_FINISH();
+    return n_accept;
+#undef DS4_SPEC_SAMPLE_ROLLBACK
+#undef DS4_SPEC_SAMPLE_EXTRA_MS
+#undef DS4_SPEC_SAMPLE_FINISH
+}
+
 static int ds4_session_eval_dspark_speculative_argmax(
         ds4_session *s,
         int          n_accept,
@@ -65068,6 +65625,31 @@ int ds4_session_eval_speculative_argmax(ds4_session *s, int first_token,
     if (dspark_tail_skip) return n_accept;
 
     if (e->support_kind == DS4_SUPPORT_DSPARK) {
+        /* Temperature-aware verification (PLAN-DSPARK-TEMP-SPEC.md): when
+         * the caller samples non-greedily and proposal probabilities were
+         * captured at draft time, verify with rejection sampling so the
+         * output follows the requested distribution.  TP sessions keep the
+         * greedy verifier in v1. */
+        if (ds4_dspark_spec_sample_enabled() &&
+            !e->tp.active &&
+            s->sample_temperature > 0.0f &&
+            s->dspark_draft_valid &&
+            s->dspark_draft_q_len >= s->dspark_draft_len) {
+            return ds4_session_eval_dspark_speculative_sample(s,
+                                                              n_accept,
+                                                              max_tokens,
+                                                              eos_token,
+                                                              accepted,
+                                                              accepted_cap,
+                                                              err,
+                                                              errlen);
+        }
+        /* Non-greedy generation without usable proposal probabilities must
+         * not speculate: the greedy verifier would bias the output. */
+        if (ds4_dspark_spec_sample_enabled() &&
+            s->sample_temperature > 0.0f) {
+            return n_accept;
+        }
         return ds4_session_eval_dspark_speculative_argmax(s,
                                                           n_accept,
                                                           max_tokens,
