@@ -37579,6 +37579,210 @@ int ds4_test_sample_logits(const float *logits, uint32_t n_vocab,
 }
 #endif
 
+/* --- Speculative-decoding rejection-sampling kernel --------------------
+ *
+ * Target-aware DSpark verification for temperature > 0.  Pure math over
+ * normalized distributions with no engine state, so it is unit-testable in
+ * isolation.  See PLAN-DSPARK-TEMP-SPEC.md for the design: accept a draft
+ * token with probability min(1, p/q); on the first rejection sample the
+ * adjusted residual norm(max(0, p - q)).  This reproduces the target
+ * distribution exactly (Leviathan et al. 2023).
+ */
+
+/* Acceptance probability min(1, p/q) for a drafted token whose target
+ * probability is p and drafter proposal probability is q.  Returns 0 when
+ * either probability is non-positive or non-finite. */
+static float ds4_spec_accept_prob(float p, float q) {
+    if (!isfinite(p) || p <= 0.0f) return 0.0f;
+    if (!isfinite(q) || q <= 0.0f) return 0.0f;
+    const float r = p / q;
+    return r >= 1.0f ? 1.0f : r;
+}
+
+/* Decide accept(1)/reject(0) for one drafted token.  Consumes exactly one
+ * rng draw only when the acceptance probability is strictly between 0 and 1,
+ * so the draw stream stays deterministic for a fixed decision sequence. */
+static int ds4_spec_accept_token(float p_token, float q_token, uint64_t *rng) {
+    const float alpha = ds4_spec_accept_prob(p_token, q_token);
+    if (alpha >= 1.0f) return 1;
+    if (alpha <= 0.0f) return 0;
+    if (!rng) return 0;
+    return sample_rng_f32(rng) < alpha ? 1 : 0;
+}
+
+/* Sample from the adjusted residual distribution norm(max(0, p - q)) over
+ * the full vocabulary.  Both inputs are normalized distributions (zeros are
+ * allowed).  If the residual mass degenerates, falls back to sampling p so
+ * the call always returns a valid token. */
+static int ds4_spec_residual_sample(const float *p, const float *q,
+                                    uint32_t n_vocab, uint64_t *rng) {
+    if (!p || !q || n_vocab == 0) return 0;
+    float sum = 0.0f;
+    int best = -1;
+    float best_mass = 0.0f;
+    for (uint32_t i = 0; i < n_vocab; i++) {
+        const float d = p[i] - q[i];
+        if (d > 0.0f) {
+            sum += d;
+            if (d > best_mass) { best_mass = d; best = (int)i; }
+        }
+    }
+    if (best < 0 || sum <= 0.0f || !isfinite(sum)) {
+        float psum = 0.0f;
+        for (uint32_t i = 0; i < n_vocab; i++) {
+            if (p[i] > 0.0f) psum += p[i];
+        }
+        if (psum <= 0.0f || !isfinite(psum)) return best >= 0 ? best : 0;
+        float r = sample_rng_f32(rng) * psum;
+        for (uint32_t i = 0; i < n_vocab; i++) {
+            if (p[i] <= 0.0f) continue;
+            r -= p[i];
+            if (r <= 0.0f) return (int)i;
+        }
+        return best >= 0 ? best : 0;
+    }
+    float r = sample_rng_f32(rng) * sum;
+    for (uint32_t i = 0; i < n_vocab; i++) {
+        const float d = p[i] - q[i];
+        if (d <= 0.0f) continue;
+        r -= d;
+        if (r <= 0.0f) return (int)i;
+    }
+    return best;
+}
+
+/* Full-vocabulary softmax of raw logits at temperature 1.0.  This is the
+ * drafter's proposal distribution q (a target logits row plus the Markov
+ * bias); the caller adds the bias before calling.  Returns 0 on success. */
+static int ds4_spec_softmax_full(const float *logits, uint32_t n_vocab,
+                                 float *out) {
+    if (!logits || !out || n_vocab == 0) return -1;
+    float max_logit = DS4_NEG_INF;
+    uint32_t finite = 0;
+    for (uint32_t i = 0; i < n_vocab; i++) {
+        if (!isfinite(logits[i])) { out[i] = 0.0f; continue; }
+        finite++;
+        if (logits[i] > max_logit) max_logit = logits[i];
+    }
+    if (finite == 0) return -1;
+    float sum = 0.0f;
+    for (uint32_t i = 0; i < n_vocab; i++) {
+        if (!isfinite(logits[i])) { out[i] = 0.0f; continue; }
+        const float p = expf(logits[i] - max_logit);
+        out[i] = p;
+        sum += p;
+    }
+    if (sum <= 0.0f || !isfinite(sum)) return -1;
+    const float inv = 1.0f / sum;
+    for (uint32_t i = 0; i < n_vocab; i++) out[i] *= inv;
+    return 0;
+}
+
+typedef struct {
+    int id;
+    float v;
+} ds4_spec_cand;
+
+static int ds4_spec_cand_cmp_desc(const void *a, const void *b) {
+    const float av = ((const ds4_spec_cand *)a)->v;
+    const float bv = ((const ds4_spec_cand *)b)->v;
+    if (av > bv) return -1;
+    if (av < bv) return 1;
+    return 0;
+}
+
+/* Build the exact normalized distribution that sample_top_p_min_p would draw
+ * from for the same arguments: temperature scaling, optional top_k logit
+ * restriction, min_p relative filter, and the top_p nucleus cutoff.  Writes
+ * normalized probabilities into p_out (zero elsewhere) and returns the number
+ * of tokens in the support, or -1 on invalid arguments.  Kept in lock-step
+ * with sample_top_p_min_p; the spec-rejection test suite guards the match. */
+int ds4_spec_target_dist(const float *logits, uint32_t n_vocab,
+                         float temperature, int top_k, float top_p,
+                         float min_p, float *p_out) {
+    if (!logits || !p_out || n_vocab == 0) return -1;
+    memset(p_out, 0, (size_t)n_vocab * sizeof(p_out[0]));
+
+    if (temperature <= 0.0f) {
+        const int best = sample_argmax(logits, n_vocab);
+        if (best < 0) return -1;
+        p_out[best] = 1.0f;
+        return 1;
+    }
+    if (top_p <= 0.0f || top_p > 1.0f) top_p = 1.0f;
+    if (min_p < 0.0f) min_p = 0.0f;
+    if (top_k > 1024) top_k = 1024;
+    if (top_k > 0 && (uint32_t)top_k > n_vocab) top_k = (int)n_vocab;
+
+    ds4_spec_cand *cand = xmalloc((size_t)n_vocab * sizeof(cand[0]));
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < n_vocab; i++) {
+        if (!isfinite(logits[i])) continue;
+        cand[n].id = (int)i;
+        cand[n].v = logits[i];
+        n++;
+    }
+    if (n == 0) { free(cand); return -1; }
+    qsort(cand, n, sizeof(cand[0]), ds4_spec_cand_cmp_desc);
+    if (top_k > 0 && n > (uint32_t)top_k) n = (uint32_t)top_k;
+
+    const float max_logit = cand[0].v;
+    float *probs = xmalloc((size_t)n * sizeof(probs[0]));
+    float sum = 0.0f;
+    for (uint32_t i = 0; i < n; i++) {
+        probs[i] = expf((cand[i].v - max_logit) / temperature);
+        sum += probs[i];
+    }
+    if (sum <= 0.0f || !isfinite(sum)) {
+        p_out[cand[0].id] = 1.0f;
+        free(probs);
+        free(cand);
+        return 1;
+    }
+
+    const float min_prob = (probs[0] / sum) * min_p;
+    float filtered_sum = 0.0f;
+    uint32_t filtered = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        const float pn = probs[i] / sum;
+        if (i > 0 && pn < min_prob) break;
+        filtered_sum += probs[i];
+        filtered++;
+        if (filtered_sum / sum >= top_p) break;
+    }
+    if (filtered == 0) {
+        p_out[cand[0].id] = 1.0f;
+        free(probs);
+        free(cand);
+        return 1;
+    }
+    for (uint32_t i = 0; i < filtered; i++) {
+        p_out[cand[i].id] = probs[i] / filtered_sum;
+    }
+    free(probs);
+    free(cand);
+    return (int)filtered;
+}
+
+#ifdef DS4_TEST_HOOKS
+/* Test hooks for the rejection-sampling kernel (see tests/ds4_test.c,
+ * --spec-rejection-kernel). */
+float ds4_test_spec_accept_prob(float p, float q) {
+    return ds4_spec_accept_prob(p, q);
+}
+int ds4_test_spec_accept_token(float p, float q, uint64_t *rng) {
+    return ds4_spec_accept_token(p, q, rng);
+}
+int ds4_test_spec_residual_sample(const float *p, const float *q,
+                                  uint32_t n_vocab, uint64_t *rng) {
+    return ds4_spec_residual_sample(p, q, n_vocab, rng);
+}
+int ds4_test_spec_softmax_full(const float *logits, uint32_t n_vocab,
+                               float *out) {
+    return ds4_spec_softmax_full(logits, n_vocab, out);
+}
+#endif
+
 static void print_top_logits(
         FILE          * fp,
         const char    * label,

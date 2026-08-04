@@ -381,7 +381,19 @@ int ds4_test_sample_logits(const float *logits, uint32_t n_vocab,
                            float top_p, float min_p, uint64_t *rng,
                            float *prob_scratch);
 uint64_t ds4_test_mixed_native_count(void);
+/* Rejection-sampling kernel hooks (PLAN-DSPARK-TEMP-SPEC.md, M1). */
+float ds4_test_spec_accept_prob(float p, float q);
+int ds4_test_spec_accept_token(float p, float q, uint64_t *rng);
+int ds4_test_spec_residual_sample(const float *p, const float *q,
+                                  uint32_t n_vocab, uint64_t *rng);
+int ds4_test_spec_softmax_full(const float *logits, uint32_t n_vocab,
+                               float *out);
 #endif
+/* Exact target distribution for speculative-sampling verification: the same
+ * normalized, truncated distribution sample_top_p_min_p draws from. */
+int ds4_spec_target_dist(const float *logits, uint32_t n_vocab,
+                         float temperature, int top_k, float top_p,
+                         float min_p, float *p_out);
 int ds4_session_top_logprobs(ds4_session *s, ds4_token_score *out, int k);
 int ds4_session_token_logprob(ds4_session *s, int token, ds4_token_score *out);
 int ds4_session_copy_logits(ds4_session *s, float *out, int cap);
