@@ -29,7 +29,7 @@ MTP_MODEL="gguf/DeepSeek-V4-Flash-DSpark-support.gguf"
 # Uses parallel indexed arrays (bash 3.2 compatible — macOS default).
 MODEL_KEYS=("0731")
 MODEL_PATHS=(
-    "/Users/naz/.omlx/models/jmilnz/DeepSeek-V4-Flash-0731-antirez-ds4-GGUF/DeepSeek-V4-Flash-0731-Layers37-42Q4K-mixed-realimatrix-v2.gguf"
+    "gguf/DeepSeek-V4-Flash-Layers37-42Q4KExperts-OtherExpertLayersIQ2XXSGateUp-Q2KDown-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-fixed-0731.gguf"
 )
 
 # Alternative MTP (draft) model map: short name -> full GGUF path.
