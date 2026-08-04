@@ -216,6 +216,68 @@ static void test_one_step_identity(void) {
     }
 }
 
+static void test_residual_excluding_distribution(void) {
+    /* Point-mass residual: p with the excluded token zeroed, renormalized.
+     * p=[0.5,0.3,0.2], exclude=0 -> residual=[0,0.6,0.4]. */
+    const float p[3] = {0.5f, 0.3f, 0.2f};
+    uint64_t rng = 4242;
+    int counts[3] = {0};
+    const int N = 12000;
+    for (int i = 0; i < N; i++) {
+        const int t = ds4_test_spec_residual_sample_excluding(p, 0, 3, &rng);
+        CHECK(t >= 0 && t < 3, "excluding token out of range: %d", t);
+        if (t >= 0 && t < 3) counts[t]++;
+    }
+    CHECK(counts[0] == 0, "excluded token must never be sampled (%d)", counts[0]);
+    const float frac1 = (float)counts[1] / (float)N;
+    CHECK(fabsf(frac1 - 0.6f) < 0.03f, "excluding split %.4f != 0.6", frac1);
+
+    /* Excluding a token renormalizes over the rest: p=[0.5,0.3,0.2],
+     * exclude=2 -> P(0)=0.5/0.8=0.625. */
+    rng = 9999;
+    int zeros = 0;
+    const int M = 4000;
+    for (int i = 0; i < M; i++) {
+        if (ds4_test_spec_residual_sample_excluding(p, 2, 3, &rng) == 0) zeros++;
+    }
+    const float fz = (float)zeros / (float)M;
+    CHECK(fabsf(fz - 0.625f) < 0.03f, "excluding frac %.4f != 0.625", fz);
+}
+
+static void test_point_mass_identity(void) {
+    /* Greedy-drafter lemma: the drafter is deterministic (proposal = point
+     * mass on the pick x), so accept with p(x) (q==1) and on rejection
+     * sample p with x zeroed; the result must follow p exactly for ANY
+     * fixed draft pick. */
+    const uint32_t n = 8;
+    const float p[8] = {0.28f, 0.02f, 0.15f, 0.05f, 0.20f, 0.10f, 0.12f, 0.08f};
+    const int picks[3] = {0, 1, 4}; /* argmax-ish, rare token, mid token */
+    for (int pi = 0; pi < 3; pi++) {
+        const int x = picks[pi];
+        uint64_t rng = 1000 + (uint64_t)pi;
+        int counts[8] = {0};
+        const int N = 40000;
+        for (int i = 0; i < N; i++) {
+            int out;
+            if (ds4_test_spec_accept_token(p[x], 1.0f, &rng)) {
+                out = x;
+            } else {
+                out = ds4_test_spec_residual_sample_excluding(p, x, n, &rng);
+            }
+            CHECK(out >= 0 && out < (int)n, "point-mass token out of range: %d", out);
+            if (out >= 0 && out < (int)n) counts[out]++;
+        }
+        for (uint32_t i = 0; i < n; i++) {
+            const float e = (float)counts[i] / (float)N;
+            const float sigma = sqrtf(p[i] * (1.0f - p[i]) / (float)N);
+            const float tol = 5.0f * sigma + 0.004f;
+            CHECK(fabsf(e - p[i]) <= tol,
+                  "point-mass pick=%d token %u: empirical %.4f vs p %.4f (tol %.4f)",
+                  x, i, e, p[i], tol);
+        }
+    }
+}
+
 int main(void) {
     test_accept_prob_basic();
     test_accept_frequency();
@@ -223,6 +285,8 @@ int main(void) {
     test_softmax_full();
     test_target_dist_matches_sampler();
     test_one_step_identity();
+    test_residual_excluding_distribution();
+    test_point_mass_identity();
     if (failures) {
         fprintf(stderr, "test_spec_rejection: %d failure(s)\n", failures);
         return 1;

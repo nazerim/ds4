@@ -386,6 +386,8 @@ float ds4_test_spec_accept_prob(float p, float q);
 int ds4_test_spec_accept_token(float p, float q, uint64_t *rng);
 int ds4_test_spec_residual_sample(const float *p, const float *q,
                                   uint32_t n_vocab, uint64_t *rng);
+int ds4_test_spec_residual_sample_excluding(const float *p, int exclude,
+                                            uint32_t n_vocab, uint64_t *rng);
 int ds4_test_spec_softmax_full(const float *logits, uint32_t n_vocab,
                                float *out);
 #endif

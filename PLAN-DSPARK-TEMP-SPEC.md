@@ -33,34 +33,43 @@ DeepSeek's own serving runs DSpark alongside temp-1.0 targets (vLLM:
 
 ## 3. Algorithm
 
-Standard speculative sampling (Leviathan et al. 2023), adapted to a greedy
-drafter with a softmax head:
+Standard speculative sampling (Leviathan et al. 2023), specialized to a
+**deterministic (argmax) drafter**, whose proposal is therefore a point mass:
 
-Given K draft tokens x_1..x_K, per-draft proposal probabilities
-q_i = q(x_i) (draft-head softmax at its own greedy pick), and target logits
-for every verify row:
+Given K draft tokens x_1..x_K (each x_i is the drafter's argmax pick, so the
+true proposal q_i is the delta distribution on x_i, q_i(x_i) = 1), and target
+logits for every verify row:
 
 For i = 1..K (verify row i-1 is logits conditioned on prefix + x_1..x_{i-1}):
 
 1. Build target distribution p_i from row i-1: apply temperature, then the
    request's top_k/top_p/min_p truncation, renormalize.
-2. Accept x_i with probability min(1, p_i(x_i) / q_i), drawing from the
-   session rng.
+2. Accept x_i with probability p_i(x_i) (i.e. min(1, p_i(x_i)/1)), drawing
+   from the session rng.
 3. On first rejection at i: sample x* from the adjusted residual
-   norm(max(0, p_i - q_i)) over the truncated support, emit
-   x_1..x_{i-1}, x*, stop the cycle. (x* takes the role of the "bonus"
+   norm(max(0, p_i - delta_{x_i})) = p_i with x_i zeroed and renormalized,
+   emit x_1..x_{i-1}, x*, stop the cycle. (x* takes the role of the "bonus"
    token; its logits row seeds the next cycle.)
 4. If all K accepted: sample the bonus token from p at the final row
    (row K-1) with the request's sampling parameters.
+
+**Why point-mass, not softmax-q (M4 correction):** the Leviathan guarantee
+requires the draft x_i to be *sampled* from q. The DSpark drafter is
+deterministic argmax, so its true proposal is a point mass (q(x_i)=1), not
+the draft-head softmax. Using q_i = softmax-confidence would over-accept
+(min(1, p/q) > p whenever q < 1) and bias the output toward the drafter's
+picks. The point-mass rule above reproduces the target distribution exactly;
+it needs no captured q or draft rows at all (simpler and re-enables the
+GPU/fused argmax draft paths).
 
 Semantics notes:
 
 - Draft token outside the truncated target support => p_i(x_i)=0 => reject.
   Correct by construction.
-- Truncation: apply the target truncation to p; evaluate q at draft tokens;
-  residual over the truncated support with p, q renormalized on it. This is
-  exact for pure-temperature sampling; with truncation it matches standard
-  engine practice (vLLM) rather than a formal guarantee. Document as such.
+- Truncation: apply the target truncation to p; residual over the truncated
+  support with x_i zeroed. This is exact for pure-temperature sampling; with
+  truncation it matches standard engine practice (vLLM) rather than a formal
+  guarantee. Document as such.
 - RNG discipline: fixed draw order per cycle (one acceptance draw per draft
   position, then residual/bonus draws). Streams differ from non-speculative
   runs by design; determinism requirement is same-seed-same-config =>
@@ -234,3 +243,51 @@ Semantics notes:
 ### Decision: GO
 No Metal changes. CPU acceptance math. Two draft-path capture plumbing sites.
 M1 next: pure acceptance kernel + unit tests.
+
+## M4 results (2026-08-04)
+
+### M4.1 — Greedy regression: PASS
+temp-0 outputs byte-identical to the pre-change baseline (e0e5f40) on a fixed
+chat prompt, with the gate both OFF and ON (gate ON at temp 0 routes to the
+unchanged argmax verifier).
+
+### M4.2 — Distribution equivalence at temp 1.0 / top_p 0.95: PASS (after 2 fixes)
+Method: /v1/completions (raw continuation — avoids chat-template tool-error
+churn), N=400 per mode, permutation test on per-position token-TV with a
+resampled null.
+
+Two real bugs were found and fixed:
+
+1. **Soft-q proposal (design flaw).** v1 captured q_i as the draft-head
+   softmax at its own greedy pick and accepted min(1, p/q). But the drafter
+   is deterministic argmax, so the true proposal is a point mass and the
+   correct rule is accept-with-p(x_i), residual = p with the draft token
+   zeroed. Soft-q over-accepted and biased positions 2-5 (TV 0.14-0.18,
+   p<=0.03). Fixed: acceptance uses q==1 and
+   ds4_spec_residual_sample_excluding; q/draft-row capture removed entirely
+   (also re-enables the GPU/fused argmax draft paths).
+2. **Checkpoint/KV desync on partial accept (integration bug).** The
+   prefix-commit branch committed KV for the accepted prefix but never pushed
+   the accepted draft tokens onto the checkpoint token vector, corrupting all
+   subsequent cycles (TV 0.29-0.41 at positions 7-9). Fixed: push the
+   accepted drafts after spec_frontier_commit_prefix (mirrors the argmax
+   verifier).
+
+Final result, two full speculative cycles + bonus, all positions within the
+null (p=0.42-1.0), full-sequence p=0.81.
+
+### M4.3 — Performance on M5 Max (150-token completions)
+- speculative OFF, temp 1.0 (plain per-token sampling): ~37.9 t/s
+- speculative ON,  temp 1.0 (rejection sampling):       ~31.5 t/s  (-17%)
+- speculative ON,  temp 0.0 (greedy argmax path):       ~38.4 t/s
+
+The sampling verifier is currently *slower* than plain sampling at temp>0.
+Stats show why: the DSpark scheduler already produces very short drafts for
+this workload (draft_len_hist dominated by len 1-2; ~86% of greedy cycles are
+no-draft/scheduler-skip), so the fixed per-cycle overhead (verify pass ~25ms,
+propose ~9ms, snapshot) is not amortized. Row readback is negligible
+(verify_read ~0.3ms total), so the Metal-side-acceptance fallback from M0 is
+not needed. Point-mass acceptance also accepts less than argmax-match greedy
+(80.7% vs 83.2% per-token here). Candidate follow-ups (not v1): skip the
+verify pass for 1-token drafts; raise the scheduler's minimum draft length
+before proposing; tune tail-min.
