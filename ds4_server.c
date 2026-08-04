@@ -632,6 +632,7 @@ typedef struct {
     bool stream_include_usage;
     int cache_read_tokens;
     int cache_write_tokens;
+    long long decode_time_ms;
     ds4_think_mode think_mode;
     bool has_tools;
     bool prompt_preserves_reasoning;
@@ -5537,9 +5538,13 @@ static void append_openai_usage_json(buf *b, const request *r,
      * cache hits. */
     buf_printf(b,
                "{\"prompt_tokens\":%d,\"completion_tokens\":%d,\"total_tokens\":%d,"
-               "\"prompt_tokens_details\":{\"cached_tokens\":%d,\"cache_write_tokens\":%d}}",
+               "\"prompt_tokens_details\":{\"cached_tokens\":%d,\"cache_write_tokens\":%d",
                prompt_tokens, completion_tokens, prompt_tokens + completion_tokens,
                cached_tokens, cache_write_tokens);
+    if (r && r->decode_time_ms > 0) {
+        buf_printf(b, ",\"perf_time_ms\":%lld", (long long)r->decode_time_ms);
+    }
+    buf_puts(b, "}}");
 }
 
 static bool sse_usage_chunk(int fd, const request *r, const char *id,
@@ -12186,6 +12191,9 @@ decode_again:
     } else if (!parsed_calls.len) {
         thinking_live_clear(s, slot);
     }
+
+    /* Record decode-only timing (post-prefill wall time) for API response. */
+    j->req.decode_time_ms = (long long)((now_sec() - decode_t0) * 1000);
 
     if (j->req.stream) {
         bool response_ok = true;

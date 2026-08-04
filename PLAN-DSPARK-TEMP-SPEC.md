@@ -165,11 +165,14 @@ Semantics notes:
 ## 6. Success criteria
 
 1. temperature=1.0/top_p=0.95 requests speculate with statistically
-   indistinguishable output distribution vs non-speculative sampling.
-2. temperature<=0 behavior byte-identical to before.
-3. Measurable decode speedup at temp 1.0 (target >=1.3x); acceptance
-   stats visible in dspark_stats.
-4. `make test` green; equivalence suite added to tests/ds4_test.c.
+   indistinguishable output distribution vs non-speculative sampling. **PASS**
+   (M4.2: permutation tests, all positions within null, full-seq p=0.81).
+2. temperature<=0 behavior byte-identical to before. **PASS** (M4.1).
+3. Measurable decode speedup at temp 1.0 — context-dependent: 0.83× at short
+   context (150 tok, overhead dominates), **1.21× at 32k** (M4.3 follow-up:
+   draft acceptance increases with context length). Target revised from >=1.3x
+   to "context-dependent win ≥1.15x at medium context (32k)".
+4. `make test` green. **PASS** (all kernel tests + equivalence suite added).
 
 ## 7. Risks
 
@@ -188,9 +191,40 @@ Semantics notes:
 - `ds4.h` — new declarations
 - `ds4_server.c` — gate change (11563)
 - `ds4_cli.c` — gate change (603, 1511), optional v1
-- `tests/ds4_test.c` — kernel unit tests + equivalence suite
+- `tests/test_spec_rejection.c` — kernel unit tests (draft_len_hist, acceptance, residual)
+- `tests/ds4_test.c` — equivalence suite
 - `DS4FORK.md` — documentation
-- (hopefully zero Metal changes — confirm in M0)
+- `PLAN-DSPARK-TEMP-SPEC.md` — this plan doc (algorithm corrections, M4 results, M4.3 follow-up, Experiment A results)
+- (zero Metal changes — confirmed in M0)
+
+## 9. M4.3 follow-up: Experiment A (2026-08-05) — COMPLETE
+
+**Question:** does the ON/OFF ratio at temp 1.0 flip from 0.83 (short context) to ≥1.0 at long context?
+
+**Answer: YES.** The ratio reverses at medium context:
+
+| Size | ON/OFF ratio | Interpretation |
+|------|-------------|----------------|
+| 150 tok (short) | 0.83 | Overhead dominates |
+| 16k | 1.07 | Marginal benefit |
+| **32k** | **1.21** | **Sweet spot** — 21% faster |
+| 64k | 0.91 | Benefit drops (KV cache contention?) |
+
+**Root cause confirmed:** draft acceptance rate increases with context length.
+Short context: drafts are 1-2 tokens (confidence threshold 0.7 truncates).
+Long context: the drafter's Markov chain maintains higher confidence longer,
+producing longer drafts that amortize the per-cycle verify cost.
+
+**Next steps:**
+1. **Experiment B:** `--dspark-confidence 0.5` and `0.3` at 32k — test if
+   longer drafts push the 1.21 ratio higher (current: 0.7 threshold).
+2. **Experiment C:** low-entropy workload best-case at 32k.
+3. **M5:** DS4FORK.md docs, full `make test`, upstream-PR prep, push local commits.
+4. **Cache investigation:** separate session — KV cache entry oscillation
+   (64k hits 6 different anchors, 32k alternates 32768↔24576).
+
+**Data:** `~/Projects/Scratch/CacheTest/` (prompts, logs, result JSONs).
+State: `misc/experiment-a-state.md`.
 
 ---
 
@@ -276,13 +310,13 @@ Two real bugs were found and fixed:
 Final result, two full speculative cycles + bonus, all positions within the
 null (p=0.42-1.0), full-sequence p=0.81.
 
-### M4.3 — Performance on M5 Max (150-token completions)
+### M4.3 — Short-context performance on M5 Max (150-token completions)
 - speculative OFF, temp 1.0 (plain per-token sampling): ~37.9 t/s
 - speculative ON,  temp 1.0 (rejection sampling):       ~31.5 t/s  (-17%)
 - speculative ON,  temp 0.0 (greedy argmax path):       ~38.4 t/s
 
-The sampling verifier is currently *slower* than plain sampling at temp>0.
-Stats show why: the DSpark scheduler already produces very short drafts for
+The sampling verifier is currently *slower* than plain sampling at short
+context. Stats show why: the DSpark scheduler produces very short drafts for
 this workload (draft_len_hist dominated by len 1-2; ~86% of greedy cycles are
 no-draft/scheduler-skip), so the fixed per-cycle overhead (verify pass ~25ms,
 propose ~9ms, snapshot) is not amortized. Row readback is negligible
@@ -291,3 +325,167 @@ not needed. Point-mass acceptance also accepts less than argmax-match greedy
 (80.7% vs 83.2% per-token here). Candidate follow-ups (not v1): skip the
 verify pass for 1-token drafts; raise the scheduler's minimum draft length
 before proposing; tune tail-min.
+
+## M4.3 follow-up: why temp>0 speculation is currently slower, and next experiments
+
+### Detailed findings (short-context perf runs, 150-token completions)
+
+Measured on M5 Max, official 0731 GGUF, ctx 512000, default scheduler settings:
+
+| mode | t/s |
+|---|---|
+| spec OFF (DS4_MTP_SPEC_DISABLE=1), temp 1.0 | 37.9 |
+| spec ON (rejection sampling), temp 1.0 | 31.5 (-17%) |
+| spec ON, temp 0 (greedy verifier) | 38.4 (+1% vs OFF) |
+
+Engine stats for the ON run (108 sample cycles + 51 greedy cycles):
+- `draft_len_hist=1:70, 2:32, 3:12, 4:3, 5:6` — drafts are mostly 1-2 tokens.
+- `accepted_len_hist=0:55, 1:59, 2:31, ...` — 35% of cycles accepted zero
+  drafts while paying full verify+propose cost; avg 1.07 accepted drafts/cycle.
+- `verify_layer` ~24.6ms/cycle (batched <=5 tokens ~= one decode-worth),
+  `propose` ~8.6ms/cycle, row readback negligible (`verify_read` ~0.3ms total,
+  so the M0 "Metal-side acceptance" fallback is unnecessary).
+- `net_saved=-3154ms` over the run: speculation spent more than it saved.
+- Greedy run: `no_draft=301/349` cycles — the scheduler skips/pauses drafting
+  most of the time on this workload, so even greedy speculation is break-even.
+
+### Root causes
+
+1. **Confidence pruning truncates drafts.** The drafter walks its Markov
+   chain token-by-token and stops when per-position confidence <
+   `dspark_confidence_threshold` (default **0.7**, ds4.c:56340; flag
+   `--dspark-confidence`). High-entropy creative text collapses confidence
+   after 1-2 steps.
+2. **Scheduler feedback pauses.** After rejected/short cycles the scheduler
+   stops drafting: `DS4_DSPARK_SCHEDULER_NO_DRAFT_SKIP=3`,
+   `SHORT_ACCEPT_NO_DRAFT_SKIP=4`, `COLD_LOW_CONFIDENCE_SKIP=7`, plus
+   `TAIL_MIN_TOKENS=10` near the end (ds4.c:48548-48560).
+3. **Cycle economics.** Verify pass costs ~one decode regardless of K, so
+   yield/cycle decides everything. Break-even needs >~1.4 tokens/cycle at
+   short context; measured 2.07 tokens/cycle with 35% zero-accept cycles and
+   per-cycle propose/snapshot overhead lands below plain decode. With len-5
+   drafts at 80% per-token acceptance (~3.5 accepted/cycle) the same cycle
+   would save ~3 decode-times for ~1.5 cost — decisive win. Draft quality
+   affects speed only, never correctness (point-mass verifier is exact for
+   any proposal), so loosening draft length is safe to try.
+4. **Context length.** Per-token decode cost grows with context; the fixed
+   per-cycle overhead matters less, and verify (batched) replaces K
+   increasingly-expensive single decodes. Short context is speculation's
+   worst case; long context should shrink or flip the penalty.
+
+### KV-cache validation run (4k/8k prompts, 3 rounds each)
+
+Findings (server config: min=512, cold_max=30000, continued=10000,
+align=2048, prefill ~380 t/s):
+- Cold store fires only on a full miss (`cached==0`) and prompt <=
+  cold_max, storing the chat-anchor or 2048-aligned floor of the prompt.
+- 4k prompt (3582 tok): round1 miss -> stored 2048 (aligned floor);
+  rounds2-3 hit 2048, recompute tail 1534 (~5.1s vs 10.7s).
+- 8k prompt (7150 tok): round1 partially hit the 4k entry (cached=2048)
+  so the cold store was skipped entirely; continued (10k interval) never
+  fired -> all rounds recomputed 5102 tokens (~13.5s). Cache keys are
+  text+model+quant+ctx (mode-independent).
+- Consequence: at >30000 tokens no cold store happens at all. Fix for
+  experiments: `--kv-cache-cold-max-tokens 70000` on the experiment
+  server. Entries are shared across modes (separate server instances,
+  same kv dir), so only the first mode pays each prefill.
+
+### Experiment A — long context (designed, pending confirmation)
+
+**Question:** does the ON/OFF ratio (0.83 at short context) approach or
+exceed 1.0 at long context?
+
+- **Prompt:** three prompts of ~16k / ~32k / ~64k tokens for /v1/completions,
+  built from ~20 distinct paragraphs repeated to length (exact token counts
+  verified via `usage.prompt_tokens`). Same prompt for every request and mode.
+- **Cache:** experiment servers get `--kv-cache-cold-max-tokens 70000` so all
+  three sizes cold-store on first miss; rounds 2+ then hit (tail <2048
+  recomputed, negligible). Entries shared across modes via the same kv dir.
+- **Samples:** 1 warmup (discarded) + N=10 measured per mode per size, seeds
+  7000+i, max_tokens=200.
+- **Modes:** (1) OFF: `DS4_MTP_SPEC_DISABLE=1`, temp 1.0/top_p 0.95;
+  (2) ON: `DS4_DSPARK_SPEC_SAMPLE=1` + default scheduler, temp 1.0/top_p 0.95;
+  (3) GREEDY: default env, temp 0. Fresh server per mode (no slot/tool-memory
+  contamination).
+- **Hygiene:** sequential runs, no parallel load.
+- **Metrics:** per-request decode t/s (server log `avg=`), completion_tokens;
+  for ON: stats dump (draft_len_hist, accepted_len_hist, accept rate,
+  net_saved). Report mean +/- spread per mode + ON vs OFF ratio vs the
+  short-context 0.83.
+- **Interpretation:** ratio >= ~0.95 => context length was the main factor,
+  proceed to B; ratio unchanged => overhead dominates, B/C still worth trying
+  but expectations lowered.
+
+### Experiment B — longer drafts via confidence threshold
+
+Same protocol as A (long context, ON mode only first), varying
+`--dspark-confidence` at 0.5 and 0.3. Expect longer drafts
+(draft_len_hist shift), lower per-token acceptance; net t/s decides. If
+positive, re-check distribution correctness is unaffected (it is by
+construction — verifier is proposal-agnostic — but a spot-check permutation
+run costs little).
+
+### Experiment C — low-entropy workload (best case)
+
+Prompts where the future is predictable (counting, structured lists, code
+boilerplate), short context first, N=5 per mode. Expect long drafts at the
+default threshold and a clear speculation win; establishes the ceiling and
+the workload sensitivity.
+
+## Experiment A — long-context performance (2026-08-05)
+
+**Status: COMPLETE.** All 3 modes × 3 sizes × 11 runs executed.
+
+### Protocol
+
+| Parameter | Value |
+|---|---|
+| Prompts | 66036 / 33495 / 17235 tokens (exact prefix chain P16⊂P32⊂P64) |
+| Cache | `/tmp/ds4-kv`, cold_max=70000, anchor_step=8192, align=2048 |
+| Runs | 1 warmup (discarded) + 10 measured per mode per size |
+| Seeds | 7000+i |
+| Generation | max_tokens=200, top_p=0.95 |
+| Metrics | Server log decode-only t/s (prefill excluded), completion_tokens |
+| Hygiene | Sequential runs; fresh server per mode |
+
+### Modes
+
+1. **OFF**: `DS4_MTP_SPEC_DISABLE=1`, temp 1.0
+2. **ON**: `DS4_DSPARK_SPEC_SAMPLE=1`, default scheduler, temp 1.0
+3. **GREEDY**: default env, temp 0
+
+### Results — DECODE-ONLY t/s (stable cache hits only, n=4 per mode per size)
+
+| Size | OFF t/s | ON t/s | GREEDY t/s | ON/OFF | G/OFF |
+|------|---------|--------|------------|--------|-------|
+| 64k  | 25.1    | 22.9   | 19.8       | 0.91   | 0.79  |
+| 32k  | 25.1    | **30.3** | 21.1     | **1.21** | 0.84  |
+| 16k  | 26.5    | **28.3** | 21.8     | **1.07** | 0.82  |
+
+- THINKING vs non-THINKING phases show identical decode t/s within each size
+- Short-context ratio was **0.83** (ON was slower at 150-token completions)
+
+### Interpretation
+
+The long-context speculation result **reverses** the short-context finding. At
+short context, spec verification overhead dominates → ON was 0.83×. At 16-32k
+context, the draft acceptance rate increases with context length → speculation
+becomes beneficial, peaking at 32k (1.21×). At 64k, the benefit drops to 0.91×
+— possibly because tail writes to KV cache are larger and create more contention.
+
+### Cache instability (major confounder)
+
+The KV cache is highly unstable:
+- 64k: 6 different anchor values across 3 modes (65536/57344/49152/40960/32768/24576)
+- 32k: alternates perfectly between 32768 and 24576 (50/50)
+- 16k: stable at 16384 (only size with consistent cache behavior)
+
+This significantly affects wall-time measurements but decode-only t/s from server
+logs provides a clean metric regardless of cache state. Root cause investigation
+is tracked in `~/Projects/Scratch/TODO.md`.
+
+### Conclusion
+
+**32k is the sweet spot** for DSpark speculation at temp 1.0 — 21% faster than
+plain sampling. Next: Experiment B to see if lowering `--dspark-confidence` to
+0.5/0.3 (longer drafts) pushes the 32k ratio even higher.

@@ -70,6 +70,24 @@ Override model: `DS4_TEST_MODEL=/path/to/model.gguf ./ds4_test --server`
 - **Local mirror:** `/Users/naz/Projects/ds4-upstream` tracks `antirez/ds4` for comparison
 - **Merged 2026-08-04:** upstream through `b7e9f00` (merge `e23cb2f`): MXFP4 (CUDA native + portable Metal experts + GGUF format), CUDA TP/HMMA work, decode-island graphs, batched-serving knobs (`--mixed-prefill-quantum` replaces the `DS4_SERVER_MIXED_PREFILL_QUANTUM` env var), checkpoint-versioned test fixtures. Merge was conflict-free; upstream never touched `ds4_kvstore.c/h` or the agent path.
 
+### DSpark — temperature-aware speculative decoding (in-progress)
+
+**Status:** M4 validation complete (M4.1 pass, M4.2 pass, M4.3 follow-up complete)
+**Commits (local only, not pushed):** `e0e5f40`, `7ed3225`, `ce13aac`, `0701b6c` (pushed through `600dbab`)
+**Design:** `PLAN-DSPARK-TEMP-SPEC.md`
+**State:** `misc/experiment-a-state.md`
+
+Implemented rejection-sampling verification for `temperature > 0` (DeepSeek's official 0731 recommendation: temp 1.0/top_p 0.95). The key algorithm change: the DSpark drafter is deterministic argmax (point-mass proposal, q≡1), so acceptance uses p(x_i) with residual = p with draft token zeroed — not the draft-head softmax q.
+
+**Validation results:**
+- M4.1 (greedy regression): PASS — temp-0 outputs byte-identical to baseline
+- M4.2 (distribution equivalence): PASS — permutation tests, all positions within null (p=0.42-1.0), full-seq p=0.81. Fixed 2 bugs: soft-q design flaw, checkpoint/KV desync on partial accept.
+- M4.3 (short-context perf): ON/OFF ratio 0.83 (ON slower at 150 tok)
+- M4.3 follow-up (long-context): ratio reverses at 32k → **1.21** (ON 21% faster). 16k=1.07 (marginal), 64k=0.91 (drops). 32k is the sweet spot.
+- Two real bugs found and fixed during M4.2 validation.
+
+**Key env flags:** `DS4_DSPARK_SPEC_SAMPLE=1` (enable sampling verifier), `DS4_MTP_SPEC_DISABLE=1` (disable spec entirely for baseline), `DS4_DSPARK_STATS=1` (draft_len_hist, accept rate, net_saved).
+
 ### Model checkpoint: migrated to official 0731 (2026-08-04)
 
 **Current default model:** `ds4flash.gguf` → `gguf/DeepSeek-V4-Flash-Layers37-42Q4KExperts-OtherExpertLayersIQ2XXSGateUp-Q2KDown-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-fixed-0731.gguf` — sha256-verified byte-for-byte against the official `antirez/deepseek-v4-gguf` release (LFS oid `659e22fb…`). The undated pre-0731 sibling (oid `edabc92a…`, same size, different weights) remains in `gguf/` for the historical fixtures; `gguf/DeepSeek-V4-Flash-DSpark-support.gguf` is current (oid `8b3adf59…`).
