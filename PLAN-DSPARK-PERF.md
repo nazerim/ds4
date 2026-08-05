@@ -314,6 +314,32 @@ rejects pay propose+verify+replay. The levers that could still change this:
 it attacks the measured replay cost directly and is a known-correct mechanism
 (the frontier already captures the verified hidden states).
 
+**3d RESULT (implemented + tested, 2026-08-05) — FAILS greedy identity.**
+
+Implemented `DS4_DSPARK_NO_REPLAY=1`: commit the verified prefix via
+`spec_frontier_commit_prefix` + read boundary logits from the verify pass,
+skipping `metal_graph_eval_token_raw_swa` replay (ds4.c, opt-in, non-TP only).
+Mechanically works (no crash), but output **diverges from the replay baseline at
+~3 tokens** (conf 0.6, seed 42, SWE-long 8k): the batch-verify compressor state
+differs from exact single-token decode, so committing it directly drifts the
+token stream. This confirms the original replay comment's warning ("batch
+verification and ordinary decode update compressor state with different
+kernels") — the replay is load-bearing for greedy identity, not just slow.
+
+**Consequence for Phase 3:** eliminating replay requires FIRST making the
+verify pass produce exact-decode-equivalent compressor state (kernel
+consistency), which is a much deeper change than the commit path. Net:
+- Replay cost (2417ms) is the dominant overhead, but it cannot be removed
+  without breaking greedy identity.
+- The remaining lever is acceptance: raise it so partial rejects (which pay
+  replay) are rare. That needs either a far better drafter (3b) or
+  tree-verify (5) — neither is cheap.
+- **The honest status: DSpark is net-negative on M5 with the current drafter,
+  and the two escape hatches (no-replay, longer drafts) are both closed by
+  measured data.**
+
+**3d is closed. Phase 3b (markov acceptance ceiling) is the last open lever.**
+
 **Sub-phase 3b — Markov-head acceptance (the real lever)**
 - [ ] 3b.1 Measure per-position acceptance of the markov head on code text
   (position 1,2,3,4,5) via `DS4_DSPARK_SPEC_LOG`/stats `accepted_len_hist`.
@@ -402,14 +428,13 @@ headline (3) shows the loop can win.
 - [x] 3a.1 conf/scheduler matrix on SWE-long 8k/32k — **done, see 3a RESULTS**
 - [x] 3a.2 record len-hist + per-position acceptance — **done**
 - [x] 3a.3 full-block draft experiment (conf 0) — **done; net-negative (replay)**
-- [ ] **3d (NEW headline): eliminate replay via frontier commit** — commit
-  verified accepted prefix from `spec_frontier` without `metal_graph_eval_token_raw_swa`
-  (ds4.c:62582). Target: replay 2417ms → ~0.
-- [ ] 3d.1 verify frontier hidden-state commit path covers all partial-accept cases
-- [ ] 3d.2 implement no-replay commit for the argmax verifier
-- [ ] 3d.3 M4.2 + GREEDY identity re-run
-- [ ] 3d.4 measure: does conf 0.6/off flip net_saved positive?
-- [ ] 3b.1 per-position markov acceptance on code
+- [x] 3d.1 verify frontier hidden-state commit path covers all partial-accept cases
+- [x] 3d.2 implement no-replay commit for argmax verifier
+  (`DS4_DSPARK_NO_REPLAY=1`, non-TP, ds4.c) — **mechanically works**
+- [x] 3d.3 M4.2 + GREEDY identity — **FAILS: diverges at ~3 tokens (compressor
+  kernel mismatch). 3d CLOSED.**
+- [ ] 3d.4 (cancelled — 3d proven incorrect)
+- [ ] 3b.1 per-position markov acceptance on code — **LAST open lever**
 - [ ] 3b.2 decide: tree-verify promotion vs accept ceiling
 - [ ] 3b.3 re-run M4.2 after any draft-distribution change
 - [ ] 3c.1 assess whether temp>0 path is worth supporting
