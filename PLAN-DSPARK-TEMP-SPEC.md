@@ -557,11 +557,14 @@ reasonable; upstreaming as a performance win is NOT supported by data.
 > implementation. It is **not** a closed door. An audit of oMLX's embedded MTP and
 > external-drafter DFlash shows the same speculative architecture runs with (a) a
 > single host sync per cycle (in-graph acceptance), (b) async-propose overlap, and
-> (c) a sharper draft sampler — any of which could change the economics. The
-> sampling verifier's machinery (accept/residual/target-dist) is the **substrate
-> for that work**: Phase 3 of PLAN-DSPARK-PERF.md reuses `ds4_spec_accept_token`
-> / `ds4_spec_target_dist` / the `capture_q` plumbing to implement the sharper
-> draft sampler. Keep this code; it is the documented foundation, not cruft.
+> (c) adaptive depth / measure-then-stop scheduling. The sampling verifier's
+> machinery (accept/residual/target-dist) remains the substrate for that work, but
+> **review found the "sharper draft sampler" idea inapplicable**: ds4's drafter is
+> deterministic greedy argmax (`dspark_argmax_f32`), not a sampler, so there is no
+> draft distribution to sharpen — the real lever is accepted-tokens-per-verify
+> (draft length + markov acceptance). See PLAN-DSPARK-PERF.md (reviewed revision)
+> for the corrected plan. Keep this code; it is the documented foundation, not
+> cruft.
 
 ### Upstream comparison (2026-08-05) — GREEDY loss is upstream, not ours
 
@@ -591,6 +594,8 @@ Bottom line: DSpark is a greedy-only optimization upstream and is net-negative o
 M5 Max even there. Our temp-aware verifier is correct but rides a base that loses
 ~13% before our code runs, then adds readback/softmax overhead on top.
 
-**Forward path:** see `PLAN-DSPARK-PERF.md` — five phases (single-sync in-graph
-accept, sharper draft sampler, async propose overlap, park-and-exit scheduler,
-tree verification) that port the oMLX/DFlash lessons into ds4.
+**Forward path:** see `PLAN-DSPARK-PERF.md` (reviewed revision) — Phase 0 gates
+on decode-phase GPU utilization, then Phase 3 (accepted-tokens-per-verify, the
+headline), Phase 4 (park-and-exit scheduler), Phase 1 (in-graph acceptance,
+sampling-path), Phase 2 (async overlap, conditional), Phase 5 (tree verification,
+deferred).
