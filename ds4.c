@@ -62504,19 +62504,9 @@ static int ds4_session_eval_dspark_speculative_argmax(
     /* Batch verification and ordinary decode update compressor state with
      * different kernels. Restore the pre-verify frontier and replay every
      * accepted draft through ordinary decode, including partial accepts, so
-     * speculative decoding retains the target model's greedy token stream.
-     *
-     * DS4_DSPARK_NO_REPLAY=1 (opt-in, perf experiment): skip the restore +
-     * re-decode and commit the verified hidden states directly from the
-     * frontier. This removes the replay cost (~2417ms at conf 0.6) but the
-     * batch-verify compressor state may differ slightly from exact
-     * single-token decode, so greedy identity is not guaranteed. */
+     * speculative decoding retains the target model's greedy token stream. */
 
-    const bool no_replay = getenv("DS4_DSPARK_NO_REPLAY") != NULL &&
-                           strcmp(getenv("DS4_DSPARK_NO_REPLAY"), "0") != 0 &&
-                           !e->tp.active;
-
-    if (verifier_may_have_mutated && !no_replay) {
+    if (verifier_may_have_mutated) {
         s->checkpoint.len = start;
         ds4_session_dspark_capture_invalidate(s);
         if (!have_frontier || !spec_frontier_restore(&frontier, s)) {
@@ -62567,75 +62557,6 @@ static int ds4_session_eval_dspark_speculative_argmax(
     if (replay_budget < 0) replay_budget = 0;
     for (int i = 0; i < replay_budget; i++) {
         if (drafts[i] == eos_token) { replay_budget = i + 1; break; }
-    }
-
-    if (no_replay) {
-        /* Commit the verified prefix directly from the frontier: copy the
-         * batch-verify hidden states instead of restoring + re-decoding.
-         * The continuation logits come from the verify pass's spec_logits
-         * row at position (replay_budget - 1). */
-        if (replay_budget > 0) {
-            if (tp_verify_sent &&
-                !ds4_tp_send_verify_commit(e->tp.ctx, 1, 0)) {
-                snprintf(err, errlen, "tp: verify commit send failed");
-                spec_frontier_free(&frontier);
-                DS4_DSPARK_STATS_FINISH();
-                return -1;
-            }
-            if (!have_frontier ||
-                !spec_frontier_commit_prefix(s, (uint32_t)replay_budget)) {
-                if (stats_enabled) {
-                    s->dspark_stats.verifier_errors++;
-                }
-                spec_frontier_free(&frontier);
-                DS4_DSPARK_STATS_FINISH();
-                return n_accept;
-            }
-            if (!metal_graph_read_spec_logits_row(
-                    &s->graph,
-                    (uint32_t)(replay_budget - 1),
-                    row_logits)) {
-                if (stats_enabled) {
-                    s->dspark_stats.verifier_errors++;
-                }
-                spec_frontier_free(&frontier);
-                DS4_DSPARK_STATS_FINISH();
-                return n_accept;
-            }
-            for (int i = 0; i < replay_budget; i++) {
-                token_vec_push(&s->checkpoint, drafts[i]);
-                if (n_accept < accepted_cap) accepted[n_accept++] = drafts[i];
-            }
-            memcpy(s->logits, row_logits,
-                   (size_t)DS4_N_VOCAB * sizeof(s->logits[0]));
-            s->checkpoint_valid = true;
-            ds4_session_dspark_capture_note_checkpoint(s);
-            if (stats_enabled) {
-                if (replay_budget == draft_n) s->dspark_stats.full_accepts++;
-                else s->dspark_stats.partial_accepts++;
-                s->dspark_stats.accepted_draft_tokens +=
-                    (uint64_t)replay_budget;
-                ds4_dspark_stats_note_len(s->dspark_stats.accepted_len_hist,
-                                          (uint32_t)replay_budget);
-            }
-            ds4_session_dspark_scheduler_note(
-                    s,
-                    (uint32_t)replay_budget,
-                    false,
-                    DS4_DSPARK_SCHED_EXTRA_MS());
-        } else if (stats_enabled) {
-            ds4_dspark_stats_note_len(s->dspark_stats.accepted_len_hist, 0);
-        }
-        if (spec_log) {
-            fprintf(stderr,
-                    "ds4: DSpark spec no-replay drafted=%d verified=%d accepted=%d\n",
-                    draft_n,
-                    commit_drafts,
-                    n_accept);
-        }
-        spec_frontier_free(&frontier);
-        DS4_DSPARK_STATS_FINISH();
-        return n_accept;
     }
 
     if (tp_verify_sent &&
