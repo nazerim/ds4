@@ -939,6 +939,7 @@ void ds4_gpu_set_decode_phase(int decode) {
         g_gpu_decode_phase_t0 = now;
     } else if (!decode && g_gpu_decode_phase) {
         g_gpu_decode_wall_accum += now - g_gpu_decode_phase_t0;
+        g_gpu_decode_phase_t0 = 0.0;
     }
     g_gpu_decode_phase = decode != 0;
 }
@@ -9085,6 +9086,22 @@ void ds4_gpu_cleanup(void) {
             g_stream_expert_cache_batch_seq = 0;
         }
         (void)ds4_gpu_wait_pending_command_buffers("cleanup");
+        if (getenv("DS4_METAL_GPU_BUSY_PROFILE")) {
+            const double wall = g_gpu_decode_wall_accum +
+                (g_gpu_decode_phase && g_gpu_decode_phase_t0 > 0.0
+                     ? (ds4_gpu_now_ms() / 1000.0) - g_gpu_decode_phase_t0
+                     : 0.0);
+            fprintf(stderr,
+                    "ds4: decode-phase summary busy=%.1fms wall=%.1fms "
+                    "util=%.0f%% cbs=%llu host_gap=%.1fms\n",
+                    g_gpu_decode_busy_accum * 1000.0,
+                    wall * 1000.0,
+                    wall > 0.0
+                        ? (g_gpu_decode_busy_accum / wall) * 100.0
+                        : 0.0,
+                    (unsigned long long)g_gpu_decode_cbs,
+                    (wall - g_gpu_decode_busy_accum) * 1000.0);
+        }
         if (ds4_gpu_stream_expert_timing_summary_enabled() &&
             getenv("DS4_METAL_MEMORY_REPORT") == NULL) {
             ds4_gpu_print_memory_report("at cleanup");

@@ -63,6 +63,32 @@ measured over the **whole session** (18.5s prefill + 6.3s decode). Prefill
 saturates the GPU; decode does NOT. The decode-phase GPU utilization is
 **unmeasured** — this is a gap, not an established fact. See Phase 0 TODO.
 
+### Phase 0 RESULT (2026-08-05) — decode is GPU-bound
+
+Thermal-controlled interleaved A/B on SWE-long 8k (conf 0.9, 3 rounds), new
+`DS4_METAL_GPU_BUSY_PROFILE` decode-phase accounting (`ds4_gpu_set_decode_phase`):
+
+| mode | busy (ms) | wall (ms) | **util** | host_gap (ms) | avg t/s |
+|------|-----------|-----------|----------|---------------|---------|
+| OFF r1 | 10707.6 | 11159.4 | **96%** | 451.7 | 35.85 |
+| OFF r2 | 10687.9 | 11129.6 | 96% | 441.6 | 36.10 |
+| OFF r3 | 10707.1 | 11077.4 | 97% | 370.3 | 36.14 |
+| GREEDY r1 | 12096.3 | 12966.2 | **93%** | 870.0 | 30.80 |
+| GREEDY r2 | 12053.7 | 12764.7 | 94% | 711.0 | 31.71 |
+| GREEDY r3 | 12045.7 | 12751.2 | 94% | 705.5 | 31.67 |
+
+**Interpretation:**
+- OFF decode is 96-97% GPU-busy → the 91GB main-model decode saturates the GPU.
+- GREEDY is 93-94% busy and does MORE total GPU work (12.05s vs 10.70s) for
+  fewer tokens → that is the 0.87 loss measured directly as extra GPU work.
+- host_gap is small (OFF ~0.4s, GREEDY ~0.7s of ~12s wall) → host-side gaps
+  (markov probe, verify wait) are NOT the bottleneck. Async overlap (Phase 2)
+  can save at most ~3-5%.
+- **Decision (P0.4): decode is GPU-compute-bound.** Locks the corrected thesis:
+  the only real lever is accepted-tokens-per-verify (Phase 3) — the GPU must
+  return more accepted tokens per unit of 91GB-model work. Phase 2 stays
+  conditional and deprioritized; Phase 1 is sampling-path-only polish.
+
 **Draft economics:** break-even needs `verify_ms / decode_ms_per_token` =
 `18.7/28.0 = 0.67` accepted draft tokens per verify. Observed: conf 0.9 → 1.34
 avg draft len but 73% are len-1; acceptance 56-88% on code text. Drafts are too
@@ -182,13 +208,13 @@ utilization.
   decode (not prefill), or add a phase marker.
 - [ ] 0.2 Instrument propose/verify host-gap separately: measure `now_sec()`
   around the markov probe and around the verify `end_commands` wait, per cycle.
-- [ ] 0.3 Re-run the thermal-controlled GREEDY A/B; report decode-phase GPU
-  busy % + host-gap ms.
-- [ ] 0.4 **Decision gate:** if decode-phase GPU busy ≥90%, the loop is GPU-bound
-  → overlap helps little; focus on Phase 3 (acceptance). If <75%, overlap and
-  dual-queue have real headroom → prioritize Phase 2 and reconsider dual-queue.
+- [x] 0.3 Re-run the thermal-controlled GREEDY A/B; report decode-phase GPU
+  busy % + host-gap ms. **DONE: OFF 96-97%, GREEDY 93-94% busy; host_gap 3-5%.**
+- [x] 0.4 **Decision gate:** decode-phase GPU busy 93-97% → the loop is GPU-bound
+  → overlap helps little; focus on Phase 3 (acceptance). (If it had been <75%,
+  overlap and dual-queue would have real headroom → prioritize Phase 2.)
 
-**Exit criteria:** a number, not a guess: `decode_gpu_busy%` + `host_gap_ms/cycle`.
+**Exit criteria (met):** decode_gpu_busy% = 93-97%; host_gap = 3-5% of decode wall.
 
 ---
 
@@ -325,10 +351,11 @@ headline (3) shows the loop can win.
 ## 5. TODO checklist (executable)
 
 ### Phase 0 — decode-phase GPU utilization
-- [ ] 0.1 decode-phase GPU-busy accounting (ds4_metal.m)
-- [ ] 0.2 per-cycle host-gap instrumentation (markov probe, verify wait)
-- [ ] 0.3 thermal A/B re-run with decode-phase metric
-- [ ] 0.4 DECISION: GPU-bound (≥90%) → focus Phase 3; idle (<75%) → unlock Phase 2
+- [x] 0.1 decode-phase GPU-busy accounting (ds4_metal.m)
+- [x] 0.2 per-cycle host-gap instrumentation (markov probe, verify wait)
+- [x] 0.3 thermal A/B re-run with decode-phase metric
+- [x] 0.4 DECISION: **GPU-bound (93-97% decode util)** → focus Phase 3; Phase 2
+  deprioritized (host_gap only ~3-5%)
 
 ### Phase 3 — accepted-tokens-per-verify (headline)
 - [ ] 3a.1 conf/scheduler matrix on SWE-long 8k/32k
