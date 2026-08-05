@@ -552,3 +552,45 @@ negative** on this hardware/workload. The DSpark drafter's confidence head
 collapses after 1-2 tokens on creative text, so drafts are too short to amortize
 the fixed verify cost. Keeping it opt-in (`DS4_DSPARK_SPEC_SAMPLE=1`) is
 reasonable; upstreaming as a performance win is NOT supported by data.
+
+> **Status update (2026-08-05):** this conclusion measured the *current*
+> implementation. It is **not** a closed door. An audit of oMLX's embedded MTP and
+> external-drafter DFlash shows the same speculative architecture runs with (a) a
+> single host sync per cycle (in-graph acceptance), (b) async-propose overlap, and
+> (c) a sharper draft sampler — any of which could change the economics. The
+> sampling verifier's machinery (accept/residual/target-dist) is the **substrate
+> for that work**: Phase 3 of PLAN-DSPARK-PERF.md reuses `ds4_spec_accept_token`
+> / `ds4_spec_target_dist` / the `capture_q` plumbing to implement the sharper
+> draft sampler. Keep this code; it is the documented foundation, not cruft.
+
+### Upstream comparison (2026-08-05) — GREEDY loss is upstream, not ours
+
+Built pure upstream antirez/ds4 (`origin/main` @ `6747e77`, the exact commit our
+fork merged in `6c07524`) in `/Users/naz/Projects/ds4-upstream` and ran the
+identical thermal-controlled A/B on SWE-long 8k prompts:
+
+| build | OFF (t/s) | GREEDY (t/s) | G/OFF |
+|-------|-----------|--------------|-------|
+| upstream `6747e77` | 36.52 | 31.85 | **0.872** |
+| our fork `6c07524` | 36.55 | 31.78 | **0.869** |
+
+The ~13% GREEDY loss is **entirely upstream DSpark architecture** (markov
+`prop_chain` + `verify_layer` on short drafts). Our only server gate change
+(`spec_sample_gate`) is false at temp 0, so GREEDY/OFF are byte-identical to
+upstream; numbers confirm zero added overhead.
+
+The sampling verifier (temp>0) is our **additive** cost: per drafted token the
+sample path (ds4.c:62169, 62278) does a synchronous full-row (129k×4B=516KB)
+GPU→CPU readback via `metal_graph_read_spec_logits_row` plus a full-vocab
+qsort+softmax in `ds4_spec_target_dist` (point-mass q=1.0 acceptance). These reads
+are outside the `verify_timing` block, so `verify_read` under-reports them.
+Upstream never speculates at temp>0 (gate is temp≤0 only), so its temp-1.0 path
+== our OFF.
+
+Bottom line: DSpark is a greedy-only optimization upstream and is net-negative on
+M5 Max even there. Our temp-aware verifier is correct but rides a base that loses
+~13% before our code runs, then adds readback/softmax overhead on top.
+
+**Forward path:** see `PLAN-DSPARK-PERF.md` — five phases (single-sync in-graph
+accept, sharper draft sampler, async propose overlap, park-and-exit scheduler,
+tree verification) that port the oMLX/DFlash lessons into ds4.
