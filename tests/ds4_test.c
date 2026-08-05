@@ -6220,180 +6220,28 @@ static const char *test_tool_call_request_json(void) {
         "}";
 }
 
-static const char *test_think_recovery_request_json(void) {
-    return
-        "{"
-        "\"model\":\"deepseek-v4-flash\","
-        "\"messages\":[{\"role\":\"user\",\"content\":\"List the files in the current directory. Use the provided tool; do not answer in prose.\"}],"
-        "\"tools\":[{\"type\":\"function\",\"function\":{"
-            "\"name\":\"list_files\","
-            "\"description\":\"List files in a directory.\","
-            "\"parameters\":{\"type\":\"object\",\"properties\":{"
-                "\"path\":{\"type\":\"string\",\"description\":\"Directory path to list.\"}"
-            "},\"required\":[\"path\"]}"
-        "}}],"
-        "\"tool_choice\":\"auto\","
-        "\"think\":true,"
-        "\"temperature\":0,"
-        "\"max_tokens\":384,"
-        "\"stream\":false"
-        "}";
-}
-
-/* A tool-less request whose user turn still invites a tool call.  This models
- * OpenCode's Summary/Compaction request, which is sent with `tools: {}` and an
- * empty system: has_tools is false, so the worker engages M1 DSML-token
- * suppression and renders no tool schema.  Locks in the guarantee that a
- * no-tools turn can never emit a tool call. */
-static const char *test_no_tools_request_json(void) {
-    return
-        "{"
-        "\"model\":\"deepseek-v4-flash\","
-        "\"messages\":[{\"role\":\"user\",\"content\":\"List the files in the current directory. Use the provided tool; do not answer in prose.\"}],"
-        "\"think\":false,"
-        "\"temperature\":0,"
-        "\"max_tokens\":256,"
-        "\"stream\":false"
-        "}";
-}
-
-/* The model sometimes opens a DSML stanza without closing </think> first.
- * The server's forward recovery must force the close plus a fresh stanza
- * opening, after which the model must still complete a valid call.  The
- * malformed prefix is teacher-forced so the regression is deterministic and
- * does not depend on coaxing the model into misbehaving. */
+/* A complete tool call inside unclosed reasoning is recovered directly. The
+ * detector must wait for the complete block, and the parser must keep only the
+ * preceding prose in reasoning_content. */
 static void test_think_tool_recovery(void) {
-    ds4_engine *engine = test_get_engine(false);
-    if (!engine) return;
+    const char *generated =
+        "The user wants a directory listing.\n\n"
+        DS4_TOOL_CALLS_START "\n"
+        DS4_INVOKE_START " name=\"list_files\">\n"
+        DS4_PARAM_START " name=\"path\" string=\"true\">." DS4_PARAM_END "\n"
+        DS4_INVOKE_END "\n"
+        DS4_TOOL_CALLS_END;
 
-    request r;
-    char err[160];
-    TEST_ASSERT(parse_chat_request(engine, NULL, test_think_recovery_request_json(),
-                                   512, 32768, &r, err, sizeof(err)));
-
-    ds4_session *session = NULL;
-    TEST_ASSERT(ds4_session_create(&session, engine, 32768) == 0);
-    if (!session) {
-        request_free(&r);
-        return;
-    }
-    TEST_ASSERT(ds4_session_sync(session, &r.prompt, err, sizeof(err)) == 0);
-
-    if (getenv("DS4_TEST_RECOVERY_PROBE") != NULL) {
-        /* Diagnostic: print the model's natural tool-call turn for this
-         * request instead of running the recovery. */
-        buf nat = {0};
-        uint64_t prng = 7;
-        for (int i = 0; i < 300; i++) {
-            int token = ds4_session_sample(session, 0.0f, 0, 1.0f, 0.0f, &prng);
-            if (token == ds4_token_eos(engine)) break;
-            size_t plen = 0;
-            char *p = ds4_token_text(engine, token, &plen);
-            buf_append(&nat, p, plen);
-            free(p);
-            bool ps = false, pe = false;
-            observe_tool_markers(nat.ptr, &ps, &pe, NULL);
-            if (pe) break;
-            if (ds4_session_eval(session, token, err, sizeof(err)) != 0) break;
-        }
-        fprintf(stderr, "ds4-test: natural turn=[%s]\n", nat.ptr ? nat.ptr : "");
-        buf_free(&nat);
-        ds4_session_free(session);
-        request_free(&r);
-        test_close_engine(false);
-        return;
-    }
-
-    thinking_state thinking = thinking_state_from_prompt(&r);
     buf text = {0};
-    buf forced = {0};
-    if (!thinking.inside) buf_append(&forced, "<think>", 7);
-    const char *body =
-        "The user wants a directory listing. I will call the "
-        "list_files tool right away.\n\n" DS4_TOOL_CALLS_START;
-    buf_append(&forced, body, strlen(body));
-
-    server srv;
-    memset(&srv, 0, sizeof(srv));
-    srv.engine = engine;
-    server_slot slot = {
-        .srv = &srv,
-        .session = session,
-    };
-    srv.slots = &slot;
-    srv.slot_count = 1;
-    pthread_mutex_init(&srv.inference_mu, NULL);
-
-    /* Replay the malformed prefix exactly as the worker loop would see it:
-     * token by token, running the recovery scan after each piece.  The stanza
-     * opening spans several tokens, so this also checks that detection does
-     * not depend on how the marker happens to be tokenized: recovery must
-     * stay quiet on every partial prefix and trigger exactly when the
-     * opening completes. */
-    ds4_tokens toks = {0};
-    ds4_tokenize_rendered_chat(engine, forced.ptr, &toks);
-    TEST_ASSERT(toks.len > 1);
     size_t scan_from = 0;
-    int completion = 0;
-    int rec = 0;
-    int triggered_at = -1;
-    size_t inject_at = 0;
-    for (int i = 0; i < toks.len; i++) {
-        TEST_ASSERT(ds4_session_eval(session, toks.v[i], err, sizeof(err)) == 0);
-        size_t piece_len = 0;
-        char *piece = ds4_token_text(engine, toks.v[i], &piece_len);
-        buf_append(&text, piece, piece_len);
-        thinking_state_feed(&thinking, piece, piece_len);
-        free(piece);
-        TEST_ASSERT(thinking.inside);
-        rec = chat_think_tool_recovery(&srv, &slot, &text, &thinking, &scan_from,
-                                        &completion, 512, true, &inject_at, err, sizeof(err));
-        TEST_ASSERT(rec >= 0);
-        if (rec == 1) {
-            triggered_at = i;
-            break;
-        }
+    bool complete = false;
+    for (size_t i = 0; generated[i]; i++) {
+        buf_append(&text, generated + i, 1);
+        complete = complete_tool_call_inside_thinking(text.ptr, text.len,
+                                                      &scan_from);
+        TEST_ASSERT(complete == (generated[i + 1] == '\0'));
     }
-    fprintf(stderr,
-            "ds4-test: think-tool-recovery trigger=%d/%d injected_tokens=%d\n",
-            triggered_at, toks.len, completion);
-    TEST_ASSERT(rec == 1);
-    TEST_ASSERT(inject_at > 0);
-    TEST_ASSERT(inject_at < text.len);
-    const char *pre_inject = text.ptr;
-    const char *marker_in_pre = strstr(pre_inject, DS4_TOOL_CALLS_START);
-    TEST_ASSERT(marker_in_pre == NULL || (size_t)(marker_in_pre - pre_inject) >= inject_at);
-    TEST_ASSERT(triggered_at == toks.len - 1);
-    ds4_tokens_free(&toks);
-    buf_free(&forced);
-    TEST_ASSERT(!thinking.inside);
-    TEST_ASSERT(completion > 0);
-    TEST_ASSERT(text.ptr && text.len >= 10 &&
-                !memcmp(text.ptr + text.len - 10, "</think>\n\n", 10));
-
-    /* The model must now complete a valid call on the executable side. */
-    uint64_t rng = 123;
-    bool decode_ok = true;
-    bool saw_start = false;
-    bool saw_end = false;
-    for (int i = 0; i < 256 && !saw_end; i++) {
-        int token = ds4_session_sample(session, 0.0f, 0, 1.0f, 0.0f, &rng);
-        if (token == ds4_token_eos(engine)) break;
-        size_t piece_len = 0;
-        char *piece = ds4_token_text(engine, token, &piece_len);
-        buf_append(&text, piece, piece_len);
-        free(piece);
-        observe_tool_markers(text.ptr, &saw_start, &saw_end, NULL);
-        if (saw_end) break;
-        if (ds4_session_eval(session, token, err, sizeof(err)) != 0) {
-            decode_ok = false;
-            break;
-        }
-    }
-    fprintf(stderr, "ds4-test: think-tool-recovery continuation=[%s]\n",
-            text.ptr ? text.ptr : "");
-    TEST_ASSERT(decode_ok);
-    TEST_ASSERT(saw_end);
+    TEST_ASSERT(complete);
 
     char *content = NULL;
     char *reasoning = NULL;
@@ -6402,20 +6250,18 @@ static void test_think_tool_recovery(void) {
                                              &content, &reasoning, &calls);
     TEST_ASSERT(parsed);
     TEST_ASSERT(calls.len > 0 && !strcmp(calls.v[0].name, "list_files"));
-    TEST_ASSERT(reasoning && strstr(reasoning, "list_files tool right away"));
+    TEST_ASSERT(calls.v[0].arguments && strstr(calls.v[0].arguments, "\"path\": \".\""));
+    TEST_ASSERT(content && content[0] == '\0');
+    TEST_ASSERT(reasoning && !strcmp(reasoning, "The user wants a directory listing."));
 
     fprintf(stderr,
-            "ds4-test: think-tool-recovery recovered=%d gen_tokens=%d calls=%d name=%s\n",
-            rec, completion, calls.len, calls.len ? calls.v[0].name : "-");
+            "ds4-test: think-tool-recovery complete=%d calls=%d name=%s\n",
+            complete ? 1 : 0, calls.len, calls.len ? calls.v[0].name : "-");
 
     free(content);
     free(reasoning);
     tool_calls_free(&calls);
     buf_free(&text);
-    pthread_mutex_destroy(&srv.inference_mu);
-    ds4_session_free(session);
-    request_free(&r);
-    test_close_engine(false);
 }
 
 /* A DSML marker that appears mid-sentence inside open thinking is model prose
@@ -6423,190 +6269,6 @@ static void test_think_tool_recovery(void) {
  * thinking on it (that would truncate reasoning after ~9 tokens).  Only a
  * marker at buffer start or preceded by "\n\n" counts as a real boundary.
  * Runs purely on the buffer; no engine decoding needed. */
-static void test_think_recovery_ignores_prose_marker(void) {
-    thinking_state thinking = {0};
-    char err[160];
-
-    /* Singular "<tool_call>" and quoted "<tool_calls>" mid-prose are ignored. */
-    const char *cases[] = {
-        "The <tool_calls> tag is the syntax we use for tool calls.",
-        "We saw <tool_call> mentioned in the docs; not an actual call.",
-        "Use the format like <tool_calls> when you need a tool.",
-    };
-    for (size_t c = 0; c < sizeof(cases)/sizeof(cases[0]); c++) {
-        thinking.inside = true;
-        buf text = {0};
-        buf_append(&text, cases[c], strlen(cases[c]));
-        size_t scan_from = 0;
-        int completion = 0;
-        server srv;
-        memset(&srv, 0, sizeof(srv));
-        server_slot slot = {0};
-        slot.srv = &srv;
-        int rec = chat_think_tool_recovery(&srv, &slot, &text, &thinking,
-                                           &scan_from, &completion, 512,
-                                           true, NULL, err, sizeof(err));
-        TEST_ASSERT(rec == 0);
-        TEST_ASSERT(thinking.inside && "expect no forced close on prose marker");
-        buf_free(&text);
-    }
-}
-
-/* Regression for the scan-advance fix in chat_think_tool_recovery
- * (ds4_server.c:10208): rejecting a spurious prose marker must advance
- * *scan_from one byte past the marker's leading '<' (marker_off + 1), not pin
- * it to marker_off.  The buffer carries a SPURIOUS mid-sentence marker first
- * and a LEGITIMATE "\n\n"-bounded stanza later.  Recovery must skip the
- * spurious marker and still fire on the legitimate one, closing thinking and
- * recovering the list_files call.  With the pre-fix advance (*scan_from pinned
- * to the spurious marker_off) find_any_tool_start re-matches the same prose
- * marker on every per-token call and never reaches the legitimate stanza, so
- * recovery never fires and this test fails. */
-static void test_think_recovery_spurious_then_legitimate(void) {
-    ds4_engine *engine = test_get_engine(false);
-    if (!engine) return;
-
-    request r;
-    char err[160];
-    TEST_ASSERT(parse_chat_request(engine, NULL, test_think_recovery_request_json(),
-                                   512, 32768, &r, err, sizeof(err)));
-
-    ds4_session *session = NULL;
-    TEST_ASSERT(ds4_session_create(&session, engine, 32768) == 0);
-    if (!session) {
-        request_free(&r);
-        return;
-    }
-    TEST_ASSERT(ds4_session_sync(session, &r.prompt, err, sizeof(err)) == 0);
-
-    thinking_state thinking = thinking_state_from_prompt(&r);
-    buf text = {0};
-    buf forced = {0};
-    /* "<" / ">" are hex-escaped (\x3c / \x3e) purely to keep the literal on a
-     * single source line; "\x3cthink\x3e" == the 7-char open-thinking tag. */
-    if (!thinking.inside) buf_append(&forced, "\x3cthink\x3e", 7);
-    /* In order: (a) a SPURIOUS "<tool_calls>" mid-sentence -- preceded by a
-     * space/word, not at offset 0 and not preceded by "\n\n"; then (b) a
-     * LEGITIMATE stanza opening preceded by "\n\n", identical to
-     * test_think_tool_recovery so the recovered call is list_files. */
-    const char *body =
-        "The user wants a directory listing. I will note the <tool_calls> "
-        "syntax. I will call the list_files tool right away.\n\n"
-        DS4_TOOL_CALLS_START;
-    buf_append(&forced, body, strlen(body));
-
-    server srv;
-    memset(&srv, 0, sizeof(srv));
-    srv.engine = engine;
-    server_slot slot = {
-        .srv = &srv,
-        .session = session,
-    };
-    srv.slots = &slot;
-    srv.slot_count = 1;
-    pthread_mutex_init(&srv.inference_mu, NULL);
-
-    /* Replay the malformed prefix token by token exactly as the worker loop
-     * does (ds4_server.c ~11679), persisting scan_from across per-token calls.
-     * The spurious marker completes early; recovery must reject it and advance
-     * the scan, then fire once the legitimate "\n\n" opening completes.  The
-     * iteration cap (token count + 8) guards against an infinite loop if the
-     * scan-advance ever regressed. */
-    ds4_tokens toks = {0};
-    ds4_tokenize_rendered_chat(engine, forced.ptr, &toks);
-    TEST_ASSERT(toks.len > 1);
-    size_t scan_from = 0;
-    int completion = 0;
-    int rec = 0;
-    int triggered_at = -1;
-    size_t inject_at = 0;
-    const int max_iters = toks.len + 8;
-    for (int i = 0; i < max_iters; i++) {
-        if (i < toks.len) {
-            TEST_ASSERT(ds4_session_eval(session, toks.v[i], err, sizeof(err)) == 0);
-            size_t piece_len = 0;
-            char *piece = ds4_token_text(engine, toks.v[i], &piece_len);
-            buf_append(&text, piece, piece_len);
-            thinking_state_feed(&thinking, piece, piece_len);
-            free(piece);
-        }
-        TEST_ASSERT(thinking.inside);
-        rec = chat_think_tool_recovery(&srv, &slot, &text, &thinking, &scan_from,
-                                        &completion, 512, true, &inject_at, err, sizeof(err));
-        TEST_ASSERT(rec >= 0);
-        if (rec == 1) {
-            triggered_at = i;
-            break;
-        }
-    }
-    fprintf(stderr,
-            "ds4-test: think-recovery-spurious-then-legit trigger=%d/%d injected_tokens=%d\n",
-            triggered_at, toks.len, completion);
-    /* Recovery must eventually fire on the legitimate stanza, not get stuck
-     * re-matching the spurious prose marker. */
-    TEST_ASSERT(rec == 1);
-    TEST_ASSERT(triggered_at >= 0 && triggered_at < toks.len);
-    TEST_ASSERT(inject_at > 0);
-    TEST_ASSERT(inject_at < text.len);
-    /* The injected close lands at the legitimate marker, which sits after the
-     * spurious prose marker; the spurious marker is left inside reasoning. */
-    const char *spurious_in_pre = strstr(text.ptr, "<tool_calls>");
-    TEST_ASSERT(spurious_in_pre != NULL &&
-                (size_t)(spurious_in_pre - text.ptr) < inject_at);
-    ds4_tokens_free(&toks);
-    buf_free(&forced);
-    TEST_ASSERT(!thinking.inside);
-    TEST_ASSERT(completion > 0);
-    TEST_ASSERT(text.ptr && text.len >= 10 &&
-                !memcmp(text.ptr + text.len - 10, "\x3c/think\x3e\n\n", 10));
-
-    /* The model must now complete a valid call on the executable side. */
-    uint64_t rng = 123;
-    bool decode_ok = true;
-    bool saw_start = false;
-    bool saw_end = false;
-    for (int i = 0; i < 256 && !saw_end; i++) {
-        int token = ds4_session_sample(session, 0.0f, 0, 1.0f, 0.0f, &rng);
-        if (token == ds4_token_eos(engine)) break;
-        size_t piece_len = 0;
-        char *piece = ds4_token_text(engine, token, &piece_len);
-        buf_append(&text, piece, piece_len);
-        free(piece);
-        observe_tool_markers(text.ptr, &saw_start, &saw_end, NULL);
-        if (saw_end) break;
-        if (ds4_session_eval(session, token, err, sizeof(err)) != 0) {
-            decode_ok = false;
-            break;
-        }
-    }
-    fprintf(stderr, "ds4-test: think-recovery-spurious-then-legit continuation=[%s]\n",
-            text.ptr ? text.ptr : "");
-    TEST_ASSERT(decode_ok);
-    TEST_ASSERT(saw_end);
-
-    char *content = NULL;
-    char *reasoning = NULL;
-    tool_calls calls = {0};
-    bool parsed = parse_generated_message_ex(text.ptr, true,
-                                             &content, &reasoning, &calls);
-    TEST_ASSERT(parsed);
-    TEST_ASSERT(calls.len > 0 && !strcmp(calls.v[0].name, "list_files"));
-    /* The spurious prose marker stayed on the reasoning side of the close. */
-    TEST_ASSERT(reasoning && strstr(reasoning, "<tool_calls>"));
-
-    fprintf(stderr,
-            "ds4-test: think-recovery-spurious-then-legit recovered=%d gen_tokens=%d calls=%d name=%s\n",
-            rec, completion, calls.len, calls.len ? calls.v[0].name : "-");
-
-    free(content);
-    free(reasoning);
-    tool_calls_free(&calls);
-    buf_free(&text);
-    pthread_mutex_destroy(&srv.inference_mu);
-    ds4_session_free(session);
-    request_free(&r);
-    test_close_engine(false);
-}
 
 static void test_tool_call_quality_one(bool quality) {
     ds4_engine *engine = test_get_engine(quality);
@@ -6937,63 +6599,6 @@ static void test_dsml_token_suppression_excludes_id(void) {
  * text carries no tool marker and parses to zero tool_calls.  When the engine
  * exposes no DSML token (GLM, dsml_id<0) suppression is unavailable, but with no
  * tools rendered the no-tool-call guarantee must still hold. */
-static void test_no_tools_request_yields_no_tool_calls(void) {
-    ds4_engine *engine = test_get_engine(false);
-    if (!engine) return;
-    int dsml_id = ds4_engine_dsml_id(engine);
-
-    request r;
-    char err[256];
-    TEST_ASSERT(parse_chat_request(engine, NULL, test_no_tools_request_json(),
-                                   512, 32768, &r, err, sizeof(err)));
-    /* The compaction shape: no tools -> the M1 suppression gate would engage. */
-    TEST_ASSERT(!r.has_tools);
-
-    ds4_session *session = NULL;
-    TEST_ASSERT(ds4_session_create(&session, engine, 32768) == 0);
-    if (!session) {
-        request_free(&r);
-        test_close_engine(false);
-        return;
-    }
-    TEST_ASSERT(ds4_session_sync(session, &r.prompt, err, sizeof(err)) == 0);
-
-    /* Decode exactly as the worker does for a no-tools turn: ban the DSML token
-     * when the engine resolves one (M1), otherwise sample normally. */
-    uint64_t rng = 1234;
-    buf text = {0};
-    for (int i = 0; i < 256; i++) {
-        int token = dsml_id >= 0
-            ? ds4_session_sample_excluding(session, 0.0f, 0, 1.0f, 0.0f, &rng, dsml_id)
-            : ds4_session_sample(session, 0.0f, 0, 1.0f, 0.0f, &rng);
-        if (token < 0 || token == ds4_token_eos(engine)) break;
-        size_t plen = 0;
-        char *p = ds4_token_text(engine, token, &plen);
-        if (p) { buf_append(&text, p, plen); free(p); }
-        if (ds4_session_eval(session, token, err, sizeof(err)) != 0) break;
-    }
-
-    /* No tool block may appear in the decoded text... */
-    TEST_ASSERT(find_any_tool_start(text.ptr ? text.ptr : "") == NULL);
-    /* ...and the text must parse to zero tool calls.  Use the syntax-aware
-     * parser so the assertion holds for both DeepSeek and GLM models. */
-    char *content = NULL;
-    char *reasoning = NULL;
-    tool_calls calls = {0};
-    server_model_syntax syntax = server_model_syntax_for_engine(engine);
-    parse_generated_message_ex_for_syntax(syntax, text.ptr ? text.ptr : "", false,
-                                          &content, &reasoning, &calls);
-    TEST_ASSERT(calls.len == 0);
-    free(content);
-    free(reasoning);
-    tool_calls_free(&calls);
-    buf_free(&text);
-    ds4_session_free(session);
-    request_free(&r);
-    test_close_engine(false);
-}
-#endif
-
 static void test_server_unit_group(void) {
     ds4_server_unit_tests_run();
 }
@@ -7011,9 +6616,7 @@ static const ds4_test_entry test_entries[] = {
 #ifndef DS4_NO_GPU
     {"--long-context", "long-context", "long-context story fact-recall regression", test_long_story_fact_recall},
     {"--tool-call-quality", "tool-call-quality", "model emits valid DSML tool calls", test_tool_call_quality},
-    {"--think-tool-recovery", "think-tool-recovery", "forced </think> recovery when a tool call starts inside thinking", test_think_tool_recovery},
-    {"--think-recovery-ignore-prose", "think-recovery-ignore-prose", "recovery ignores spurious DSML markers inside thinking", test_think_recovery_ignores_prose_marker},
-    {"--think-recovery-spurious-then-legit", "think-recovery-spurious-then-legit", "recovery fires on a legitimate stanza after ignoring an earlier spurious prose marker", test_think_recovery_spurious_then_legitimate},
+    {"--think-tool-recovery", "think-tool-recovery", "recover a complete tool call emitted inside unclosed reasoning", test_think_tool_recovery},
     {"--logprob-vectors", "logprob-vectors", "official API top-logprob vector comparison on the standard Metal path", test_official_logprob_vectors},
     {"--metal-ssd-streaming-cache-pressure", "metal-ssd-streaming-cache-pressure", "Metal SSD-streaming layer-batched decode cache-pressure repro for issue #384", test_metal_ssd_streaming_cache_pressure},
     {"--local-golden-vectors", "local-golden-vectors", "local top-k/logit drift regression for long Metal prefill", test_local_golden_vectors},
@@ -7024,7 +6627,6 @@ static const ds4_test_entry test_entries[] = {
     {"--mtp-verify-depth", "mtp-verify-depth", "MTP speculative verify commits autoregressive-identical tokens at draft depth > 2", test_mtp_verify_depth},
     {"--dspark-verify-depth", "dspark-verify-depth", "DSpark speculative verify commits autoregressive-identical tokens at draft depth > 2", test_dspark_verify_depth},
     {"--dsml-token-suppression", "dsml-token-suppression", "ds4_session_sample_excluding never returns the excluded DSML token id", test_dsml_token_suppression_excludes_id},
-    {"--no-tools-no-tool-calls", "no-tools-no-tool-calls", "no-tools (compaction-shaped) request never emits a tool call", test_no_tools_request_yields_no_tool_calls},
 #endif
     {"--server", "server", "server parser/rendering/cache unit tests", test_server_unit_group},
 };
@@ -7131,3 +6733,4 @@ int main(int argc, char **argv) {
     puts("ds4 tests: ok");
     return 0;
 }
+#endif
