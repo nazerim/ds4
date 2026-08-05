@@ -923,8 +923,29 @@ static void ds4_gpu_close_batch_encoder(void) {
     g_batch_enc = nil;
 }
 
+static double ds4_gpu_now_ms(void);
+
 static double g_gpu_busy_accum;
 static uint64_t g_gpu_busy_cbs;
+static double g_gpu_decode_busy_accum;
+static double g_gpu_decode_wall_accum;
+static uint64_t g_gpu_decode_cbs;
+static int g_gpu_decode_phase;
+static double g_gpu_decode_phase_t0;
+
+void ds4_gpu_set_decode_phase(int decode) {
+    const double now = ds4_gpu_now_ms() / 1000.0;
+    if (decode && !g_gpu_decode_phase) {
+        g_gpu_decode_phase_t0 = now;
+    } else if (!decode && g_gpu_decode_phase) {
+        g_gpu_decode_wall_accum += now - g_gpu_decode_phase_t0;
+    }
+    g_gpu_decode_phase = decode != 0;
+}
+
+int ds4_gpu_decode_phase(void) {
+    return g_gpu_decode_phase;
+}
 
 static int ds4_gpu_wait_command_buffer(id<MTLCommandBuffer> cb, const char *label) {
     [cb waitUntilCompleted];
@@ -935,6 +956,22 @@ static int ds4_gpu_wait_command_buffer(id<MTLCommandBuffer> cb, const char *labe
             fprintf(stderr, "ds4: gpu busy accum %.1f ms over %llu cbs\n",
                     g_gpu_busy_accum * 1000.0,
                     (unsigned long long)g_gpu_busy_cbs);
+        }
+        if (g_gpu_decode_phase) {
+            const double now = ds4_gpu_now_ms() / 1000.0;
+            if (busy > 0) g_gpu_decode_busy_accum += busy;
+            g_gpu_decode_cbs++;
+            const double decode_wall = g_gpu_decode_wall_accum +
+                (g_gpu_decode_phase_t0 > 0.0 ? now - g_gpu_decode_phase_t0 : 0.0);
+            fprintf(stderr,
+                    "ds4: decode-phase gpu busy %.1f ms over %llu cbs "
+                    "(decode wall ~%.1f ms, util %.0f%%)\n",
+                    g_gpu_decode_busy_accum * 1000.0,
+                    (unsigned long long)g_gpu_decode_cbs,
+                    decode_wall * 1000.0,
+                    decode_wall > 0.0
+                        ? (g_gpu_decode_busy_accum / decode_wall) * 100.0
+                        : 0.0);
         }
     }
     if (cb.status == MTLCommandBufferStatusError) {

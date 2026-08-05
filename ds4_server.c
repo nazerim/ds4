@@ -1,5 +1,6 @@
 #include "ds4.h"
 #include "ds4_distributed.h"
+#include "ds4_gpu.h"
 #include "ds4_gpu_args.h"
 #include "ds4_help.h"
 #include "ds4_kvstore.h"
@@ -11595,6 +11596,7 @@ static void generate_job(server *s, server_slot *slot, job *j) {
 
 decode_again:
     ;
+    ds4_gpu_set_decode_phase(1);
     buf text = {0};
     size_t plain_stream_pos = 0;
     size_t stop_scan_from = 0;
@@ -12002,6 +12004,7 @@ decode_again:
     char *parsed_reasoning = NULL;
     const char *final_finish = finish;
     bool recovered_tool_parse_failure = false;
+    ds4_gpu_set_decode_phase(0);
     if (j->req.kind == REQ_CHAT) {
         bool parsed_ok = parse_generated_message_for_response_for_syntax(
             j->req.model_syntax,

@@ -3690,6 +3690,9 @@ extern "C" int ds4_gpu_end_commands(void) {
 }
 extern "C" int ds4_gpu_synchronize(void) { return cuda_ok(cudaDeviceSynchronize(), "synchronize"); }
 
+extern "C" void ds4_gpu_set_decode_phase(int decode) { (void)decode; }
+extern "C" int  ds4_gpu_decode_phase(void) { return 0; }
+
 extern "C" int ds4_gpu_set_model_map(const void *model_map, uint64_t model_size) {
     if (!model_map || model_size == 0) return 0;
     if (g_model_host_base == model_map && g_model_registered_size == model_size) return 1;
