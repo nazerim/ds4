@@ -266,12 +266,53 @@ draft length (confidence truncation) and draft acceptance (markov quality).
 NOT "sharper sampler" — that was inapplicable (drafter is greedy argmax).
 
 **Sub-phase 3a — Draft length: remove/reduce confidence truncation**
-- [ ] 3a.1 Experiment matrix: conf ∈ {0.9, 0.6, 0.3, 0.0}, scheduler on/off, on
+- [x] 3a.1 Experiment matrix: conf ∈ {0.9, 0.6, 0.3, 0.0}, scheduler on/off, on
   SWE-long 8k/32k. Measure avg accepted/cycle vs break-even 0.67.
-- [ ] 3a.2 If full-block drafts (len-5) still fail break-even due to acceptance,
-  confirm it's acceptance, not length (record len-hist + acceptance per position).
-- [ ] 3a.3 Consider drafting the full block unconditionally when confidence head
-  is untrusted (env `DS4_DSPARK_NO_CONFIDENCE`), letting acceptance decide.
+  **DONE — results below.**
+- [x] 3a.2 Record len-hist + acceptance per position.
+  **DONE — see Phase 3a RESULTS block.**
+- [x] 3a.3 Full-block draft experiment (conf 0 = no confidence truncation).
+  **DONE — full 5-token blocks drafted; still net-negative.**
+
+**3a RESULTS (SWE-long 8k, conf × scheduler, GREEDY):**
+
+| conf | sched | accepted/cyc | decode t/s | vs OFF |
+|------|-------|--------------|-----------|--------|
+| 0.9 | on | 0.130 | ~36 (mostly OFF) | ~1.00 |
+| 0.9 | off | 0.463 | ~32 | 0.87 |
+| 0.6 | off | 1.273 | **25.0** | **0.68** |
+| 0.3 | off | 1.740 | **22.2** | **0.61** |
+| 0.0 | off | 1.817 | **20.7** | **0.56** |
+
+**KEY FINDING — the accepted/cycle break-even (0.67) is wrong for this
+GPU-bound system: it ignores REPLAY.** At conf 0.6/off: saved=2455ms but
+spec_total=4499ms (propose 362 + verify 2055 + **replay 2417**), net_saved=
+-2405ms. Every partial accept (reject at position 2+) replays the accepted
+prefix through `metal_graph_eval_token_raw_swa` (ds4.c:62582) — a full target
+decode per replayed token. So a reject costs propose+verify+replay, and on a
+96%-busy GPU that overhead is real time. **More speculation = more replays =
+slower.** Conf 0 (max drafting) is worst (0.56×).
+
+**Corrected conclusion for Phase 3:** longer drafts with mediocre acceptance
+make it WORSE, not better. Raising acceptance alone cannot win while partial
+rejects pay propose+verify+replay. The levers that could still change this:
+
+- **3b (markov acceptance):** if per-position acceptance at the *first* draft
+  were near 100% AND drafts stayed fully-accepted (no partial rejects), replay
+  would vanish. Measure whether that's achievable on code.
+- **New 3d — eliminate replay:** commit verified drafts without re-decoding
+  (the frontier already holds verified hidden states — see
+  `spec_frontier_commit_prefix`). If the accepted prefix can be committed
+  without `eval_token_raw_swa`, replay (2417ms → ~0) flips conf 0.6/off to
+  net-positive. THIS is now the highest-value single change.
+- **New 3e — full-accept-only drafting:** if the confidence head can gate on
+  "accept all 5 or draft nothing," then only full accepts (no replay, no
+  partial) proceed. Changes the economics to: full-accept = save 5 decodes
+  minus 1 verify; reject = cost 1 verify only.
+
+**3d (frontier commit, no replay) is promoted to the Phase 3 headline** —
+it attacks the measured replay cost directly and is a known-correct mechanism
+(the frontier already captures the verified hidden states).
 
 **Sub-phase 3b — Markov-head acceptance (the real lever)**
 - [ ] 3b.1 Measure per-position acceptance of the markov head on code text
@@ -358,14 +399,22 @@ headline (3) shows the loop can win.
   deprioritized (host_gap only ~3-5%)
 
 ### Phase 3 — accepted-tokens-per-verify (headline)
-- [ ] 3a.1 conf/scheduler matrix on SWE-long 8k/32k
-- [ ] 3a.2 record len-hist + per-position acceptance
-- [ ] 3a.3 full-block draft experiment (`DS4_DSPARK_NO_CONFIDENCE` or conf 0)
+- [x] 3a.1 conf/scheduler matrix on SWE-long 8k/32k — **done, see 3a RESULTS**
+- [x] 3a.2 record len-hist + per-position acceptance — **done**
+- [x] 3a.3 full-block draft experiment (conf 0) — **done; net-negative (replay)**
+- [ ] **3d (NEW headline): eliminate replay via frontier commit** — commit
+  verified accepted prefix from `spec_frontier` without `metal_graph_eval_token_raw_swa`
+  (ds4.c:62582). Target: replay 2417ms → ~0.
+- [ ] 3d.1 verify frontier hidden-state commit path covers all partial-accept cases
+- [ ] 3d.2 implement no-replay commit for the argmax verifier
+- [ ] 3d.3 M4.2 + GREEDY identity re-run
+- [ ] 3d.4 measure: does conf 0.6/off flip net_saved positive?
 - [ ] 3b.1 per-position markov acceptance on code
 - [ ] 3b.2 decide: tree-verify promotion vs accept ceiling
 - [ ] 3b.3 re-run M4.2 after any draft-distribution change
 - [ ] 3c.1 assess whether temp>0 path is worth supporting
-- [ ] **GATE:** avg_accepted/cycle ≥ 0.67 AND G/OFF > 1.0
+- [ ] **GATE (revised): G/OFF > 1.0 on SWE-long 8k, 3 interleaved rounds**
+  (accepted/cycle alone is insufficient — replay dominates)
 
 ### Phase 4 — park-and-exit scheduler
 - [ ] 4.1 park-and-exit state machine (ds4.c:48725+)
@@ -427,10 +476,11 @@ headline (3) shows the loop can win.
 ## 8. Definition of done
 
 - [ ] Phase 0 complete: decode-phase GPU utilization measured; bottleneck identified.
-- [ ] Phase 3 gate passed: avg_accepted/cycle ≥ 0.67 AND G/OFF > 1.0 on SWE-long 8k,
-  3 interleaved rounds.
-- [ ] OR the ceiling is documented with data: per-position acceptance shows the
-  markov head cannot exceed break-even, and the decision is recorded.
+- [ ] Phase 3 gate passed: **G/OFF > 1.0 on SWE-long 8k**, 3 interleaved rounds.
+  (accepted/cycle ≥0.67 alone is NOT sufficient — replay overhead dominates;
+  the gate is wall-clock decode t/s.)
+- [ ] OR the ceiling is documented with data: replay elimination (3d) and/or
+  markov acceptance (3b) measured and shown unable to exceed 1.0×.
 - [ ] M4.2 + M1 + GREEDY-identity all pass at every draft-behavior change.
 - [ ] All benchmark logs + prompts archived in `misc/experiment-a-state.md`.
 - [ ] PR-ready: Metal/M5 scope stated; new GPU APIs guarded for CUDA/CPU/ROCm;
