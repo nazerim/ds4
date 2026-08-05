@@ -340,6 +340,35 @@ consistency), which is a much deeper change than the commit path. Net:
 
 **3d is closed. Phase 3b (markov acceptance ceiling) is the last open lever.**
 
+**3b RESULT (2026-08-05) — the break-even is unreachable with this drafter.**
+
+Per-position conditional acceptance (conf 0.6/off, SWE-long 8k):
+p1=0.686, p2=0.750, p3=0.417, p4=0.667, p5=0.300 → 1.60 accepted/cycle.
+
+Economics (conf 0.6/off): spec_total 75.1ms/cycle (propose ~7 + verify ~12 +
+**replay ~55**), saved 36.0ms/cycle (28.3ms/token). **Break-even accepted/cycle
+= 75.1/28.3 = 2.65.** Requires uniform per-position acceptance ≥0.80 — but p1 is
+0.686 (31% of cycles pay full cost on a wrong first draft) and p3 collapses to
+0.417. Even a PERFECT position-1 fix reaches only 2.33, still below 2.65.
+
+**FINAL PHASE 3 VERDICT: DSpark cannot reach break-even on M5/Metal with the
+current markov drafter.** The failure chain is now fully measured:
+1. Longer drafts (3a): replay dominates (52% of spec_total); more drafting is worse.
+2. No-replay (3d): breaks greedy identity (batch vs single-token kernel mismatch).
+3. Acceptance (3b): break-even needs ≥0.80 uniform acceptance; drafter is 0.30-0.75.
+
+All three escape hatches closed by data. DSpark remains opt-in, net-negative,
+for greedy and sampling paths on this hardware. The only untried structural
+lever is tree verification (Phase 5), which would raise accepted/verify by
+verifying multiple branches — but it does NOT fix position-1 acceptance (the
+drafter must still propose the right first token), and the position-1 miss
+(31%) alone keeps it below break-even even with perfect downstream acceptance.
+
+**Recommendation:** stop the DSpark perf work. Record the ceiling. Keep the
+feature opt-in (correct but slow). Revisit only if (a) a better DSpark drafter
+with p1 ≥ 0.85 becomes available, or (b) the verify kernels are made
+exact-decode-equivalent (enabling no-replay). Neither is in our control now.
+
 **Sub-phase 3b — Markov-head acceptance (the real lever)**
 - [ ] 3b.1 Measure per-position acceptance of the markov head on code text
   (position 1,2,3,4,5) via `DS4_DSPARK_SPEC_LOG`/stats `accepted_len_hist`.
@@ -433,13 +462,16 @@ headline (3) shows the loop can win.
   (`DS4_DSPARK_NO_REPLAY=1`, non-TP, ds4.c) — **mechanically works**
 - [x] 3d.3 M4.2 + GREEDY identity — **FAILS: diverges at ~3 tokens (compressor
   kernel mismatch). 3d CLOSED.**
-- [ ] 3d.4 (cancelled — 3d proven incorrect)
-- [ ] 3b.1 per-position markov acceptance on code — **LAST open lever**
-- [ ] 3b.2 decide: tree-verify promotion vs accept ceiling
-- [ ] 3b.3 re-run M4.2 after any draft-distribution change
-- [ ] 3c.1 assess whether temp>0 path is worth supporting
-- [ ] **GATE (revised): G/OFF > 1.0 on SWE-long 8k, 3 interleaved rounds**
-  (accepted/cycle alone is insufficient — replay dominates)
+- [x] 3d.4 (cancelled — 3d proven incorrect)
+- [x] 3b.1 per-position markov acceptance on code — **DONE: p1=.686 p3=.417;
+  break-even 2.65 unreachable (max ~2.33 even with perfect p1)**
+- [x] 3b.2 decide: tree-verify promotion vs accept ceiling — **ceiling documented;
+  tree-verify cannot fix position-1 miss; NOT promoted**
+- [ ] 3b.3 (only if a draft-behavior change is adopted — none is)
+- [ ] 3c.1 assess whether temp>0 path is worth supporting — **temp>0 rides the
+  same break-even; greedy can't win, temp>0 won't**
+- [ ] **GATE (revised): G/OFF > 1.0 on SWE-long 8k** — **UNREACHABLE, see
+  FINAL PHASE 3 VERDICT. Phase 3 closed.**
 
 ### Phase 4 — park-and-exit scheduler
 - [ ] 4.1 park-and-exit state machine (ds4.c:48725+)
@@ -501,11 +533,10 @@ headline (3) shows the loop can win.
 ## 8. Definition of done
 
 - [ ] Phase 0 complete: decode-phase GPU utilization measured; bottleneck identified.
-- [ ] Phase 3 gate passed: **G/OFF > 1.0 on SWE-long 8k**, 3 interleaved rounds.
-  (accepted/cycle ≥0.67 alone is NOT sufficient — replay overhead dominates;
-  the gate is wall-clock decode t/s.)
-- [ ] OR the ceiling is documented with data: replay elimination (3d) and/or
-  markov acceptance (3b) measured and shown unable to exceed 1.0×.
+- [x] Phase 3 gate passed: **G/OFF > 1.0 on SWE-long 8k** — **NOT PASSED. Ceiling
+  documented with data: break-even 2.65 accepted/cycle vs measured 1.60;
+  replay dominates (52% of spec_total); no-replay breaks identity; position-1
+  acceptance 0.686 caps the ceiling. DSpark is net-negative on M5/Metal.**
 - [ ] M4.2 + M1 + GREEDY-identity all pass at every draft-behavior change.
 - [ ] All benchmark logs + prompts archived in `misc/experiment-a-state.md`.
 - [ ] PR-ready: Metal/M5 scope stated; new GPU APIs guarded for CUDA/CPU/ROCm;
