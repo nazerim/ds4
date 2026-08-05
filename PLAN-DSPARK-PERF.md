@@ -7,6 +7,37 @@ from oMLX's embedded MTP (`omlx/patches/mlx_lm_mtp`) and external-drafter DFlash
 
 ---
 
+## Target platform (IMPORTANT for upstream PR)
+
+This work targets **Apple Silicon (M5 Max) via the Metal backend**, single GPU,
+unified memory. Every number, phase and decision in this plan is scoped to that:
+
+- **Hardware:** M5 Max (40-core GPU), single Metal device
+  (`MTLCreateSystemDefaultDevice`, ds4_metal.m:5716). No eGPU, no multi-GPU.
+- **Backend:** `ds4_metal.m` / Metal command buffers, one command queue
+  (`g_queue`), `MTLSharedEvent` overlap primitives for TP already present.
+- **Model:** DeepSeek-V4-Flash 0731 (91GB main + 5.6GB DSpark support GGUF),
+  MoE 256-rank experts.
+- **Decode regime:** decode is ~28ms/token at 36 t/s; verify over draft rows
+  ~18.7ms. Whether this is bandwidth-bound or compute-bound on M5 Max is the
+  Phase 0 open question.
+
+**PR implications:**
+- A PR upstream must state the Metal/M5 scope explicitly. The oMLX/DFlash
+  literature and oMLX's own docstring warn MTP is **net-negative on compute-bound
+  single-stream parts** (M1/M2 base/Pro) and only wins on M3/M4+ or bandwidth-
+  bound regimes — the upstream maintainers will hold this work to that bar.
+- Metal-only code (new shaders, `MTLSharedEvent` gating) must degrade gracefully
+  on the CUDA backend (`ds4_cuda.cu`, `ds4_gpu_*` stubs in ds4.c:131+) and CPU
+  (`ds4_gpu_*` no-op stubs). Guard every new GPU API with `#ifndef DS4_NO_GPU`
+  / `DS4_ROCM_BUILD` as the existing backend API does.
+- Any acceptance/draft-length win is backend-agnostic in *mechanism* but must be
+  re-validated per backend (Metal vs CUDA decode economics differ).
+- Keep the GREEDY identity contract (temp-0 output == plain decode) as the
+  correctness invariant reviewers will check first.
+
+---
+
 ## 0. Baseline measurements (verified, thermal-controlled)
 
 M5 Max, High Power, 90s warmup, interleaved A/B, decode-only t/s from server logs.
@@ -375,3 +406,5 @@ headline (3) shows the loop can win.
   markov head cannot exceed break-even, and the decision is recorded.
 - [ ] M4.2 + M1 + GREEDY-identity all pass at every draft-behavior change.
 - [ ] All benchmark logs + prompts archived in `misc/experiment-a-state.md`.
+- [ ] PR-ready: Metal/M5 scope stated; new GPU APIs guarded for CUDA/CPU/ROCm;
+  GREEDY identity contract documented as the reviewers' first check.
