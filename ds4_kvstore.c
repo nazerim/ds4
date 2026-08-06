@@ -701,7 +701,8 @@ static bool kv_cache_entry_in_active_chain(ds4_kvstore *kc, int idx,
                                            const char *text, size_t text_len);
 
 static void kv_chain_rel_build(ds4_kvstore *kc, kv_chain_rel *r,
-                               const char *active_text, size_t active_len) {
+                               const char *active_text, size_t active_len,
+                               const char *protect_text, size_t protect_len) {
     r->len = kc->len;
     r->rel = kv_xmalloc((size_t)r->len * (size_t)r->len);
     r->active = kv_xmalloc((size_t)r->len);
@@ -709,8 +710,11 @@ static void kv_chain_rel_build(ds4_kvstore *kc, kv_chain_rel *r,
     memset(r->active, 0, (size_t)r->len);
     for (int i = 0; i < r->len; i++) {
         r->rel[(size_t)i * r->len + i] = 1;
-        r->active[i] = kv_cache_entry_in_active_chain(kc, i, active_text,
-                                                      active_len) ? 1 : 0;
+        r->active[i] = (kv_cache_entry_in_active_chain(kc, i, active_text,
+                                                       active_len) ||
+                        (protect_text &&
+                         kv_cache_entry_in_active_chain(kc, i, protect_text,
+                                                        protect_len))) ? 1 : 0;
     }
     for (int i = 0; i < r->len; i++) {
         for (int j = i + 1; j < r->len; j++) {
@@ -1071,13 +1075,17 @@ void ds4_kvstore_evict(ds4_kvstore *kc, const ds4_tokens *live,
      * text: the ancestors of the frontier about to be stored. */
     const char *active_text = incoming && incoming->text ? incoming->text : NULL;
     const size_t active_len = active_text ? incoming->text_len : 0;
+    const char *protect_text = incoming && incoming->protect_text
+        ? incoming->protect_text : NULL;
+    const size_t protect_len = protect_text ? incoming->protect_text_len : 0;
 
     /* Over-cap retirement: retire the LRU lineage whenever the distinct
      * non-active lineage count exceeds the configured cap. */
     if (kc->opt.max_conversations > 0) {
         for (;;) {
             kv_chain_rel r;
-            kv_chain_rel_build(kc, &r, active_text, active_len);
+            kv_chain_rel_build(kc, &r, active_text, active_len,
+                               protect_text, protect_len);
             const bool over =
                 kv_cache_count_lineages(kc, &r) > kc->opt.max_conversations;
             int leaf = over ? kv_cache_find_lru_leaf(kc, &r, 1) : -1;
@@ -1089,7 +1097,8 @@ void ds4_kvstore_evict(ds4_kvstore *kc, const ds4_tokens *live,
 
     while (total > target && kc->len > 0) {
         kv_chain_rel r;
-        kv_chain_rel_build(kc, &r, active_text, active_len);
+        kv_chain_rel_build(kc, &r, active_text, active_len,
+                           protect_text, protect_len);
         /* PHASE A: drop redundant (applies to all lineages incl. the active
          * one — its frontier+tail+small are always in the keep-set, so only
          * its redundant middle/compaction-collapse is dropped here; active
@@ -1607,7 +1616,9 @@ bool ds4_kvstore_store_live_prefix_text(ds4_kvstore *kc,
                                         const char *cache_text_key,
                                         const ds4_kvstore_trailer_hooks *hooks,
                                         char *err,
-                                        size_t err_len) {
+                                        size_t err_len,
+                                        const char *evict_protect_text,
+                                        size_t evict_protect_len) {
     if (!kc->enabled) return false;
     if (!tokens || store_len < kc->opt.min_tokens) return false;
     const int original_len = tokens->len;
@@ -1724,6 +1735,8 @@ bool ds4_kvstore_store_live_prefix_text(ds4_kvstore *kc,
         .quant_bits = (uint8_t)quant_bits,
         .ctx_size = (uint32_t)ds4_session_ctx(session),
         .reject_different_quant = kc->reject_different_quant,
+        .protect_text = evict_protect_text,
+        .protect_text_len = evict_protect_len,
     };
     ds4_kvstore_evict(kc, live_tokens, est_file_bytes, &incoming);
 
@@ -1860,8 +1873,9 @@ bool ds4_kvstore_store_live_prefix(ds4_kvstore *kc,
                                    char *err,
                                    size_t err_len) {
     return ds4_kvstore_store_live_prefix_text(kc, engine, session, tokens,
-                                              store_len, reason, NULL, 0, NULL,
-                                              hooks, err, err_len);
+                                               store_len, reason, NULL, 0, NULL,
+                                               hooks, err, err_len,
+                                               NULL, 0);
 }
 
 bool ds4_kvstore_maybe_store_continued(ds4_kvstore *kc,

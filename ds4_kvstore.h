@@ -134,6 +134,14 @@ typedef struct {
     uint8_t quant_bits;
     uint32_t ctx_size;
     bool reject_different_quant;
+    /* Optional: a second text whose ancestors must also be kept during
+     * eviction.  Used when persisting a live checkpoint right before loading
+     * a disk snapshot: the imminent load needs the ancestors of the PROMPT
+     * (which may be larger than the live text being stored), not just the
+     * live text's.  When set, eviction protects ancestors of this text in
+     * addition to `text`. */
+    const char *protect_text;
+    size_t protect_text_len;
 } ds4_kvstore_eviction_context;
 
 typedef struct {
@@ -215,7 +223,9 @@ bool ds4_kvstore_store_live_prefix_text(ds4_kvstore *kc,
                                         const char *cache_text_key,
                                         const ds4_kvstore_trailer_hooks *hooks,
                                         char *err,
-                                        size_t err_len);
+                                        size_t err_len,
+                                        const char *evict_protect_text,
+                                        size_t evict_protect_len);
 bool ds4_kvstore_store_live_prefix(ds4_kvstore *kc,
                                    ds4_engine *engine,
                                    ds4_session *session,

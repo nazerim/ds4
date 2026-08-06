@@ -9543,7 +9543,9 @@ static bool kv_cache_store_live_prefix_text(server *s, server_slot *slot,
                                             int store_len, const char *reason,
                                             const char *cache_text_override,
                                             uint8_t cache_text_ext,
-                                            const char *cache_text_key) {
+                                            const char *cache_text_key,
+                                            const char *evict_protect_text,
+                                            size_t evict_protect_len) {
     if (!s || !slot) return false;
     char err[160] = {0};
     ds4_kvstore_trailer_hooks hooks = kv_cache_tool_map_hooks(s, NULL);
@@ -9555,7 +9557,9 @@ static bool kv_cache_store_live_prefix_text(server *s, server_slot *slot,
                                                   cache_text_override,
                                                   cache_text_ext,
                                                   cache_text_key,
-                                                  &hooks, err, sizeof(err));
+                                                  &hooks, err, sizeof(err),
+                                                  evict_protect_text,
+                                                  evict_protect_len);
     pthread_mutex_unlock(&s->kv_mu);
     pthread_mutex_unlock(&s->inference_mu);
     return ok;
@@ -9565,11 +9569,13 @@ static bool kv_cache_store_live_prefix(server *s, server_slot *slot,
                                        const ds4_tokens *tokens,
                                        int store_len, const char *reason) {
     return kv_cache_store_live_prefix_text(s, slot, tokens, store_len, reason,
-                                           NULL, 0, NULL);
+                                           NULL, 0, NULL, NULL, 0);
 }
 
 static void kv_cache_store_current(server *s, server_slot *slot,
-                                   const char *reason) {
+                                   const char *reason,
+                                   const char *evict_protect_text,
+                                   size_t evict_protect_len) {
     if (!s || !slot) return;
     const ds4_tokens *tokens = ds4_session_tokens(slot->session);
     if (!tokens) return;
@@ -9604,7 +9610,8 @@ static void kv_cache_store_current(server *s, server_slot *slot,
      * tokenizes only the visible suffix that follows this key. */
     if (visible_text) {
         kv_cache_store_live_prefix_text(s, slot, tokens, tokens->len, reason,
-                                        visible_text, visible_ext, visible_key);
+                                        visible_text, visible_ext, visible_key,
+                                        evict_protect_text, evict_protect_len);
         free(visible_text);
     } else {
         kv_cache_store_live_prefix(s, slot, tokens, tokens->len, reason);
@@ -11317,8 +11324,14 @@ static void generate_job(server *s, server_slot *slot, job *j) {
     if (s->kv.enabled && cached == 0 && old_pos >= s->kv.opt.min_tokens) {
         /* Loading a disk snapshot replaces the live Metal session.  Persist the
          * current checkpoint first, otherwise a cache hit for an older prefix
-         * would silently discard the newer conversation state. */
-        kv_cache_store_current(s, slot, "evict");
+         * would silently discard the newer conversation state.  Pass the prompt
+         * text as the eviction protect-text: the imminent load needs the
+         * prompt's ancestors (which may exceed the live text being stored), so
+         * the eviction must keep them even though they are not ancestors of the
+         * live checkpoint. */
+        const char *protect = j->req.prompt_text;
+        kv_cache_store_current(s, slot, "evict",
+                               protect, protect ? strlen(protect) : 0);
     }
     if (cached == 0) {
         disk_cached = kv_cache_try_load(s, slot, &j->req, &effective_prompt,
@@ -13467,7 +13480,7 @@ int main(int argc, char **argv) {
         server_log(DS4_LOG_KVCACHE,
                    "ds4-server: persisting resident KV cache before shutdown slot=%d tokens=%d",
                    i, tokens->len);
-        kv_cache_store_current(&s, slot, "shutdown");
+        kv_cache_store_current(&s, slot, "shutdown", NULL, 0);
     }
     server_close_resources(&s);
     return 0;
@@ -17617,6 +17630,104 @@ static void test_kv_cache_eviction_ignores_oversize_incoming(void) {
     rmdir(dir);
 }
 
+static void test_kv_cache_evict_protects_prompt_ancestors(void) {
+    /* Regression for the 2026-08-06 bug: on a live KV miss the server persists
+     * the live checkpoint (reason="evict") BEFORE loading a disk snapshot.
+     * That store's eviction used to build its active chain from the LIVE text
+     * only.  An anchor that is an ancestor of the PROMPT but LARGER than the
+     * live (65536 > 64942 in the log) was judged a redundant middle and
+     * evicted right before the load needed it, forcing a huge prefill.
+     *
+     * Here the eviction context carries a protect_text (the prompt).  The
+     * 65536 anchor prefixes the prompt but not the live, so it must survive
+     * when protect_text is set, and be evicted without it. */
+    char tmpl[] = "/tmp/ds4-kv-evict-protect-test.XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    TEST_ASSERT(dir != NULL);
+    if (!dir) return;
+
+    const uint64_t conv = 0xABCDull;
+    const uint64_t now = (uint64_t)time(NULL);
+    /* One prefix lineage: live_text diverges from the anchor chain, so the
+     * 65536 anchor is NOT a live ancestor; prompt_text extends it, so the
+     * 65536 anchor IS a prompt ancestor.  The frontier (leaf) is larger still. */
+    struct { const char *text; uint32_t tokens; } anchors[] = {
+        {"p",           16384},  /* small-dense -> kept */
+        {"p m",         65536},  /* prompt ancestor, > live -> must be protected */
+        {"p m f",       73728},  /* redundant middle (not a prompt ancestor) */
+        {"p m f g",     81920},  /* dense-tail -> kept */
+        {"p m f g x",   90112},  /* frontier (leaf) -> kept */
+    };
+    const char *live_text = "live divergent branch";   /* NOT a prefix of "p m" */
+    const char *prompt_text = "p m prompt continuation"; /* has "p m" as prefix */
+
+    for (int i = 0; i < 5; i++)
+        test_kv_conv_stub_file(dir, anchors[i].text, conv, 0, KV_REASON_COLD,
+                               anchors[i].tokens, 0, now, 1024);
+
+    kv_disk_cache kc = {0};
+    kc.enabled = true;
+    kc.dir = xstrdup(dir);
+    kc.opt = kv_cache_default_options();
+    /* 5 files x (72 + 4 + text(1..9) + 1024) = 5525 bytes.  Without protect the
+     * redundant middles are "p m" (65536) and "p m f" (73728); the smallest
+     * bucket is evicted first, so "p m" goes.  Budget 4420 leaves the kept set
+     * (p + p m f g + p m f g x = 3317) plus one redundant. */
+    kc.budget_bytes = 4420;
+
+    /* Case 1: no protect_text -> the 65536 prompt-ancestor is evicted. */
+    ds4_kvstore_eviction_context incoming_no = {
+        .text = live_text, .text_len = strlen(live_text),
+        .model_id = 0, .quant_bits = 2, .ctx_size = 32768,
+        .reject_different_quant = false,
+    };
+    kv_cache_evict(&kc, NULL, 0, &incoming_no);
+    TEST_ASSERT(!kv_file_exists(dir, "p m"));   /* prompt ancestor evicted */
+    TEST_ASSERT(kv_file_exists(dir, "p"));
+    TEST_ASSERT(kv_file_exists(dir, "p m f g x")); /* frontier kept */
+
+    kv_cache_close(&kc);
+    for (int i = 0; i < 5; i++) {
+        char *p = test_kv_path_for_text(dir, anchors[i].text);
+        unlink(p);
+        free(p);
+    }
+    rmdir(dir);
+
+    /* Case 2: with protect_text -> the 65536 prompt-ancestor survives. */
+    char tmpl2[] = "/tmp/ds4-kv-evict-protect-test.XXXXXX";
+    char *dir2 = mkdtemp(tmpl2);
+    TEST_ASSERT(dir2 != NULL);
+    if (!dir2) return;
+    for (int i = 0; i < 5; i++)
+        test_kv_conv_stub_file(dir2, anchors[i].text, conv, 0, KV_REASON_COLD,
+                               anchors[i].tokens, 0, now, 1024);
+
+    kv_disk_cache kc2 = {0};
+    kc2.enabled = true;
+    kc2.dir = xstrdup(dir2);
+    kc2.opt = kv_cache_default_options();
+    kc2.budget_bytes = 4420;
+    ds4_kvstore_eviction_context incoming_yes = {
+        .text = live_text, .text_len = strlen(live_text),
+        .model_id = 0, .quant_bits = 2, .ctx_size = 32768,
+        .reject_different_quant = false,
+        .protect_text = prompt_text, .protect_text_len = strlen(prompt_text),
+    };
+    kv_cache_evict(&kc2, NULL, 0, &incoming_yes);
+    TEST_ASSERT(kv_file_exists(dir2, "p m"));   /* prompt ancestor kept */
+    TEST_ASSERT(kv_file_exists(dir2, "p"));
+    TEST_ASSERT(kv_file_exists(dir2, "p m f g x")); /* frontier kept */
+
+    kv_cache_close(&kc2);
+    for (int i = 0; i < 5; i++) {
+        char *p = test_kv_path_for_text(dir2, anchors[i].text);
+        unlink(p);
+        free(p);
+    }
+    rmdir(dir2);
+}
+
 static void test_kv_cache_stale_at_load(void) {
     /* mark_stale_at_load is decommissioned (inert): it must NOT set a stale
      * flag on any checkpoint, whether it byte-prefixes the prompt or not. */
@@ -19216,6 +19327,7 @@ static void ds4_server_unit_tests_run(void) {
     test_kv_cache_eviction_multi_conv_scoped();
     test_kv_cache_eviction_makes_room_before_store();
     test_kv_cache_eviction_ignores_oversize_incoming();
+    test_kv_cache_evict_protects_prompt_ancestors();
     test_kv_cache_stale_at_load();
     test_kv_cache_stale_at_load_isolates_conversations();
     test_kv_cache_conv_id_distinguishes_shared_head_sessions();
