@@ -22,7 +22,7 @@ KV_SIZE=32768
 LOG_DIR="./log"
 LOG_FILE="$LOG_DIR/ds4.log"
 TOKENS=384000
-MTP_MODEL="gguf/DeepSeek-V4-Flash-DSpark-support.gguf"
+MTP_MODEL="gguf/DeepSeek-V4-Flash-DSpark-support-0731.gguf"
 
 # Alternative model map: short name -> full GGUF path
 # Add entries here for each model variant. Use `start-<name>` / `restart-<name>`.
@@ -37,7 +37,7 @@ MODEL_PATHS=(
 # entry, the default MTP_MODEL above is used instead.
 MTP_KEYS=("0731")
 MTP_PATHS=(
-    "/Users/naz/Projects/ds4/gguf/DeepSeek-V4-Flash-DSpark-support.gguf"
+    "/Users/naz/Projects/ds4/gguf/DeepSeek-V4-Flash-DSpark-support-0731.gguf"
 )
 
 lookup_model() {
