@@ -699,6 +699,7 @@ typedef struct {
 
 static bool kv_cache_entry_in_active_chain(ds4_kvstore *kc, int idx,
                                            const char *text, size_t text_len);
+static int64_t kv_cache_entry_last_used(const ds4_kvstore_entry *e);
 
 static void kv_chain_rel_build(ds4_kvstore *kc, kv_chain_rel *r,
                                const char *active_text, size_t active_len,
@@ -877,15 +878,53 @@ static bool kv_cache_active_chain_kept(ds4_kvstore *kc, const kv_chain_rel *r,
     return false;
 }
 
-/* Kept = legacy singleton, or small-dense, or kept by at least one descendant
- * chain (a shared ancestor survives while ANY chain that extends it keeps it;
- * an entry with no readable relations is its own leaf and thus its own
- * frontier), or an active-chain ancestor kept by the virtual incoming chain. */
+/* A small-dense anchor is a divergent-branch duplicate if another small-dense
+ * anchor with the SAME conv_id and SAME token count carries a DIFFERENT byte
+ * prefix (the two texts diverge at the same ladder position).  This happens
+ * when a session re-renders a diverged head (e.g. an AGENTS.md edit) and the
+ * server re-prefills from the shared base anchor, storing a fresh 40960/49152
+ * anchor on the new branch; the OLD branch's anchor at that position can never
+ * be loaded again (the prompt byte-prefix-matches only the new branch), so it
+ * is pure budget waste.  Only the ACTIVE branch's anchor is kept; the others
+ * are redundant even though they are small_dense. */
+static bool kv_cache_small_dense_divergent_duplicate(ds4_kvstore *kc,
+                                                     const kv_chain_rel *r,
+                                                     int idx) {
+    const ds4_kvstore_entry *e = &kc->entry[idx];
+    if (kv_cache_entry_is_legacy(e)) return false;
+    if (e->tokens > (uint32_t)kc->opt.small_dense_tokens) return false;
+    /* The active-chain member of a (conv_id, tokens) bucket is the one the
+     * incoming prompt actually matches; it is never the duplicate. */
+    if (r->active[idx]) return false;
+    for (int i = 0; i < r->len; i++) {
+        if (i == idx) continue;
+        const ds4_kvstore_entry *o = &kc->entry[i];
+        if (kv_cache_entry_is_legacy(o)) continue;
+        if (o->conv_id != e->conv_id) continue;
+        if (o->tokens != e->tokens) continue;
+        if (o->tokens > (uint32_t)kc->opt.small_dense_tokens) continue;
+        /* Same conv_id + same token count + different text = divergent branch.
+         * Prefer the active-chain sibling if any; else the newer one survives
+         * and this one is redundant. */
+        if (r->active[i]) return true;
+        if (kv_cache_entry_last_used(o) > kv_cache_entry_last_used(e)) return true;
+    }
+    return false;
+}
+
+/* Kept = legacy singleton, or small-dense (except divergent-branch duplicates),
+ * or kept by at least one descendant chain (a shared ancestor survives while
+ * ANY chain that extends it keeps it; an entry with no readable relations is
+ * its own leaf and thus its own frontier), or an active-chain ancestor kept by
+ * the virtual incoming chain. */
 static bool kv_cache_conv_is_kept(ds4_kvstore *kc, const kv_chain_rel *r,
                                   int idx) {
     const ds4_kvstore_entry *e = &kc->entry[idx];
     if (kv_cache_entry_is_legacy(e)) return true;
-    if (e->tokens <= (uint32_t)kc->opt.small_dense_tokens) return true;
+    if (e->tokens <= (uint32_t)kc->opt.small_dense_tokens) {
+        if (kv_cache_small_dense_divergent_duplicate(kc, r, idx)) return false;
+        return true;
+    }
     for (int i = 0; i < r->len; i++) {
         if (!kv_rel_is_leaf(r, i)) continue;
         if (!kv_rel_prefixes(r, idx, i)) continue;
@@ -1057,6 +1096,49 @@ static void kv_cache_retire_leaf(ds4_kvstore *kc, const kv_chain_rel *r,
     /* Unlink from the highest index so lower indices stay valid. */
     for (int k = n - 1; k >= 0; k--)
         kv_cache_unlink_entry(kc, victims[k], total, "conversation-retired");
+    free(victims);
+}
+
+/* Opportunistically prune divergent small-dense branches EVEN when under
+ * budget.  A re-rendered head (e.g. an AGENTS.md edit) makes the server
+ * re-prefill from the shared base anchor and store a fresh 40960/49152 anchor
+ * on the new branch; the old branch's anchor at the same (conv_id, tokens) is
+ * dead weight — a prompt byte-prefix-matches only the new branch.  The keep-set
+ * already treats it as redundant (kv_cache_small_dense_divergent_duplicate),
+ * but the budget-driven eviction loop only fires while over budget, so without
+ * this sweep the duplicates would accumulate forever under a comfortably-sized
+ * budget.  Keep the active-chain member if any (the live branch), else the
+ * most-recently-used member of each (conv_id, tokens) bucket; drop the rest. */
+void ds4_kvstore_sweep_small_dense_divergents(ds4_kvstore *kc,
+                                              const char *active_text,
+                                              size_t active_len,
+                                              uint64_t *total) {
+    if (!kc->enabled || kc->len < 2) return;
+    /* Collect victims in one pass, then unlink from the highest index so lower
+     * indices stay valid.  Only the active-chain member (the live branch) or,
+     * failing that, the most-recently-used member of each (conv_id, tokens)
+     * bucket survives; the rest are divergent-branch duplicates. */
+    int *victims = kv_xmalloc((size_t)kc->len * sizeof(int));
+    int n = 0;
+    for (int i = 0; i < kc->len; i++) {
+        const ds4_kvstore_entry *e = &kc->entry[i];
+        if (kv_cache_entry_is_legacy(e)) continue;
+        if (e->tokens > (uint32_t)kc->opt.small_dense_tokens) continue;
+        if (kv_cache_entry_in_active_chain(kc, i, active_text, active_len)) continue;
+        bool dup = false;
+        for (int j = 0; j < kc->len && !dup; j++) {
+            if (j == i) continue;
+            const ds4_kvstore_entry *o = &kc->entry[j];
+            if (kv_cache_entry_is_legacy(o)) continue;
+            if (o->conv_id != e->conv_id || o->tokens != e->tokens) continue;
+            if (o->tokens > (uint32_t)kc->opt.small_dense_tokens) continue;
+            if (kv_cache_entry_in_active_chain(kc, j, active_text, active_len)) { dup = true; break; }
+            if (kv_cache_entry_last_used(o) > kv_cache_entry_last_used(e)) { dup = true; break; }
+        }
+        if (dup) victims[n++] = i;
+    }
+    for (int k = n - 1; k >= 0; k--)
+        kv_cache_unlink_entry(kc, victims[k], total, "redundant-divergent");
     free(victims);
 }
 
@@ -1246,6 +1328,11 @@ bool ds4_kvstore_open(ds4_kvstore *kc, const char *dir, uint64_t budget_mb,
                 kv_log_name(kc), kc->opt.min_tokens);
     kv_cache_sweep_orphan_temps(kc);
     ds4_kvstore_evict(kc, NULL, 0, NULL);
+    /* Opportunistic divergent-branch cleanup at open: a re-rendered head
+     * (AGENTS.md edit) leaves stale small-dense anchors at the same
+     * (conv_id, tokens) as newer branches; keep the newest per bucket. */
+    uint64_t sweep_total = 0;
+    ds4_kvstore_sweep_small_dense_divergents(kc, NULL, 0, &sweep_total);
     kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
             "%s: KV disk cache %s (budget=%llu MiB, cross-quant=%s, min=%d, cold_max=%d, continued=%d, trim=%d, align=%d, hit_half_life=%llus)",
             kv_log_name(kc),
@@ -1892,6 +1979,14 @@ bool ds4_kvstore_maybe_store_continued(ds4_kvstore *kc,
                                       "continued", hooks, err, err_len))
     {
         ds4_kvstore_note_store(kc, target);
+        /* A continued store on a re-rendered head (AGENTS.md edit) just added
+         * a fresh anchor on the new branch; prune the old branch's small-dense
+         * anchors at the same (conv_id, tokens) so re-render churn cannot
+         * accumulate duplicates even while the cache stays under budget.  The
+         * store may have been trimmed/shared, so refresh first. */
+        kv_cache_refresh(kc);
+        uint64_t sweep_total = 0;
+        ds4_kvstore_sweep_small_dense_divergents(kc, NULL, 0, &sweep_total);
         return true;
     }
     return false;

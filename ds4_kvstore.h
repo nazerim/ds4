@@ -209,6 +209,14 @@ bool ds4_kvstore_file_size_fits(const ds4_kvstore *kc,
 void ds4_kvstore_evict(ds4_kvstore *kc, const ds4_tokens *live,
                        uint64_t extra_bytes,
                        const ds4_kvstore_eviction_context *incoming);
+/* Opportunistically prune small-dense anchors that are divergent-branch
+ * duplicates of the same conversation (same conv_id + same token count +
+ * different text).  Keeps the active-chain member if any, else the most
+ * recently used; drops the rest.  Runs even when the cache is under budget. */
+void ds4_kvstore_sweep_small_dense_divergents(ds4_kvstore *kc,
+                                              const char *active_text,
+                                              size_t active_len,
+                                              uint64_t *total);
 int ds4_kvstore_find_text_prefix(ds4_kvstore *kc, const char *prompt_text,
                                  int model_id, int quant_bits, int ctx_size);
 

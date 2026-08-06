@@ -18,7 +18,11 @@ PROXY_HOST="${PROXY_HOST:-0.0.0.0}"
 # HOST=0.0.0.0 or HOST=192.168.1.20 to expose the server on the LAN.
 HOST="${HOST:-127.0.0.1}"
 KV_DIR="/tmp/ds4-kv"
-KV_SIZE=32768
+# KV disk budget in MiB. Default 65536 (64 GiB): a single ultra-long conversation
+# (328k+ tokens, e.g. ctx=512000) holds a ~50 GiB continued-anchor ladder; two
+# such conversations cannot share the old 32 GiB default without one retiring the
+# other.  See DS4FORK.md "KVCACHE — Deep Divergence Investigation".
+KV_SIZE="${KV_SIZE:-65536}"
 # KV anchor retention: small_dense keeps ALL anchors ≤ this token count sticky
 # (default 16384).  Raising it bounds head divergences (e.g. opencode re-renders
 # an edited AGENTS.md near the head) to restart from a deeper anchor instead of

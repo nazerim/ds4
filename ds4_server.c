@@ -17927,6 +17927,124 @@ static void test_kv_cache_head_divergence_anchor_depth(void) {
     free(new_prompt);
 }
 
+static void test_kv_cache_small_dense_divergent_prune(void) {
+    /* Reproduces the production accumulation: a conversation head re-renders
+     * repeatedly (AGENTS.md edits), and each re-prefill stores a fresh
+     * 40960/49152 anchor on the new branch.  All branches share the same
+     * conv_id (same hashed head window) and the same token count but carry
+     * divergent byte text, so they're byte-prefix-mutually-exclusive and only
+     * the active/newest branch is ever loadable.  small_dense would otherwise
+     * keep all of them forever (they're <= small_dense), wasting budget; the
+     * sweep must prune to one per (conv_id, tokens) bucket. */
+    char tmpl[] = "/tmp/ds4-kv-divergent-prune.XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    TEST_ASSERT(dir != NULL);
+    if (!dir) return;
+
+    const uint64_t conv = 0x887522ull;
+    const uint64_t now = (uint64_t)time(NULL);
+    const size_t head_len = 137995;
+    const size_t cap = 200000; /* >= head_len + branch marker + tail */
+    const uint32_t tok = 40960;
+    const int n_branches = 5;
+    char *head = xmalloc(head_len + 1);
+    memset(head, 'A', head_len);
+    head[head_len] = '\0';
+
+    /* Five divergent branches: same shared head, then branch i diverges with a
+     * distinct marker, then a common 'T' tail (so the diverged text is long
+     * enough to be a full 40960-token anchor at cap bytes). */
+    for (int i = 0; i < n_branches; i++) {
+        char *text = xmalloc(cap + 1);
+        memcpy(text, head, head_len);
+        memcpy(text + head_len, "BRANCH-", 7);
+        memset(text + head_len + 7, '0' + i, 8);
+        memset(text + head_len + 15, 'T', cap - head_len - 15 - 1);
+        text[cap - 1] = '\0';
+        /* last_used increases with branch index: branch n_branches-1 is newest */
+        test_kv_conv_stub_file(dir, text, conv, 0, KV_REASON_COLD, tok, 0,
+                               now + (uint64_t)i, 1024);
+        free(text);
+    }
+
+    kv_disk_cache kc = {0};
+    kc.enabled = true;
+    kc.dir = xstrdup(dir);
+    kc.opt = kv_cache_default_options();
+    kc.opt.small_dense_tokens = 49152;
+    kc.budget_bytes = 1ull << 30; /* under budget: the sweep must still run */
+
+    /* Populate entries from disk, then sweep. */
+    (void)ds4_kvstore_find_text_prefix(&kc, head, 0, 2, 32768);
+    TEST_ASSERT(kc.len == n_branches);
+    uint64_t total = 0;
+    ds4_kvstore_sweep_small_dense_divergents(&kc, NULL, 0, &total);
+
+    /* Only the newest branch survives; the other 4 divergent branches are gone. */
+    TEST_ASSERT(kc.len == 1);
+    char *keep = xmalloc(cap + 1);
+    memcpy(keep, head, head_len);
+    memcpy(keep + head_len, "BRANCH-", 7);
+    memset(keep + head_len + 7, '0' + (n_branches - 1), 8);
+    memset(keep + head_len + 15, 'T', cap - head_len - 15 - 1);
+    keep[cap - 1] = '\0';
+    TEST_ASSERT(kv_file_exists(dir, keep));
+    for (int i = 0; i < n_branches - 1; i++) {
+        char *old = xmalloc(cap + 1);
+        memcpy(old, head, head_len);
+        memcpy(old + head_len, "BRANCH-", 7);
+        memset(old + head_len + 7, '0' + i, 8);
+        memset(old + head_len + 15, 'T', cap - head_len - 15 - 1);
+        old[cap - 1] = '\0';
+        TEST_ASSERT(!kv_file_exists(dir, old));
+        free(old);
+    }
+
+    /* A second bucket at 49152 with the same divergence pattern must prune the
+     * same way and be independent of the 40960 bucket. */
+    char *text = xmalloc(cap + 1);
+    memcpy(text, head, head_len);
+    memcpy(text + head_len, "BRANCH-", 7);
+    memset(text + head_len + 7, '0' + 0, 8);
+    memset(text + head_len + 15, 'T', cap - head_len - 15 - 1);
+    text[cap - 1] = '\0';
+    test_kv_conv_stub_file(dir, text, conv, 0, KV_REASON_COLD, 49152, 0, now, 1024);
+    free(text);
+    (void)ds4_kvstore_find_text_prefix(&kc, head, 0, 2, 32768);
+    ds4_kvstore_sweep_small_dense_divergents(&kc, NULL, 0, &total);
+    /* 49152 bucket: only 1 (the one just added, newest); 40960 bucket unchanged. */
+    int cnt49152 = 0, cnt40960 = 0;
+    for (int i = 0; i < kc.len; i++) {
+        if (kc.entry[i].tokens == 49152) cnt49152++;
+        if (kc.entry[i].tokens == 40960) cnt40960++;
+    }
+    TEST_ASSERT(cnt49152 == 1);
+    TEST_ASSERT(cnt40960 == 1);
+
+    kv_cache_close(&kc);
+    for (int i = 0; i < kc.len; i++) { /* leftover entries cleaned by close */
+        (void)i;
+    }
+    char *p = test_kv_path_for_text(dir, keep);
+    unlink(p);
+    free(p);
+    free(keep);
+    for (int i = 0; i < n_branches; i++) {
+        char *old = xmalloc(cap + 1);
+        memcpy(old, head, head_len);
+        memcpy(old + head_len, "BRANCH-", 7);
+        memset(old + head_len + 7, '0' + i, 8);
+        memset(old + head_len + 15, 'T', cap - head_len - 15 - 1);
+        old[cap - 1] = '\0';
+        char *q = test_kv_path_for_text(dir, old);
+        unlink(q);
+        free(q);
+        free(old);
+    }
+    rmdir(dir);
+    free(head);
+}
+
 static void test_kv_cache_stale_at_load(void) {
     /* mark_stale_at_load is decommissioned (inert): it must NOT set a stale
      * flag on any checkpoint, whether it byte-prefixes the prompt or not. */
@@ -19551,6 +19669,7 @@ static void ds4_server_unit_tests_run(void) {
     test_kv_cache_lineage_active_head_not_covered_by_idle_window();
     test_kv_cache_model_fp_routing();
     test_kv_cache_eviction_legacy_lru_evicts_oldest();
+    test_kv_cache_small_dense_divergent_prune();
     test_dsml_bare_parameters_parse_as_unknown_call();
     test_strip_dsml_keep_prefix();
     test_clamp_live_stream_positions();
