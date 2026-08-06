@@ -1107,8 +1107,8 @@ At the miss (12:13:32, `prompt=159353`, `cached=16384`) a **32768 anchor was sti
 
 ## Proposed fix directions
 
-1. **DONE (mitigation):** `KV_SMALL_DENSE=49152` — keeps a deeper head-anchor ladder so head divergences restart from ~48k, not 16k.
-2. **FEATURE — restitch (open):** truncate the live KV at `common` and prefill only the divergent tail (`prompt_len − common`), instead of reloading the deepest disk anchor and re-prefilling everything after it. The live session already has valid KV for positions 0..`common`. **Blocked by:** the GPU raw ring (`raw_cap ≈ n_swa`) only retains the most recent rows — position `common` is ~124k slots behind the frontier in the incident, so its rows are overwritten. Requires the KV backend to retain rows at arbitrary mid positions (or store a live checkpoint at `common` when a divergence is detected). This is the "restitch" that would cut the rebuild from `prompt_len − deepest_anchor` to `prompt_len − common`.
+1. **DONE (mitigation):** `KV_SMALL_DENSE=49152` — keeps a deeper head-anchor ladder so head divergences restart from ~48k, not 16k. Verified live (15:34:15 miss loaded from 32768).
+2. **FEATURE — restitch (CLOSED, not worth building):** the idea was to truncate the live KV at `common` and prefill only the divergent tail (`prompt_len − common`) instead of reloading the deepest disk anchor. **Quantified and rejected:** in the 15:34:15 incident (common=34790, anchor=32768, prompt=245496) restitch would save only `34790 − 32768 = 2022 tokens ≈ 8s` on a **844.7s** rebuild (~0.5%). After the `small_dense=49152` fix the deepest surviving anchor is already within one `anchor_step` of `common`, so the `anchor → common` gap is negligible. The dominant cost (`common → prompt_len`, ~211k tokens) is a genuine content change that no KV trick can avoid recomputing. It is also hard: the GPU raw ring retains only `raw_kv_rows=4352` rows, so at divergence time the live KV at position `common` (210k slots behind the frontier) is already overwritten — only a disk anchor can be loaded. The real lever is client-side (don't embed the edited file content mid-prompt).
 3. Consider whether opencode's re-render (e.g. `Today's date:` / volatile bytes, or the AGENTS.md edit loop) can be made stable on the client side (out of scope server-side).
 
 ## Status / tracking
@@ -1117,5 +1117,7 @@ At the miss (12:13:32, `prompt=159353`, `cached=16384`) a **32768 anchor was sti
 - [x] Analyze trace: identify exactly which token/message the client re-renders differently (AGENTS.md edit at token 35224).
 - [x] Q2: canonicalization does NOT help this divergence class; it only handles DSML tool-call re-renders.
 - [x] Raise `KV_SMALL_DENSE=49152` to keep the head-anchor ladder sticky.
-- [ ] FEATURE: restitch — truncate live KV at `common`, prefill only the divergent tail (needs mid-position KV retention).
-- [ ] Re-verify against a live long agent session.
+- [x] FEATURE: restitch — evaluated and closed as not worth building (saves ~8s/844s ≈ 0.5%; blocker = raw ring only retains 4352 rows; dominant cost is the irreducible divergent tail).
+- [x] Re-verified against live sessions (12:57, 14:43 runs): head-divergence misses now restart from 32768, not 16384.
+
+**Wrap-up:** KV-cache divergence work for this investigation is complete. The deployed mitigation (`KV_SMALL_DENSE=49152`) bounds AGENTS.md-style head-divergence rebuilds to restart from the deepest valid anchor; the synthetic regression test (`./ds4_test --kv-head-divergence`) guards it; restitch was evaluated and declined.
