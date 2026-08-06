@@ -6629,6 +6629,7 @@ static const ds4_test_entry test_entries[] = {
     {"--dsml-token-suppression", "dsml-token-suppression", "ds4_session_sample_excluding never returns the excluded DSML token id", test_dsml_token_suppression_excludes_id},
 #endif
     {"--server", "server", "server parser/rendering/cache unit tests", test_server_unit_group},
+    {"--kv-head-divergence", "kv-head-divergence", "synthetic AGENTS.md head-divergence anchor-depth regression (see DS4FORK.md KVCACHE — Deep Divergence Investigation)", test_kv_cache_head_divergence_anchor_depth},
 };
 
 static void test_print_help(const char *prog) {
@@ -6647,6 +6648,10 @@ static void test_print_help(const char *prog) {
 #endif
     puts("  -h, --help");
     puts("      Show this help.");
+    puts("\nOpt-in regressions:");
+    puts("  --kv-head-divergence");
+    puts("      Synthetic AGENTS.md head-divergence anchor-depth regression.");
+    puts("      Not part of --server; run explicitly (fast, no model needed).");
     puts("\nEnvironment:");
     puts("  DS4_TEST_MODEL=FILE        Model path. Default: ds4flash.gguf");
     puts("  DS4_TEST_SSD_STREAMING=1   Run model tests through Metal SSD streaming.");

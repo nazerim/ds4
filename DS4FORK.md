@@ -1032,3 +1032,90 @@ Plus existing: `--kv-cache-min-tokens`, `--kv-cache-cold-max-tokens`, `--kv-cach
 - Live stress (1GB budget, 3 interleaved synthetic sessions): cross-session frontier hits on switch-back, idle-lineage whole-branch retirement under pressure, active chain never touched, cold rebuild after retirement, clean shutdown store. Log signature: `reason=redundant` (middle pruning), `reason=conversation-retired` (branch/lineage), `reason=legacy-lru` (v1 singletons).
 - `make ds4-server` builds clean (0 warnings under `-Wall -Wextra -std=c99`).
 - Startup banner logs `continued_step` and `prefill_chunk` so the effective anchor grid is observable.
+
+---
+
+# KVCACHE — Deep Divergence Investigation (IN PROGRESS)
+
+Tracking for the 10:27:35 cache-miss incident and the follow-up investigation. Do not close until both open questions are resolved.
+
+## Incident (log/ds4.log, session `ses_02d7f1ead...` "Clone cleos repo")
+
+```
+10:27:35 live kv cache miss live=118628 prompt=119239 common=34748 reason=token-mismatch
+10:27:35 kv cache evicted reason=redundant conv=8875221508171815956 level=0 tokens=106496
+10:27:35 kv cache stored tokens=118628 trimmed=0 reason=evict
+10:27:36 kv cache hit text tokens=16384  → chat ctx=16384..119239:102855 prompt (≈419 s prefill)
+```
+
+Same session, three misses total:
+
+| Time | live | prompt | common | disk recovered | outcome |
+|---|---|---|---|---|---|
+| 10:20:26 | 44463 | 108701 | 22218 | 108683 | good hit |
+| 10:20:58 | 109563 | 110819 | 33595 | 109447 | good hit |
+| 10:27:35 | 118628 | 119239 | 34748 | 16384 | bad miss → 102855-token prefill |
+
+## What is already established (evidence, not speculation)
+
+1. **Our fix IS in the running binary.** `df7da13` committed 10:14:32, `ds4-server` built 10:14:49, server started 10:16:52. The eviction-protect-text fix is therefore NOT the cause.
+2. **The eviction fix WORKS.** Misses 1–2 (10:20) recovered 108683/109447 tokens from disk — the pre-load persist no longer evicts prompt ancestors.
+3. **Case 3 is a client re-rendering divergence, not eviction.** `common=34748` is the byte/token prefix shared between the live session and the incoming prompt. The divergence point (~22k–35k in all three misses) sits **inside the original 43265-token first prompt** — i.e. the client (opencode) re-rendered the *middle* of the conversation with different bytes, so the live byte stream and the prompt diverge far from the tool-call tail.
+4. **The 24k/32k/40k anchors were stored (10:17–10:18) and still on disk at 10:27:35** (evicted only at 10:30:03/10:30:36). The load (`kv_cache_find_text_prefix_skip`, byte-prefix SHA) rejected them because their byte-prefix extends past the divergence point — they no longer prefix the prompt. Not a retention/eviction bug; the anchors exist but are stale w.r.t. the new render.
+5. **Canonicalization never ran.** `should_canonicalize_tool_checkpoint` (ds4_server.c:11019) returns `false` whenever `raw_tool_text` is set, and all 23 tool calls this session had `raw_tool_text=1`. Zero `canonicalized` log lines. `canonicalize_tool_checkpoint` is the mechanism designed to keep the live checkpoint aligned with what the *next* request renders — if it had run, the divergence would likely not have accumulated to a deep miss.
+6. Upstream `51a1c14` (tool-call recovery from unclosed reasoning) is **not** implicated: no recovery events in the log, and the divergence is unrelated to that path.
+
+## Verification (production + synthetic regression)
+
+- **Production (14:43 run, small_dense=49152):** AGENTS.md divergence at 15:34:15 (`live=245205`, `prompt=245496`, `common=34790`) now loads from **32768** instead of 16384 (`kv cache hit text tokens=32768`). The fix is confirmed live.
+- **Synthetic regression test:** `test_kv_cache_head_divergence_anchor_depth` (ds4_server.c) — opt-in via `./ds4_test --kv-head-divergence` (fast, stub-based, no model; NOT part of `--server`). It builds a fake 36k-byte shared head, diverges `IN PROGRESS` → `DONE` at byte 36000, and asserts:
+  - Part 1: with all anchors present + `small_dense=49152`, load picks the deepest valid anchor (32768).
+  - Part 2a: with old `small_dense=16384` + budget pressure, 24k/32k are pruned → load falls to 16384.
+  - Part 2b: with `small_dense=49152` + sufficient budget, 24k/32k are sticky → load starts at 32768.
+  - Guards both the retention fix and the load-side anchor selection. Registered in `tests/ds4_test.c` test_entries with its own flag.
+
+## Trace-confirmed root cause (log/ds4.trace, request 28 at 12:13:32)
+
+```
+first_mismatch_token: 35224
+token_window: [35216..35233)
+  35223 ==  live " —"  | prompt " —"
+  35224 !=  live " IN" | prompt " D"    ← "Phase 1 — IN PROGRESS" → "Phase 1 — DONE"
+  35225 !=  live " PRO" | prompt "ONE"
+```
+
+The divergence is a **real content edit near the head**: opencode edited `AGENTS.md` (`Phase 1 — IN PROGRESS` → `Phase 1 — DONE`) and re-rendered the whole prompt with the updated file content embedded at ~token 35k. Not a DSML-canonicalization mismatch and not an eviction bug — the client genuinely changed the byte stream mid-conversation.
+
+At the miss (12:13:32, `prompt=159353`, `cached=16384`) a **32768 anchor was still on disk** (it was evicted only at 12:15:54, *after* the miss). The load skipped it because of `small_dense=16384`: anchors ≤16k are sticky, but 24k/32k/40k live in the **sparse-middle** region (`mid_spacing=131072`), which keeps only the largest anchor per window and prunes the rest as redundant. So the deepest usable anchor was 16384.
+
+## Applied mitigation (commit/pending)
+
+- **Raised `KV_SMALL_DENSE` to 49152** in `ds4-server.sh` (env-overridable). Now all anchors ≤ ~48k are sticky, so an AGENTS.md-style head divergence restarts from the deepest surviving anchor (≈48k) instead of 16k.
+
+| anchor | rebuild tokens (from the 12:13:32 incident, prompt=159353) | ~time @260 t/s |
+|---|---|---|
+| 16384 (old default) | 142969 | ~9.2 min |
+| 32768 | 126585 | ~8.1 min |
+| 49152 (new) | 110201 | ~7.1 min |
+
+## Open questions
+
+- **Q2 — Cost of canonicalization vs cost of recovery.**
+  - *Canonicalization cost*: `canonicalize_tool_checkpoint` re-tokenizes the canonical next-prompt render + `ds4_session_rewrite_from_common` per tool-call finish. Cheap when common is near-live (small suffix rewrite); expensive if it must rebuild a long divergent tail.
+  - *Recovery cost*: rebuild = `prompt_len − common` tokens at observed ~250–335 t/s (the 10:27:35 case was ~102855 tokens ≈ 419 s ≈ 7 min).
+  - **Finding:** canonicalization does NOT help this class of divergence. It only fixes tool-call DSML re-render mismatches. An AGENTS.md content edit is a real byte change in the head — canonicalization cannot prevent it, and the divergence must be rebuilt regardless. It was also silently disabled the whole incident (`should_canonicalize_tool_checkpoint` returns false whenever `raw_tool_text` is set; all 23 tool calls had it).
+
+## Proposed fix directions
+
+1. **DONE (mitigation):** `KV_SMALL_DENSE=49152` — keeps a deeper head-anchor ladder so head divergences restart from ~48k, not 16k.
+2. **FEATURE — restitch (open):** truncate the live KV at `common` and prefill only the divergent tail (`prompt_len − common`), instead of reloading the deepest disk anchor and re-prefilling everything after it. The live session already has valid KV for positions 0..`common`. **Blocked by:** the GPU raw ring (`raw_cap ≈ n_swa`) only retains the most recent rows — position `common` is ~124k slots behind the frontier in the incident, so its rows are overwritten. Requires the KV backend to retain rows at arbitrary mid positions (or store a live checkpoint at `common` when a divergence is detected). This is the "restitch" that would cut the rebuild from `prompt_len − deepest_anchor` to `prompt_len − common`.
+3. Consider whether opencode's re-render (e.g. `Today's date:` / volatile bytes, or the AGENTS.md edit loop) can be made stable on the client side (out of scope server-side).
+
+## Status / tracking
+
+- [x] Restart server with `--trace` and capture `first_mismatch_token` for the next deep divergence.
+- [x] Analyze trace: identify exactly which token/message the client re-renders differently (AGENTS.md edit at token 35224).
+- [x] Q2: canonicalization does NOT help this divergence class; it only handles DSML tool-call re-renders.
+- [x] Raise `KV_SMALL_DENSE=49152` to keep the head-anchor ladder sticky.
+- [ ] FEATURE: restitch — truncate live KV at `common`, prefill only the divergent tail (needs mid-position KV retention).
+- [ ] Re-verify against a live long agent session.

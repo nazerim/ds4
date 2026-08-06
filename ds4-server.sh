@@ -19,10 +19,20 @@ PROXY_HOST="${PROXY_HOST:-0.0.0.0}"
 HOST="${HOST:-127.0.0.1}"
 KV_DIR="/tmp/ds4-kv"
 KV_SIZE=32768
+# KV anchor retention: small_dense keeps ALL anchors ≤ this token count sticky
+# (default 16384).  Raising it bounds head divergences (e.g. opencode re-renders
+# an edited AGENTS.md near the head) to restart from a deeper anchor instead of
+# falling to the 16k base — see DS4FORK.md "KVCACHE — Deep Divergence Investigation".
+KV_SMALL_DENSE="${KV_SMALL_DENSE:-49152}"
 LOG_DIR="./log"
 LOG_FILE="$LOG_DIR/ds4.log"
 TOKENS=384000
 MTP_MODEL="gguf/DeepSeek-V4-Flash-DSpark-support-0731.gguf"
+# Cache-miss trace: set TRACE_PATH to a file path (e.g. ./log/ds4.trace) to make
+# the server write the exact cache-decision + first-mismatch token window for
+# every request. Used for debugging KV divergence (see DS4FORK.md KVCACHE —
+# Deep Divergence Investigation). Empty = tracing off.
+TRACE_PATH="${TRACE_PATH:-}"
 
 # Alternative model map: short name -> full GGUF path
 # Add entries here for each model variant. Use `start-<name>` / `restart-<name>`.
@@ -150,6 +160,13 @@ start_server() {
     MTP_ARGS+=(--dspark-confidence "$DSPARK_CONFIDENCE")
   fi
 
+  # Build trace argument
+  TRACE_ARGS=()
+  if [ -n "$TRACE_PATH" ]; then
+    mkdir -p "$(dirname "$TRACE_PATH")"
+    TRACE_ARGS+=(--trace "$TRACE_PATH")
+  fi
+
   # Use ${arr[@]+"${arr[@]}"} to safely expand empty arrays on old bash
   $SERVER_CMD \
     ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"} \
@@ -159,7 +176,9 @@ start_server() {
     --port "$PORT" \
     --kv-disk-dir "$KV_DIR" \
     --kv-disk-space-mb "$KV_SIZE" \
+    --kv-cache-small-dense "$KV_SMALL_DENSE" \
     ${MTP_ARGS[@]+"${MTP_ARGS[@]}"} \
+    ${TRACE_ARGS[@]+"${TRACE_ARGS[@]}"} \
     > "$LOG_FILE" 2>&1 &
 
   local pid=$!
@@ -412,6 +431,10 @@ case "${1:-}" in
     echo "  PROXY_HOST          - Proxy bind address (default: 0.0.0.0)"
     echo "  PROXY_PORT          - Proxy port (default: 8002)"
     echo "  DS4_API_KEY         - Bearer token for the auth proxy (required to start)"
+    echo "  TRACE_PATH          - Write cache-decision trace to this file (e.g."
+    echo "                        TRACE_PATH=./log/ds4.trace). Empty = off."
+    echo "  KV_SMALL_DENSE      - Keep ALL KV anchors ≤ this token count sticky"
+    echo "                        (default: 49152). Raise to bound head-divergence rebuilds."
     exit 1
     ;;
 esac

@@ -17728,6 +17728,205 @@ static void test_kv_cache_evict_protects_prompt_ancestors(void) {
     rmdir(dir2);
 }
 
+/* Synthetic AGENTS.md head-divergence regression (2026-08-06 incident).
+ *
+ * opencode re-renders the full prompt each turn with the current AGENTS.md
+ * content embedded near the head.  When the agent edits AGENTS.md the byte
+ * stream diverges at the edited section (observed first_mismatch_token
+ * ~35k).  The disk load must restart from the DEEPEST anchor whose
+ * byte-prefix still matches the re-rendered prompt, not fall all the way back
+ * to the 16k base.
+ *
+ * We build a byte-identical shared head (36000 'A' bytes) and swap an
+ * "IN PROGRESS" marker for "DONE" so the old/new prompts diverge at byte
+ * offset 36000.  Anchors at 16k/24k/32k (before the divergence) are valid for
+ * the new prompt; anchors at 40k/48k (past it) must be rejected.  The load
+ * must pick the 32768 anchor.
+ *
+ * Part 2 exercises the small_dense=49152 retention fix: under the OLD default
+ * (16384) the 24k/32k anchors are pruned as redundant middles under budget
+ * pressure, so a head divergence falls back to 16384; with 49152 they are
+ * sticky and the load starts at 32768. */
+static void test_kv_cache_head_divergence_anchor_depth(void) {
+    char tmpl[] = "/tmp/ds4-kv-head-divergence.XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    TEST_ASSERT(dir != NULL);
+    if (!dir) return;
+
+    const uint64_t conv = 0xABCDull;
+    const uint64_t now = (uint64_t)time(NULL);
+    const size_t head_len = 36000;
+    const size_t prompt_cap = 49152 + 256; /* >= largest ladder byte + tail */
+    char *old_prompt = xmalloc(prompt_cap);
+    char *new_prompt = xmalloc(prompt_cap);
+    /* Shared head: 'A' * head_len.  Both prompts are byte-identical up to byte
+     * head_len, then diverge (old "IN PROGRESS" vs new "DONE"), then share a
+     * common 'T' tail.  Anchors at 16k/24k/32k live inside the shared head and
+     * must match the new prompt; anchors at 40k/48k span the divergence and
+     * must be rejected by byte-hash mismatch (not merely by length). */
+    memset(old_prompt, 'A', head_len);
+    memset(new_prompt, 'A', head_len);
+    memcpy(old_prompt + head_len, "IN PROGRESS marker", 18);
+    memcpy(new_prompt + head_len, "DONE", 4);
+    memset(old_prompt + head_len + 18, 'T', prompt_cap - head_len - 18 - 1);
+    memset(new_prompt + head_len + 4, 'T', prompt_cap - head_len - 4 - 1);
+    old_prompt[prompt_cap - 1] = '\0';
+    new_prompt[prompt_cap - 1] = '\0';
+
+    /* Byte-prefix ladder of the OLD prompt.  First three are inside the shared
+     * head (valid for the new prompt); last two extend past the divergence. */
+    struct { size_t bytes; uint32_t tokens; } ladder[] = {
+        { 16384, 16384 },
+        { 24576, 24576 },
+        { 32768, 32768 },
+        { 40960, 40960 },
+        { 49152, 49152 },
+    };
+    const size_t n_ladder = sizeof(ladder) / sizeof(ladder[0]);
+    for (size_t i = 0; i < n_ladder; i++) {
+        char *text = xmalloc(ladder[i].bytes + 1);
+        memcpy(text, old_prompt, ladder[i].bytes);
+        text[ladder[i].bytes] = '\0';
+        test_kv_conv_stub_file(dir, text, conv, 0, KV_REASON_COLD,
+                               ladder[i].tokens, 0, now, 1024);
+        free(text);
+    }
+
+    /* Part 1: all anchors present + small_dense=49152 (the fix) -> deepest
+     * valid anchor below the divergence is selected, not the 16k base. */
+    {
+        kv_disk_cache kc = {0};
+        kc.enabled = true;
+        kc.dir = xstrdup(dir);
+        kc.opt = kv_cache_default_options();
+        kc.opt.small_dense_tokens = 49152;
+        kc.budget_bytes = 200000; /* no pressure: anchors survive */
+
+        int idx = kv_cache_find_text_prefix(&kc, new_prompt, 2, 32768);
+        TEST_ASSERT(idx >= 0);
+        TEST_ASSERT(idx >= 0 && kc.entry[idx].tokens == 32768);
+        TEST_ASSERT(idx >= 0 && kc.entry[idx].text_bytes == 32768);
+
+        kv_cache_close(&kc);
+    }
+
+    /* Part 2a: OLD small_dense=16384 + budget pressure -> 24k/32k anchors are
+     * redundant middles and get evicted; a head divergence then restarts from
+     * the 16384 base (the pre-fix behavior). */
+    {
+        char tmpl_b[] = "/tmp/ds4-kv-head-divergence-b.XXXXXX";
+        char *dir_b = mkdtemp(tmpl_b);
+        TEST_ASSERT(dir_b != NULL);
+        if (dir_b) {
+            for (size_t i = 0; i < n_ladder; i++) {
+                char *text = xmalloc(ladder[i].bytes + 1);
+                memcpy(text, old_prompt, ladder[i].bytes);
+                text[ladder[i].bytes] = '\0';
+                test_kv_conv_stub_file(dir_b, text, conv, 0, KV_REASON_COLD,
+                                       ladder[i].tokens, 0, now, 1024);
+                free(text);
+            }
+            kv_disk_cache kc_b = {0};
+            kc_b.enabled = true;
+            kc_b.dir = xstrdup(dir_b);
+            kc_b.opt = kv_cache_default_options();
+            kc_b.opt.small_dense_tokens = 16384;
+            /* 5 files x (72 + 4 + text + 1024) = 169340.  Budget 120000 keeps
+             * small-dense (16384) + tail (40960, 49152) = 109796 and forces the
+             * two redundant middles (24576, 32768) out. */
+            kc_b.budget_bytes = 120000;
+            kv_cache_evict(&kc_b, NULL, 0, NULL);
+            char *mid = xmalloc(32768 + 1); /* largest probe below */
+            memcpy(mid, old_prompt, 24576);
+            mid[24576] = '\0';
+            TEST_ASSERT(!kv_file_exists(dir_b, mid)); /* 24k pruned */
+            memcpy(mid, old_prompt, 32768);
+            mid[32768] = '\0';
+            TEST_ASSERT(!kv_file_exists(dir_b, mid)); /* 32k pruned */
+            free(mid);
+
+            int idx = kv_cache_find_text_prefix(&kc_b, new_prompt, 2, 32768);
+            TEST_ASSERT(idx >= 0);
+            TEST_ASSERT(idx >= 0 && kc_b.entry[idx].tokens == 16384);
+
+            kv_cache_close(&kc_b);
+            for (size_t i = 0; i < n_ladder; i++) {
+                char *text = xmalloc(ladder[i].bytes + 1);
+                memcpy(text, old_prompt, ladder[i].bytes);
+                text[ladder[i].bytes] = '\0';
+                char *p = test_kv_path_for_text(dir_b, text);
+                unlink(p);
+                free(p);
+                free(text);
+            }
+            rmdir(dir_b);
+        }
+    }
+
+    /* Part 2b: NEW small_dense=49152, budget large enough to hold the head
+     * ladder (the production case: 32 GiB budget easily fits these anchors).
+     * The 24k/32k anchors are sticky and survive; the load starts at 32768. */
+    {
+        char tmpl_c[] = "/tmp/ds4-kv-head-divergence-c.XXXXXX";
+        char *dir_c = mkdtemp(tmpl_c);
+        TEST_ASSERT(dir_c != NULL);
+        if (dir_c) {
+            for (size_t i = 0; i < n_ladder; i++) {
+                char *text = xmalloc(ladder[i].bytes + 1);
+                memcpy(text, old_prompt, ladder[i].bytes);
+                text[ladder[i].bytes] = '\0';
+                test_kv_conv_stub_file(dir_c, text, conv, 0, KV_REASON_COLD,
+                                       ladder[i].tokens, 0, now, 1024);
+                free(text);
+            }
+            kv_disk_cache kc_c = {0};
+            kc_c.enabled = true;
+            kc_c.dir = xstrdup(dir_c);
+            kc_c.opt = kv_cache_default_options();
+            kc_c.opt.small_dense_tokens = 49152;
+            kc_c.budget_bytes = 200000; /* no pressure: ladder survives */
+            kv_cache_evict(&kc_c, NULL, 0, NULL);
+            char *mid = xmalloc(32768 + 1);
+            memcpy(mid, old_prompt, 32768);
+            mid[32768] = '\0';
+            TEST_ASSERT(kv_file_exists(dir_c, mid)); /* 32k sticky */
+            memcpy(mid, old_prompt, 24576);
+            mid[24576] = '\0';
+            TEST_ASSERT(kv_file_exists(dir_c, mid)); /* 24k sticky */
+            free(mid);
+
+            int idx = kv_cache_find_text_prefix(&kc_c, new_prompt, 2, 32768);
+            TEST_ASSERT(idx >= 0);
+            TEST_ASSERT(idx >= 0 && kc_c.entry[idx].tokens == 32768);
+
+            kv_cache_close(&kc_c);
+            for (size_t i = 0; i < n_ladder; i++) {
+                char *text = xmalloc(ladder[i].bytes + 1);
+                memcpy(text, old_prompt, ladder[i].bytes);
+                text[ladder[i].bytes] = '\0';
+                char *p = test_kv_path_for_text(dir_c, text);
+                unlink(p);
+                free(p);
+                free(text);
+            }
+            rmdir(dir_c);
+        }
+    }
+
+    for (size_t i = 0; i < n_ladder; i++) {
+        char *text = xmalloc(ladder[i].bytes + 1);
+        memcpy(text, old_prompt, ladder[i].bytes);
+        text[ladder[i].bytes] = '\0';
+        char *p = test_kv_path_for_text(dir, text);
+        unlink(p);
+        free(p);
+        free(text);
+    }
+    rmdir(dir);
+    free(old_prompt);
+    free(new_prompt);
+}
+
 static void test_kv_cache_stale_at_load(void) {
     /* mark_stale_at_load is decommissioned (inert): it must NOT set a stale
      * flag on any checkpoint, whether it byte-prefixes the prompt or not. */
