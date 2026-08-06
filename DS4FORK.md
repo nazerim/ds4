@@ -1035,9 +1035,9 @@ Plus existing: `--kv-cache-min-tokens`, `--kv-cache-cold-max-tokens`, `--kv-cach
 
 ---
 
-# KVCACHE — Deep Divergence Investigation (IN PROGRESS)
+# KVCACHE — Deep Divergence Investigation (COMPLETE)
 
-Tracking for the 10:27:35 cache-miss incident and the follow-up investigation. Do not close until both open questions are resolved.
+Tracking for the 10:27:35 cache-miss incident and the follow-up investigation. Investigation is complete; both open questions are resolved and all mitigations are committed (`98e75ec`, `a64e6b2`, `6b2e3a3`).
 
 ## Incident (log/ds4.log, session `ses_02d7f1ead...` "Clone cleos repo")
 
@@ -1088,7 +1088,7 @@ The divergence is a **real content edit near the head**: opencode edited `AGENTS
 
 At the miss (12:13:32, `prompt=159353`, `cached=16384`) a **32768 anchor was still on disk** (it was evicted only at 12:15:54, *after* the miss). The load skipped it because of `small_dense=16384`: anchors ≤16k are sticky, but 24k/32k/40k live in the **sparse-middle** region (`mid_spacing=131072`), which keeps only the largest anchor per window and prunes the rest as redundant. So the deepest usable anchor was 16384.
 
-## Applied mitigation (commit/pending)
+## Applied mitigation (committed)
 
 - **Raised `KV_SMALL_DENSE` to 49152** in `ds4-server.sh` (env-overridable). Now all anchors ≤ ~48k are sticky, so an AGENTS.md-style head divergence restarts from the deepest surviving anchor (≈48k) instead of 16k.
 
@@ -1098,18 +1098,20 @@ At the miss (12:13:32, `prompt=159353`, `cached=16384`) a **32768 anchor was sti
 | 32768 | 126585 | ~8.1 min |
 | 49152 (new) | 110201 | ~7.1 min |
 
-## Open questions
+## Open questions (resolved)
 
 - **Q2 — Cost of canonicalization vs cost of recovery.**
   - *Canonicalization cost*: `canonicalize_tool_checkpoint` re-tokenizes the canonical next-prompt render + `ds4_session_rewrite_from_common` per tool-call finish. Cheap when common is near-live (small suffix rewrite); expensive if it must rebuild a long divergent tail.
   - *Recovery cost*: rebuild = `prompt_len − common` tokens at observed ~250–335 t/s (the 10:27:35 case was ~102855 tokens ≈ 419 s ≈ 7 min).
   - **Finding:** canonicalization does NOT help this class of divergence. It only fixes tool-call DSML re-render mismatches. An AGENTS.md content edit is a real byte change in the head — canonicalization cannot prevent it, and the divergence must be rebuilt regardless. It was also silently disabled the whole incident (`should_canonicalize_tool_checkpoint` returns false whenever `raw_tool_text` is set; all 23 tool calls had it).
 
-## Proposed fix directions
+## Applied fixes
 
-1. **DONE (mitigation):** `KV_SMALL_DENSE=49152` — keeps a deeper head-anchor ladder so head divergences restart from ~48k, not 16k. Verified live (15:34:15 miss loaded from 32768).
-2. **FEATURE — restitch (CLOSED, not worth building):** the idea was to truncate the live KV at `common` and prefill only the divergent tail (`prompt_len − common`) instead of reloading the deepest disk anchor. **Quantified and rejected:** in the 15:34:15 incident (common=34790, anchor=32768, prompt=245496) restitch would save only `34790 − 32768 = 2022 tokens ≈ 8s` on a **844.7s** rebuild (~0.5%). After the `small_dense=49152` fix the deepest surviving anchor is already within one `anchor_step` of `common`, so the `anchor → common` gap is negligible. The dominant cost (`common → prompt_len`, ~211k tokens) is a genuine content change that no KV trick can avoid recomputing. It is also hard: the GPU raw ring retains only `raw_kv_rows=4352` rows, so at divergence time the live KV at position `common` (210k slots behind the frontier) is already overwritten — only a disk anchor can be loaded. The real lever is client-side (don't embed the edited file content mid-prompt).
-3. Consider whether opencode's re-render (e.g. `Today's date:` / volatile bytes, or the AGENTS.md edit loop) can be made stable on the client side (out of scope server-side).
+1. **DONE (mitigation, committed `98e75ec`):** `KV_SMALL_DENSE=49152` — keeps a deeper head-anchor ladder so head divergences restart from ~48k, not 16k. Verified live (15:34:15 miss loaded from 32768).
+2. **FEATURE — restitch (CLOSED, not worth building, committed `a64e6b2`):** the idea was to truncate the live KV at `common` and prefill only the divergent tail (`prompt_len − common`) instead of reloading the deepest disk anchor. **Quantified and rejected:** in the 15:34:15 incident (common=34790, anchor=32768, prompt=245496) restitch would save only `34790 − 32768 = 2022 tokens ≈ 8s` on a **844.7s** rebuild (~0.5%). After the `small_dense=49152` fix the deepest surviving anchor is already within one `anchor_step` of `common`, so the `anchor → common` gap is negligible. The dominant cost (`common → prompt_len`, ~211k tokens) is a genuine content change that no KV trick can avoid recomputing. It is also hard: the GPU raw ring retains only `raw_kv_rows=4352` rows, so at divergence time the live KV at position `common` (210k slots behind the frontier) is already overwritten — only a disk anchor can be loaded. The real lever is client-side (don't embed the edited file content mid-prompt).
+3. **DONE (mitigation, committed `6b2e3a3`): divergent small-dense branch pruning** — a re-rendered head stores a FRESH 40960/49152 anchor per divergence; old branches (same `conv_id` + same token count + different bytes) are unreachable and were kept unconditionally by `small_dense`, accumulating ~6.1 GiB. `ds4_kvstore_sweep_small_dense_divergents` now prunes them even under budget (at open + after continued stores). Regression: `test_kv_cache_small_dense_divergent_prune`.
+4. **DONE (mitigation, committed `6b2e3a3`): `KV_SIZE` default 32768→65536 MiB** so two ultra-long conversations (each ~50 GiB ladder) can share the budget without retiring each other's KV.
+5. Consider whether opencode's re-render (e.g. `Today's date:` / volatile bytes, or the AGENTS.md edit loop) can be made stable on the client side (out of scope server-side).
 
 ## Status / tracking
 
