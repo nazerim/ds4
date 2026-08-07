@@ -424,13 +424,20 @@ else
 	$(NVCC) $(NVCCFLAGS) -o $@ ds4_agent_test.o ds4_help.o ds4_web.o ds4_kvstore.o linenoise.o $(CORE_OBJS) $(CUDA_LDLIBS)
 endif
 
+# KV-cache v2 policy harness (PLAN-KV-REWRITE.md phase 5): replays the
+# session-switch churn / idle-retire / divergence-anchor scenarios against the
+# eviction policy without a model.  Darwin-only (Metal objects).
+tests/kv_policy_harness: tests/kv_policy_harness.c ds4_kvstore.o ds4_help.o rax.o $(CORE_OBJS)
+	$(CC) $(CFLAGS) -I. -o $@ $^ $(METAL_LDLIBS)
+
 test: ds4_test ds4_agent_test ds4-eval q4k-dot-test mxfp4-dot-test \
 	tests/test_layer_pack tests/test_engine_mgpu_placement tests/test_gpu_args \
-	tests/test_spec_rejection \
+	tests/test_spec_rejection tests/kv_policy_harness \
 	$(SAMPLING_TEST) ds4 ds4-server ds4-bench ds4-agent
 	./ds4-eval --self-test-extractors
 	./ds4_agent_test
 	./ds4_test
+	./tests/kv_policy_harness
 	./tests/test_layer_pack
 	./tests/test_engine_mgpu_placement
 	./tests/test_gpu_args

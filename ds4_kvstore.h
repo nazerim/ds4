@@ -19,6 +19,8 @@
 #define DS4_KVSTORE_DEFAULT_TAIL_ANCHORS 2
 #define DS4_KVSTORE_DEFAULT_MID_SPACING 131072
 #define DS4_KVSTORE_DEFAULT_MIN_ANCHORS 4
+#define DS4_KVSTORE_DEFAULT_RETIRE_GRACE_SECONDS 3600
+#define DS4_KVSTORE_DEFAULT_MAX_DIVERGENCE_ANCHORS 8
 
 #define DS4_KVSTORE_EXT_TOOL_MAP          (1u << 0)
 #define DS4_KVSTORE_EXT_RESPONSES_VISIBLE (1u << 1)
@@ -90,6 +92,11 @@ typedef struct {
     int prefill_chunk;          /* engine prefill chunk in tokens; the continued-store
                                  * grid is aligned to it so anchors actually land.
                                  * 0 = unknown (align to boundary_align only). */
+    int retire_grace_seconds;   /* a lineage whose leaf recency is newer than this
+                                 * many seconds is exempt from PHASE C retirement
+                                 * (frontier pinning). 0 = disabled. */
+    int max_divergence_anchors; /* per-lineage cap on reason=cold divergence anchors
+                                 * stored at the miss common-prefix point. 0=off. */
 } ds4_kvstore_options;
 
 /* Process-lifetime cache of one checkpoint's rendered text, keyed by sha.
@@ -113,6 +120,12 @@ typedef struct {
      * API.  The HTTP server tracks this per-slot (server_slot.continued_last_store_tokens)
      * and overrides it through a view, so this field is not used on the server path. */
     int continued_last_store_tokens;
+    /* Pending divergence anchor: when a miss loads anchor A < common, the
+     * server sets this to `common`.  Once the live session reaches the target
+     * (KV payload exists), maybe_store_continued additionally stores a
+     * reason=cold anchor at exactly the target, so a future identical miss
+     * starts from `common` instead of A.  0 = none. */
+    int divergence_target_tokens;
     ds4_kvstore_entry *entry;
     int len;
     int cap;
@@ -194,11 +207,16 @@ int ds4_kvstore_chat_anchor_pos(const ds4_kvstore *kc,
                                 int user_token_id,
                                 int assistant_token_id);
 int ds4_kvstore_continued_store_target(const ds4_kvstore *kc, int live_tokens);
+/* Effective continued-store step (anchor_step aligned to prefill chunk). */
+int ds4_kvstore_continued_step(const ds4_kvstore *kc);
 void ds4_kvstore_note_store(ds4_kvstore *kc, int tokens);
 int ds4_kvstore_suppress_continued_store(ds4_kvstore *kc, int tokens);
 void ds4_kvstore_restore_suppressed_continued(ds4_kvstore *kc,
                                               int old_tokens,
                                               int suppressed_tokens);
+/* Request a divergence anchor at `tokens` (the miss common-prefix point).  A
+ * later maybe_store_continued stores it once the live session reaches it. */
+void ds4_kvstore_set_divergence_target(ds4_kvstore *kc, int tokens);
 
 bool ds4_kvstore_file_size_fits(const ds4_kvstore *kc,
                                 uint64_t text_bytes,

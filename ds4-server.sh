@@ -18,16 +18,27 @@ PROXY_HOST="${PROXY_HOST:-0.0.0.0}"
 # HOST=0.0.0.0 or HOST=192.168.1.20 to expose the server on the LAN.
 HOST="${HOST:-127.0.0.1}"
 KV_DIR="/tmp/ds4-kv"
-# KV disk budget in MiB. Default 65536 (64 GiB): a single ultra-long conversation
-# (328k+ tokens, e.g. ctx=512000) holds a ~50 GiB continued-anchor ladder; two
-# such conversations cannot share the old 32 GiB default without one retiring the
-# other.  See DS4FORK.md "KVCACHE — Deep Divergence Investigation".
-KV_SIZE="${KV_SIZE:-65536}"
+# KV disk budget in MiB. Default 131072 (128 GiB): a single ultra-long conversation
+# (328k+ tokens, e.g. ctx=512000) holds a ~50-70 GiB continued-anchor ladder, and
+# two such conversations must coexist without one retiring the other's KV.  The
+# retire-grace policy (KV_CACHE_RETIRE_GRACE) protects recently-live lineages, but
+# the budget must still fit both ladders.  SSD endurance is a non-issue at the
+# observed ~0.3 TiB/day write rate on a 2 TB drive.  See DS4FORK.md "KVCACHE —
+# Deep Divergence Investigation" and PLAN-KV-REWRITE.md.
+KV_SIZE="${KV_SIZE:-131072}"
 # KV anchor retention: small_dense keeps ALL anchors ≤ this token count sticky
 # (default 16384).  Raising it bounds head divergences (e.g. opencode re-renders
 # an edited AGENTS.md near the head) to restart from a deeper anchor instead of
 # falling to the 16k base — see DS4FORK.md "KVCACHE — Deep Divergence Investigation".
 KV_SMALL_DENSE="${KV_SMALL_DENSE:-49152}"
+# Retire-grace (seconds): a lineage whose leaf was touched within this window is
+# exempt from PHASE C retirement (frontier pinning) — stops session-switch churn
+# where a just-live session's whole ladder was retired mid-switch.  0 = disabled.
+KV_RETIRE_GRACE="${KV_RETIRE_GRACE:-3600}"
+# Divergence anchors: after a miss that loads anchor A < common, store a cold
+# anchor at exactly `common` once the rebuild reaches it, so a future identical
+# miss starts from `common` instead of A.  0 = disabled.
+KV_MAX_DIVERGENCE_ANCHORS="${KV_MAX_DIVERGENCE_ANCHORS:-8}"
 LOG_DIR="./log"
 LOG_FILE="$LOG_DIR/ds4.log"
 TOKENS=384000
@@ -181,6 +192,8 @@ start_server() {
     --kv-disk-dir "$KV_DIR" \
     --kv-disk-space-mb "$KV_SIZE" \
     --kv-cache-small-dense "$KV_SMALL_DENSE" \
+    --kv-cache-retire-grace-seconds "$KV_RETIRE_GRACE" \
+    --kv-cache-max-divergence-anchors "$KV_MAX_DIVERGENCE_ANCHORS" \
     ${MTP_ARGS[@]+"${MTP_ARGS[@]}"} \
     ${TRACE_ARGS[@]+"${TRACE_ARGS[@]}"} \
     > "$LOG_FILE" 2>&1 &

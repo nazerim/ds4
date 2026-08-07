@@ -8511,6 +8511,11 @@ struct server_slot {
     live_tool_state anthropic_live;
     visible_live_state thinking_live;
     int continued_last_store_tokens;
+    /* Pending divergence anchor (miss common-prefix point): once this slot's
+     * live session reaches the target, a reason=cold anchor is stored at
+     * exactly `divergence_target_tokens` so a future identical miss starts
+     * from `common` instead of the older loaded anchor.  0 = none. */
+    int divergence_target_tokens;
 
     job *assigned;
     bool busy;
@@ -9693,10 +9698,46 @@ static void kv_cache_maybe_store_continued(server *s, server_slot *slot) {
     const ds4_tokens *tokens = ds4_session_tokens(slot->session);
     if (!tokens) return;
     const int target = kv_cache_slot_continued_target(s, slot, tokens->len);
-    if (target == 0) return;
+    if (target == 0) {
+        /* No continued-store boundary here, but a divergence anchor may be
+         * pending and reachable: store it at the miss common-prefix so a
+         * future identical miss starts from `common` instead of the older
+         * anchor. */
+        int div_target = slot->divergence_target_tokens;
+        if (div_target > 0 && tokens->len >= div_target) {
+            const int step = ds4_kvstore_continued_step(kc);
+            if (step > 0 && div_target % step == 0)
+                div_target = 0; /* on the continued grid: already covered */
+            else
+                slot->divergence_target_tokens = 0;
+        }
+        if (div_target > 0) {
+            if (kv_cache_store_live_prefix(s, slot, tokens, div_target, "cold"))
+                server_log(DS4_LOG_KVCACHE,
+                           "ds4-server: divergence anchor stored tokens=%d",
+                           div_target);
+        }
+        return;
+    }
     if (kv_cache_store_live_prefix(s, slot, tokens, target, "continued")) {
         (void)kc;
         kv_cache_slot_note_store(slot, target);
+        /* Fire a pending divergence anchor that landed at the same boundary
+         * as this continued store (already covered) or at a different point
+         * (fire now if reachable). */
+        int div_target = slot->divergence_target_tokens;
+        if (div_target > 0) {
+            if (div_target == target || tokens->len < div_target)
+                div_target = 0;
+            else
+                slot->divergence_target_tokens = 0;
+        }
+        if (div_target > 0) {
+            if (kv_cache_store_live_prefix(s, slot, tokens, div_target, "cold"))
+                server_log(DS4_LOG_KVCACHE,
+                           "ds4-server: divergence anchor stored tokens=%d",
+                           div_target);
+        }
     }
 }
 
@@ -11344,6 +11385,18 @@ static void generate_job(server *s, server_slot *slot, job *j) {
             /* Restore the slot's continued-store watermark to the loaded frontier
              * so we do not re-fire a continued store at tokens already on disk. */
             slot->continued_last_store_tokens = disk_cached;
+        }
+        /* Divergence anchor: the loaded anchor A < common (the miss common-
+         * prefix).  Once the rebuild reaches `common` the KV payload exists
+         * there; store a reason=cold anchor at exactly `common` so a future
+         * identical miss starts from `common` instead of A.  The text that
+         * prefixes at `common` is the prompt's, which the rebuild reproduces
+         * exactly (the divergence is client-side and stable). */
+        if (disk_cached > 0 && common > disk_cached) {
+            slot->divergence_target_tokens = common;
+            server_log(DS4_LOG_KVCACHE,
+                       "ds4-server: divergence anchor requested at common=%d (disk=%d)",
+                       common, disk_cached);
         }
     }
     const bool responses_reasoning_state_preserved =
@@ -13090,6 +13143,10 @@ static server_config parse_options(int argc, char **argv) {
             c.kv_cache.min_anchors = parse_nonneg_int_arg(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--kv-cache-max-conversations")) {
             c.kv_cache.max_conversations = parse_nonneg_int_arg(need_arg(&i, argc, argv, arg), arg);
+        } else if (!strcmp(arg, "--kv-cache-retire-grace-seconds")) {
+            c.kv_cache.retire_grace_seconds = parse_nonneg_int_arg(need_arg(&i, argc, argv, arg), arg);
+        } else if (!strcmp(arg, "--kv-cache-max-divergence-anchors")) {
+            c.kv_cache.max_divergence_anchors = parse_nonneg_int_arg(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--kv-cache-reject-different-quant")) {
             c.kv_cache_reject_different_quant = true;
         } else if (!strcmp(arg, "--disable-exact-dsml-tool-replay")) {
@@ -17074,6 +17131,35 @@ static void test_kv_cache_cold_store_suppresses_duplicate_continued_boundary(voi
     TEST_ASSERT(kv_cache_continued_store_target(&kc, 8192) == 8192);
 }
 
+static void test_kv_cache_divergence_target_logic(void) {
+    /* Divergence-anchor decision logic (the store itself needs a live session
+     * with a KV payload, exercised end-to-end in live verification):
+     * - set_divergence_target records a pending target;
+     * - targets below min_tokens are rejected;
+     * - max_divergence_anchors=0 disables the feature;
+     * - a target on the continued grid (8192) is skipped at fire time (the
+     *   continued store already covers that exact text). */
+    kv_disk_cache kc = {0};
+    kc.enabled = true;
+    kc.opt = kv_cache_default_options();
+    kc.opt.min_tokens = 512;
+
+    ds4_kvstore_set_divergence_target(&kc, 23420);
+    TEST_ASSERT(kc.divergence_target_tokens == 23420);
+
+    ds4_kvstore_set_divergence_target(&kc, 100);  /* below min_tokens */
+    TEST_ASSERT(kc.divergence_target_tokens == 23420);
+
+    kc.opt.max_divergence_anchors = 0;            /* feature disabled */
+    ds4_kvstore_set_divergence_target(&kc, 30000);
+    TEST_ASSERT(kc.divergence_target_tokens == 23420);
+
+    kc.opt.max_divergence_anchors = 8;
+    kc.divergence_target_tokens = 0;
+    ds4_kvstore_set_divergence_target(&kc, 16384); /* on the 8192 grid */
+    TEST_ASSERT(kc.divergence_target_tokens == 16384);
+}
+
 static void test_kv_cache_file_size_must_fit_budget(void) {
     kv_disk_cache kc = {0};
     kc.budget_bytes = 1100;
@@ -18403,6 +18489,7 @@ static void test_kv_cache_max_conversations_retires_lru(void) {
     kc.dir = xstrdup(dir);
     kc.opt = kv_cache_default_options();
     kc.opt.max_conversations = 1;          /* keep at most one non-active conv */
+    kc.opt.retire_grace_seconds = 0;       /* pure-LRU semantics for this test */
     kc.budget_bytes = 1ull << 40;          /* budget is not the pressure here */
 
     ds4_kvstore_eviction_context incoming = {0};
@@ -18455,6 +18542,7 @@ static void test_kv_cache_lru_uses_last_activity_not_creation(void) {
     kc.dir = xstrdup(dir);
     kc.opt = kv_cache_default_options();
     kc.opt.max_conversations = 1;     /* keep active + at most one other conv */
+    kc.opt.retire_grace_seconds = 0;  /* pure-LRU semantics for this test */
     kc.budget_bytes = 1ull << 40;     /* budget is not the pressure here */
 
     ds4_kvstore_eviction_context incoming = {0};
@@ -18680,6 +18768,119 @@ static void test_kv_cache_retirement_at_floor(void) {
     rmdir(dir);
 }
 
+static void test_kv_cache_retire_grace_protects_recent(void) {
+    /* Retire-grace (frontier pinning): a lineage whose leaf was touched within
+     * retire_grace_seconds is exempt from PHASE C retirement even when it is
+     * the globally-oldest *eligible* lineage.  This stops the field-observed
+     * churn where a just-live session's whole ladder was retired mid-switch.
+     * - A (touch now-200000, outside grace) is the LRU -> retired.
+     * - B (touch now-50, within grace) is next-LRU -> pinned, survives.
+     * The incoming text is unrelated to both (neither is on the active chain),
+     * so grace (not active-chain protection) is what saves B. */
+    char tmpl[] = "/tmp/ds4-kv-retire-grace-test.XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    TEST_ASSERT(dir != NULL);
+    if (!dir) return;
+
+    const char *a_text = "grace test lineage A old";
+    const char *b_text = "grace test lineage B recent";
+    const char *in_text = "grace test active incoming prompt";
+    const uint64_t now = (uint64_t)time(NULL);
+    test_kv_conv_stub_file(dir, a_text, 0, 0, KV_REASON_COLD, 100000, 0,
+                           now - 200000, 512);
+    test_kv_conv_stub_file(dir, b_text, 0, 0, KV_REASON_COLD, 100000, 0,
+                           now - 50, 512);
+
+    kv_disk_cache kc = {0};
+    kc.enabled = true;
+    kc.dir = xstrdup(dir);
+    kc.opt = kv_cache_default_options();
+    kc.opt.retire_grace_seconds = 3600;  /* default grace */
+    kc.opt.min_anchors = 1;              /* neither can be halved (1 anchor) */
+    kc.budget_bytes = 700;               /* force full pressure */
+
+    ds4_kvstore_eviction_context incoming = {
+        .text = in_text, .text_len = strlen(in_text),
+        .model_id = 0, .quant_bits = 2, .ctx_size = 32768,
+        .reject_different_quant = false,
+    };
+    kv_cache_evict(&kc, NULL, 0, &incoming);
+
+    TEST_ASSERT(kv_file_exists(dir, a_text) == false); /* old lineage retired */
+    TEST_ASSERT(kv_file_exists(dir, b_text)); /* recent lineage pinned by grace */
+
+    kv_cache_close(&kc);
+    const char *texts[] = {a_text, b_text};
+    for (int i = 0; i < 2; i++) {
+        char *p = test_kv_path_for_text(dir, texts[i]);
+        unlink(p);
+        free(p);
+    }
+    rmdir(dir);
+}
+
+static void test_kv_cache_retire_grace_halves_before_retire(void) {
+    /* PHASE B halving must still run on recently-active lineages (it is
+     * non-destructive); only PHASE C retirement is grace-gated.  A recent
+     * lineage with a halvable middle (2 anchors, min_anchors=1) must be
+     * halved (level bumped) rather than retired when pressure hits. */
+    char tmpl[] = "/tmp/ds4-kv-grace-halve-test.XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    TEST_ASSERT(dir != NULL);
+    if (!dir) return;
+
+    const char *b_deep = "grace halve lineage deepest middle";
+    const char *b_mid  = "grace halve lineage deepest middle upper";
+    const char *b_top  = "grace halve lineage deepest middle upper frontier";
+    const char *in_text = "grace halve active incoming prompt";
+    const uint64_t now = (uint64_t)time(NULL);
+    /* Three-anchor lineage: deep (60000, window 0), mid (180000, window 1),
+     * top (360000, window 2).  tail_anchors=2 protects the two below the
+     * frontier (mid, top); the DEEP anchor is kept only as window-largest.
+     * PHASE B halving (doubling the window) must run despite the lineage being
+     * recent (grace), making the deep anchor redundant so PHASE A evicts it —
+     * while retire (PHASE C) would have removed all three. */
+    test_kv_conv_stub_file(dir, b_deep, 0, 0, KV_REASON_COLD, 60000, 0,
+                           now - 40, 512);
+    test_kv_conv_stub_file(dir, b_mid, 0, 0, KV_REASON_COLD, 180000, 0,
+                           now - 35, 512);
+    test_kv_conv_stub_file(dir, b_top, 0, 0, KV_REASON_COLD, 360000, 0,
+                           now - 30, 512);
+
+    kv_disk_cache kc = {0};
+    kc.enabled = true;
+    kc.dir = xstrdup(dir);
+    kc.opt = kv_cache_default_options();
+    kc.opt.retire_grace_seconds = 3600;
+    kc.opt.min_anchors = 1;   /* halve a lineage with >= 2 exclusive anchors */
+    kc.budget_bytes = 1300;   /* total ~1891 B: forces eviction of one anchor,
+                                 leaves room for the two-anchor tail */
+
+    ds4_kvstore_eviction_context incoming = {
+        .text = in_text, .text_len = strlen(in_text),
+        .model_id = 0, .quant_bits = 2, .ctx_size = 32768,
+        .reject_different_quant = false,
+    };
+    kv_cache_evict(&kc, NULL, 0, &incoming);
+
+    /* The recent lineage must NOT be retired as a whole (grace + halving-over-
+     * retire): PHASE B doubles the middle window, making the deep anchor
+     * redundant, which the next pass evicts — the tail (mid, top) survives.
+     * A retire (PHASE C) would have removed all three. */
+    TEST_ASSERT(kv_file_exists(dir, b_deep) == false); /* halved out */
+    TEST_ASSERT(kv_file_exists(dir, b_mid));           /* tail survives */
+    TEST_ASSERT(kv_file_exists(dir, b_top));           /* frontier survives */
+
+    kv_cache_close(&kc);
+    const char *texts[] = {b_deep, b_mid, b_top};
+    for (int i = 0; i < 3; i++) {
+        char *p2 = test_kv_path_for_text(dir, texts[i]);
+        unlink(p2);
+        free(p2);
+    }
+    rmdir(dir);
+}
+
 static void test_kv_cache_lineage_three_branches_keep_frontiers(void) {
     /* Three lineages branch off a shared head.  Under budget pressure each
      * keeps its own frontier — the case that breaks when the grouping key
@@ -18854,6 +19055,7 @@ static void test_kv_cache_lineage_active_chain_never_retired(void) {
     kc.dir = xstrdup(dir);
     kc.opt = kv_cache_default_options();
     kc.opt.max_conversations = 1;  /* keep active + at most one idle lineage */
+    kc.opt.retire_grace_seconds = 0; /* pure-LRU semantics for this test */
     kc.budget_bytes = 1ull << 40;  /* budget is not the pressure here */
 
     const char *incoming_text = "AAold extended with a new user turn";
@@ -18994,6 +19196,7 @@ static void test_kv_cache_lineage_active_head_survives_overcap(void) {
     kc.dir = xstrdup(dir);
     kc.opt = kv_cache_default_options();
     kc.opt.max_conversations = 1;  /* keep active + at most one idle lineage */
+    kc.opt.retire_grace_seconds = 0; /* pure-LRU semantics for this test */
     kc.budget_bytes = 1ull << 40;  /* budget is not the pressure here */
     const char *incoming_text = "hello world, a brand new session";
     ds4_kvstore_eviction_context incoming = {
@@ -19635,6 +19838,7 @@ static void ds4_server_unit_tests_run(void) {
     test_kv_cache_chat_anchor_ignores_multiturn_tail();
     test_kv_cache_continued_uses_aligned_frontiers();
     test_kv_cache_cold_store_suppresses_duplicate_continued_boundary();
+    test_kv_cache_divergence_target_logic();
     test_kv_cache_file_size_must_fit_budget();
     test_sha1_bytes_hex_matches_known_vector();
     test_kv_cache_lookup_uses_longest_text_prefix();
@@ -19659,6 +19863,8 @@ static void ds4_server_unit_tests_run(void) {
     test_kv_cache_middle_anchor_per_window();
     test_kv_cache_halving_doubles_window();
     test_kv_cache_retirement_at_floor();
+    test_kv_cache_retire_grace_protects_recent();
+    test_kv_cache_retire_grace_halves_before_retire();
     test_kv_cache_lineage_three_branches_keep_frontiers();
     test_kv_cache_lineage_shared_ancestor_survives_retirement();
     test_kv_cache_lineage_halving_spares_shared_and_active();

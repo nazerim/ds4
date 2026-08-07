@@ -162,6 +162,8 @@ ds4_kvstore_options ds4_kvstore_default_options(void) {
         .mid_spacing_tokens = DS4_KVSTORE_DEFAULT_MID_SPACING,
         .min_anchors = DS4_KVSTORE_DEFAULT_MIN_ANCHORS,
         .max_conversations = 0,
+        .retire_grace_seconds = DS4_KVSTORE_DEFAULT_RETIRE_GRACE_SECONDS,
+        .max_divergence_anchors = DS4_KVSTORE_DEFAULT_MAX_DIVERGENCE_ANCHORS,
     };
 }
 
@@ -700,6 +702,8 @@ typedef struct {
 static bool kv_cache_entry_in_active_chain(ds4_kvstore *kc, int idx,
                                            const char *text, size_t text_len);
 static int64_t kv_cache_entry_last_used(const ds4_kvstore_entry *e);
+static int kv_cache_leaf_exclusive_count(ds4_kvstore *kc, const kv_chain_rel *r,
+                                         int leaf);
 
 static void kv_chain_rel_build(ds4_kvstore *kc, kv_chain_rel *r,
                                const char *active_text, size_t active_len,
@@ -965,10 +969,27 @@ static int64_t kv_cache_entry_last_used(const ds4_kvstore_entry *e) {
  * min) stops a long-running lineage's old small anchor from pinning its rank
  * to creation time and getting it halved/retired ahead of a genuinely idle
  * one. */
+/* Find the least-recently-used lineage leaf eligible for retirement:
+ * - not legacy, not on the active chain
+ * - has >= min_count exclusive members
+ * - when respect_grace is set, NOT within retire_grace of now (frontier
+ *   pinning: a lineage whose leaf was touched recently was likely the live
+ *   session in a slot; retiring it mid-session-switch is what caused the
+ *   deep-rebuild churn observed in the field).  PHASE B halving calls with
+ *   respect_grace=false because halving a recent lineage is non-destructive
+ *   and is always preferred over retiring it.
+ * Recency is the MOST-recent touch among exclusive members (max last_used):
+ * shared ancestors can be touched by other branches, so only branch-exclusive
+ * entries measure the branch's own activity.  Instrumentation: the chosen
+ * candidate (and any pinned-by-grace near-miss) is logged each pass. */
 static int kv_cache_find_lru_leaf(ds4_kvstore *kc, const kv_chain_rel *r,
-                                  int min_count) {
+                                  int min_count, bool respect_grace) {
+    const int64_t now = (int64_t)time(NULL);
     int best = -1;
     int64_t lru_recency = INT64_MAX;
+    int64_t best_recency = 0;
+    int would_retire_leaf = -1;
+    int64_t would_retire_age = 0;
     for (int i = 0; i < r->len; i++) {
         if (!kv_rel_is_leaf(r, i)) continue;
         if (kv_cache_entry_is_legacy(&kc->entry[i])) continue;
@@ -982,12 +1003,50 @@ static int kv_cache_find_lru_leaf(ds4_kvstore *kc, const kv_chain_rel *r,
             if (lu > branch_recency) branch_recency = lu;
         }
         if (cnt < min_count) continue;
+        const int64_t age = now - branch_recency;
+        if (respect_grace && kc->opt.retire_grace_seconds > 0 &&
+            age < kc->opt.retire_grace_seconds) {
+            /* Recently-active: pin it, but note it for instrumentation. */
+            if (would_retire_leaf < 0 ||
+                age < would_retire_age) {
+                would_retire_leaf = i;
+                would_retire_age = age;
+            }
+            continue;
+        }
         if (branch_recency < lru_recency) {
             lru_recency = branch_recency;
+            best_recency = branch_recency;
             best = i;
         }
     }
+    if (best >= 0) {
+        kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
+                "%s: kv cache lru-retire candidate leaf=%d conv=%llu tokens=%u recency_age=%llds exclusive=%d",
+                kv_log_name(kc), best,
+                (unsigned long long)kc->entry[best].conv_id,
+                (unsigned int)kc->entry[best].tokens,
+                (long long)(now - best_recency),
+                (int)kv_cache_leaf_exclusive_count(kc, r, best));
+    } else if (would_retire_leaf >= 0) {
+        kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
+                "%s: kv cache retire-candidate pinned by grace leaf=%d conv=%llu tokens=%u age=%llds (retire_grace=%ds); halving/other phases only",
+                kv_log_name(kc), would_retire_leaf,
+                (unsigned long long)kc->entry[would_retire_leaf].conv_id,
+                (unsigned int)kc->entry[would_retire_leaf].tokens,
+                (long long)would_retire_age,
+                kc->opt.retire_grace_seconds);
+    }
     return best;
+}
+
+/* Count of a leaf's exclusive members (for instrumentation). */
+static int kv_cache_leaf_exclusive_count(ds4_kvstore *kc, const kv_chain_rel *r,
+                                         int leaf) {
+    int n = 0;
+    for (int i = 0; i < r->len; i++)
+        if (kv_rel_exclusive_to(kc, r, i, leaf)) n++;
+    return n;
 }
 
 /* Distinct non-active, non-legacy lineages (leaf count). */
@@ -1170,7 +1229,7 @@ void ds4_kvstore_evict(ds4_kvstore *kc, const ds4_tokens *live,
                                protect_text, protect_len);
             const bool over =
                 kv_cache_count_lineages(kc, &r) > kc->opt.max_conversations;
-            int leaf = over ? kv_cache_find_lru_leaf(kc, &r, 1) : -1;
+            int leaf = over ? kv_cache_find_lru_leaf(kc, &r, 1, true) : -1;
             if (leaf >= 0) kv_cache_retire_leaf(kc, &r, leaf, &total);
             kv_chain_rel_free(&r);
             if (!over || leaf < 0) break;
@@ -1202,7 +1261,7 @@ void ds4_kvstore_evict(ds4_kvstore *kc, const ds4_tokens *live,
          * through to retirement. */
         int halve_min_count = kc->opt.min_anchors >= INT_MAX
             ? INT_MAX : kc->opt.min_anchors + 1;
-        int leaf = kv_cache_find_lru_leaf(kc, &r, halve_min_count);
+        int leaf = kv_cache_find_lru_leaf(kc, &r, halve_min_count, false);
         bool halved = false;
         if (leaf >= 0 && kv_cache_leaf_can_halve(kc, &r, leaf)) {
             for (int i = 0; i < kc->len; i++) {
@@ -1232,7 +1291,7 @@ void ds4_kvstore_evict(ds4_kvstore *kc, const ds4_tokens *live,
          * lineage at its floor, or a legacy singleton — whichever is older.
          * Legacy v1 files are never redundant, but they must still yield
          * under budget pressure (migration one-time cost). */
-        leaf = kv_cache_find_lru_leaf(kc, &r, 1);
+        leaf = kv_cache_find_lru_leaf(kc, &r, 1, true);
         int64_t branch_recency = leaf >= 0
             ? kv_cache_leaf_recency(kc, &r, leaf) : INT64_MAX;
         int legacy = kv_cache_find_lru_legacy(kc);
@@ -1254,6 +1313,10 @@ void ds4_kvstore_evict(ds4_kvstore *kc, const ds4_tokens *live,
 }
 
 static int kv_cache_continued_step(const ds4_kvstore *kc);
+
+int ds4_kvstore_continued_step(const ds4_kvstore *kc) {
+    return kv_cache_continued_step(kc);
+}
 
 /* Crash-orphaned store temps (<sha>.kv.tmp.<pid>) never match the <sha>.kv
  * name filter in kv_cache_refresh, so they would accumulate forever.  Reap the
@@ -1506,9 +1569,40 @@ int ds4_kvstore_suppress_continued_store(ds4_kvstore *kc, int tokens) {
 void ds4_kvstore_restore_suppressed_continued(ds4_kvstore *kc,
                                               int old_tokens,
                                               int suppressed_tokens) {
-    if (old_tokens >= 0 && kc->continued_last_store_tokens == suppressed_tokens) {
+    if (!kc) return;
+    if (kc->continued_last_store_tokens == suppressed_tokens)
         kc->continued_last_store_tokens = old_tokens;
-    }
+}
+
+void ds4_kvstore_set_divergence_target(ds4_kvstore *kc, int tokens) {
+    if (!kc || !kc->enabled) return;
+    if (tokens < kc->opt.min_tokens) return;
+    if (kc->opt.max_divergence_anchors <= 0) return;
+    kc->divergence_target_tokens = tokens;
+}
+
+/* Fire a pending divergence-anchor store once the live session has reached the
+ * target.  Mirrors the continued-store path but tags the anchor reason=cold and
+ * stores at exactly the divergence point (the miss common-prefix), so a future
+ * identical miss starts from `common` instead of the older anchor A.  The
+ * existing-compatible fast path dedupes against any prior store at this text. */
+static void kv_cache_maybe_store_divergence(ds4_kvstore *kc,
+                                            ds4_engine *engine,
+                                            ds4_session *session,
+                                            const ds4_kvstore_trailer_hooks *hooks,
+                                            char *err, size_t err_len) {
+    const int target = kc->divergence_target_tokens;
+    if (target <= 0) return;
+    const ds4_tokens *tokens = ds4_session_tokens(session);
+    if (!tokens) return;
+    if (tokens->len < target) return;
+    kc->divergence_target_tokens = 0;
+    /* Skip if the target sits exactly on the continued grid: the continued
+     * store already covers it (dedup via existing-compatible anyway). */
+    const int step = kv_cache_continued_step(kc);
+    if (step > 0 && target % step == 0) return;
+    ds4_kvstore_store_live_prefix(kc, engine, session, tokens, target,
+                                  "cold", hooks, err, err_len);
 }
 
 static bool kv_cache_file_size_bytes(uint64_t text_bytes,
@@ -1974,7 +2068,12 @@ bool ds4_kvstore_maybe_store_continued(ds4_kvstore *kc,
     const ds4_tokens *tokens = ds4_session_tokens(session);
     if (!tokens) return false;
     const int target = ds4_kvstore_continued_store_target(kc, tokens->len);
-    if (target == 0) return false;
+    if (target == 0) {
+        /* No continued-store boundary here, but a divergence anchor may be
+         * pending and reachable. */
+        kv_cache_maybe_store_divergence(kc, engine, session, hooks, err, err_len);
+        return false;
+    }
     if (ds4_kvstore_store_live_prefix(kc, engine, session, tokens, target,
                                       "continued", hooks, err, err_len))
     {
@@ -1987,6 +2086,12 @@ bool ds4_kvstore_maybe_store_continued(ds4_kvstore *kc,
         kv_cache_refresh(kc);
         uint64_t sweep_total = 0;
         ds4_kvstore_sweep_small_dense_divergents(kc, NULL, 0, &sweep_total);
+        /* A pending divergence anchor at exactly the continued boundary is
+         * already covered by the store just made; otherwise fire it now. */
+        if (kc->divergence_target_tokens > 0 &&
+            kc->divergence_target_tokens != target)
+            kv_cache_maybe_store_divergence(kc, engine, session, hooks,
+                                            err, err_len);
         return true;
     }
     return false;
