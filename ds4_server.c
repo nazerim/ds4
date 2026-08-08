@@ -9700,9 +9700,11 @@ static void kv_cache_maybe_store_continued(server *s, server_slot *slot) {
     const int target = kv_cache_slot_continued_target(s, slot, tokens->len);
     if (target == 0) {
         /* No continued-store boundary here, but a divergence anchor may be
-         * pending and reachable: store it at the miss common-prefix so a
-         * future identical miss starts from `common` instead of the older
-         * anchor. */
+         * pending and reachable.  Store it at the CURRENT live length (the
+         * payload graph is the session's, so header tokens MUST equal the
+         * session length — storing at `common` with a full-session payload
+         * produced corrupt files on load).  The anchor sits at >= common,
+         * still much deeper than the anchor A that caused the miss. */
         int div_target = slot->divergence_target_tokens;
         if (div_target > 0 && tokens->len >= div_target) {
             const int step = ds4_kvstore_continued_step(kc);
@@ -9712,10 +9714,11 @@ static void kv_cache_maybe_store_continued(server *s, server_slot *slot) {
                 slot->divergence_target_tokens = 0;
         }
         if (div_target > 0) {
-            if (kv_cache_store_live_prefix(s, slot, tokens, div_target, "cold"))
+            const int store_len = tokens->len;
+            if (kv_cache_store_live_prefix(s, slot, tokens, store_len, "cold"))
                 server_log(DS4_LOG_KVCACHE,
-                           "ds4-server: divergence anchor stored tokens=%d",
-                           div_target);
+                           "ds4-server: divergence anchor stored tokens=%d (target %d)",
+                           store_len, div_target);
         }
         return;
     }
@@ -9724,7 +9727,7 @@ static void kv_cache_maybe_store_continued(server *s, server_slot *slot) {
         kv_cache_slot_note_store(slot, target);
         /* Fire a pending divergence anchor that landed at the same boundary
          * as this continued store (already covered) or at a different point
-         * (fire now if reachable). */
+         * (fire now if reachable).  Store at the live length (see above). */
         int div_target = slot->divergence_target_tokens;
         if (div_target > 0) {
             if (div_target == target || tokens->len < div_target)
@@ -9733,10 +9736,11 @@ static void kv_cache_maybe_store_continued(server *s, server_slot *slot) {
                 slot->divergence_target_tokens = 0;
         }
         if (div_target > 0) {
-            if (kv_cache_store_live_prefix(s, slot, tokens, div_target, "cold"))
+            const int store_len = tokens->len;
+            if (kv_cache_store_live_prefix(s, slot, tokens, store_len, "cold"))
                 server_log(DS4_LOG_KVCACHE,
-                           "ds4-server: divergence anchor stored tokens=%d",
-                           div_target);
+                           "ds4-server: divergence anchor stored tokens=%d (target %d)",
+                           store_len, div_target);
         }
     }
 }
@@ -17138,7 +17142,12 @@ static void test_kv_cache_divergence_target_logic(void) {
      * - targets below min_tokens are rejected;
      * - max_divergence_anchors=0 disables the feature;
      * - a target on the continued grid (8192) is skipped at fire time (the
-     *   continued store already covers that exact text). */
+     *   continued store already covers that exact text).
+     * Regression: the store must use the LIVE length (payload == session), not
+     * the target — a store at `target < live` with a full-session payload
+     * produced corrupt files on load (observed after parallel subagent
+     * launches).  The anchor sits at >= common, still deeper than the miss's
+     * anchor A. */
     kv_disk_cache kc = {0};
     kc.enabled = true;
     kc.opt = kv_cache_default_options();

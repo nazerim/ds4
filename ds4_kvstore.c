@@ -1582,10 +1582,13 @@ void ds4_kvstore_set_divergence_target(ds4_kvstore *kc, int tokens) {
 }
 
 /* Fire a pending divergence-anchor store once the live session has reached the
- * target.  Mirrors the continued-store path but tags the anchor reason=cold and
- * stores at exactly the divergence point (the miss common-prefix), so a future
- * identical miss starts from `common` instead of the older anchor A.  The
- * existing-compatible fast path dedupes against any prior store at this text. */
+ * target.  The anchor is stored at the CURRENT live length, not at the target:
+ * the payload is the session's full graph, so header tokens MUST equal the
+ * session length — storing at `common` with a full-session payload produced
+ * corrupt files on load (loaded_tokens->len != hdr.tokens -> discarded, and
+ * because that discard aborted the load chain, a full prefill from 0).  The
+ * anchor sits at >= common, still much deeper than the anchor A that caused
+ * the miss.  reason=cold tags it as a divergence anchor. */
 static void kv_cache_maybe_store_divergence(ds4_kvstore *kc,
                                             ds4_engine *engine,
                                             ds4_session *session,
@@ -1601,7 +1604,7 @@ static void kv_cache_maybe_store_divergence(ds4_kvstore *kc,
      * store already covers it (dedup via existing-compatible anyway). */
     const int step = kv_cache_continued_step(kc);
     if (step > 0 && target % step == 0) return;
-    ds4_kvstore_store_live_prefix(kc, engine, session, tokens, target,
+    ds4_kvstore_store_live_prefix(kc, engine, session, tokens, tokens->len,
                                   "cold", hooks, err, err_len);
 }
 
@@ -2153,8 +2156,12 @@ void ds4_kvstore_mark_stale_at_load(ds4_kvstore *kc, const char *prompt_text,
  * token count (0 on failure).  Sets *retryable when the failure happened BEFORE
  * the session payload was touched (header/text-hash/prefix mismatch), so the
  * caller may safely fall back to the next-largest candidate.  Once the payload
- * load is attempted the session is mutated, so any failure there is terminal
- * (retryable=false) to avoid replaying onto partially-restored state. */
+ * load is attempted the session is mutated; any failure there invalidates the
+ * session (ds4_session_invalidate), which RESETS it — so the caller may also
+ * fall back to the next-largest candidate.  A single corrupt payload must not
+ * abort the whole chain into a full prefill from 0 when a valid smaller anchor
+ * exists (observed in the field: a truncated/full-session payload discard cost
+ * a 94s prefill that a 32768 anchor would have reduced to seconds). */
 static int kv_cache_try_load_one(ds4_kvstore *kc, ds4_engine *engine,
                                  ds4_session *session, const char *prompt_text,
                                  size_t prompt_bytes, int idx,
@@ -2255,8 +2262,11 @@ static int kv_cache_try_load_one(ds4_kvstore *kc, ds4_engine *engine,
         } else {
             ds4_session_invalidate(session);
             unlink(path);
+            /* The session was invalidated (reset) by the discard, so the
+             * caller may safely try the next-largest candidate. */
+            *retryable = true;
             kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
-                    "%s: kv cache discarded corrupt text-prefix payload%s%s %s",
+                    "%s: kv cache discarded corrupt text-prefix payload%s%s %s (falling back)",
                     kv_log_name(kc),
                     responses_protocol ? " " : "",
                     responses_protocol ? "RESPPROTO" : "",
@@ -2264,8 +2274,12 @@ static int kv_cache_try_load_one(ds4_kvstore *kc, ds4_engine *engine,
         }
     } else {
         ds4_session_invalidate(session);
+        /* Payload load failed (version/layout mismatch, truncation): the
+         * session was invalidated (reset), so fall back to the next-largest
+         * candidate instead of forcing a full prefill from 0. */
+        *retryable = true;
         kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
-                "%s: kv cache load failed%s%s %s: %s load=%.1f ms",
+                "%s: kv cache load failed%s%s %s: %s load=%.1f ms (falling back)",
                 kv_log_name(kc),
                 responses_protocol ? " " : "",
                 responses_protocol ? "RESPPROTO" : "",
