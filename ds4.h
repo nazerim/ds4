@@ -380,6 +380,8 @@ int ds4_test_sample_logits(const float *logits, uint32_t n_vocab,
                            float temperature, int top_k,
                            float top_p, float min_p, uint64_t *rng,
                            float *prob_scratch);
+int ds4_test_argmax_excluding_logits(const float *logits, uint32_t n_vocab,
+                                     int excluded_id);
 uint64_t ds4_test_mixed_native_count(void);
 /* Rejection-sampling kernel hooks (PLAN-DSPARK-TEMP-SPEC.md, M1). */
 float ds4_test_spec_accept_prob(float p, float q);
