@@ -10346,6 +10346,17 @@ static void request_ctx_span(char *buf, size_t len, int cached, int prompt) {
     snprintf(buf, len, "%d..%d:%d", cached, prompt, suffix);
 }
 
+/* A job cancelled mid-flight (client disconnect or stream write failure) skips
+ * the response path where the final "client disconnected" log lives; surface
+ * it here so operators can see cancelled work. */
+static void log_job_cancelled(const job *j, const char *ctx_span) {
+    if (!j) return;
+    server_log(DS4_LOG_DEFAULT,
+               "ds4-server: %s ctx=%s client disconnected",
+               j->req.kind == REQ_CHAT ? "chat" : "completion",
+               ctx_span);
+}
+
 static void log_flags(char *buf, size_t len, bool responses_protocol,
                       bool tools, bool thinking,
                       bool dsml_start, bool dsml_end) {
@@ -11619,6 +11630,8 @@ static void generate_job_inner(server *s, server_slot *slot, job *j) {
             if (job_cancelled(j)) {
                 request_live_state_clear(s, slot);
                 trace_event(s, trace_id, "cancelled during prefill");
+                ds4_gpu_set_decode_phase(0);
+                log_job_cancelled(j, ctx_span);
                 return;
             }
             trace_event(s, trace_id, "prefill failed: %s", err);
@@ -11661,6 +11674,8 @@ static void generate_job_inner(server *s, server_slot *slot, job *j) {
         ds4_session_set_display_progress(slot->session, NULL, NULL);
         request_live_state_clear(s, slot);
         trace_event(s, trace_id, "cancelled after prefill");
+        ds4_gpu_set_decode_phase(0);
+        log_job_cancelled(j, ctx_span);
         ds4_tokens_free(&effective_prompt);
         return;
     }
@@ -12089,6 +12104,8 @@ decode_again:
     if (job_cancelled(j)) {
         request_live_state_clear(s, slot);
         trace_event(s, trace_id, "cancelled during generation after %d tokens", completion);
+        ds4_gpu_set_decode_phase(0);
+        log_job_cancelled(j, ctx_span);
         anthropic_stream_free(&anthropic_live);
         openai_stream_free(&openai_live);
         responses_stream_free(&responses_live);
@@ -12209,6 +12226,8 @@ decode_again:
     if (job_cancelled(j)) {
         request_live_state_clear(s, slot);
         trace_event(s, trace_id, "cancelled while flushing generation");
+        ds4_gpu_set_decode_phase(0);
+        log_job_cancelled(j, ctx_span);
         anthropic_stream_free(&anthropic_live);
         openai_stream_free(&openai_live);
         responses_stream_free(&responses_live);
@@ -12347,6 +12366,8 @@ decode_again:
         if (job_cancelled(j)) {
             request_live_state_clear(s, slot);
             trace_event(s, trace_id, "cancelled during response parsing");
+            ds4_gpu_set_decode_phase(0);
+            log_job_cancelled(j, ctx_span);
             free(parsed_content);
             free(parsed_reasoning);
             tool_calls_free(&parsed_calls);
@@ -12371,6 +12392,8 @@ decode_again:
     if (job_cancelled(j)) {
         request_live_state_clear(s, slot);
         trace_event(s, trace_id, "cancelled before publishing response state");
+        ds4_gpu_set_decode_phase(0);
+        log_job_cancelled(j, ctx_span);
         free(parsed_content);
         free(parsed_reasoning);
         tool_calls_free(&parsed_calls);
@@ -12956,18 +12979,43 @@ static bool client_socket_disconnected(int fd) {
         rc = poll(&pfd, 1, 0);
     } while (rc < 0 && errno == EINTR);
     if (rc < 0) return client_recv_errno_disconnected(errno);
-    if (rc == 0) return false;
-    if (client_poll_revents_disconnected(pfd.revents)) return true;
-    if (!(pfd.revents & POLLIN)) return false;
-
-    char discard[256];
-    for (;;) {
-        ssize_t n = recv(fd, discard, sizeof(discard), 0);
-        if (n > 0) continue;
-        if (n == 0) return true;
-        if (errno == EINTR) continue;
-        return client_recv_errno_disconnected(errno);
+    if (rc > 0) {
+        if (client_poll_revents_disconnected(pfd.revents)) return true;
+        if (!(pfd.revents & POLLIN)) return false;
+        /* Readable data may hide the FIN behind it: discard it nonblockingly
+         * until EOF, exactly like the probe below. */
+        char discard[256];
+        for (;;) {
+            ssize_t n = recv(fd, discard, sizeof(discard), 0);
+            if (n > 0) continue;
+            if (n == 0) return true;
+            if (errno == EINTR) continue;
+            return client_recv_errno_disconnected(errno);
+        }
     }
+    /* poll() does not report a plain TCP FIN on Darwin, so a client that
+     * disconnects mid-generation was never seen here: the job kept decoding
+     * into a dead socket until max_tokens. recv(MSG_PEEK) reports EOF exactly
+     * on every platform (and consumes nothing, so this stays race-free with
+     * the worker's concurrent SSE writes). */
+    char probe;
+    ssize_t n = recv(fd, &probe, 1, MSG_PEEK);
+    if (n == 0) return true;
+    if (n < 0) {
+        if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) return false;
+        return true;
+    }
+    if (n > 0) {
+        char discard[256];
+        for (;;) {
+            ssize_t m = recv(fd, discard, sizeof(discard), 0);
+            if (m > 0) continue;
+            if (m == 0) return true;
+            if (errno == EINTR) continue;
+            return client_recv_errno_disconnected(errno);
+        }
+    }
+    return false;
 }
 
 /* Mark first, then detach only work that no worker owns yet. No job mutex is
