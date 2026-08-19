@@ -21,3 +21,38 @@ A 743-request trace (Aug 7) showed the dominant KV-cache rebuild cost was cross-
 ## Supersedes
 - The LRU-retire ranking in PLAN-KV-LINEAGE (unchanged except grace).
 - The 65536 MiB budget default from the Aug 6 fix.
+
+---
+
+# ADR: KV Cache — double continued-store grid above 48k tokens
+
+## Status
+Accepted (implemented in ds4_kvstore.c / ds4_server.c).
+
+## Context
+Continued anchors write every `anchor_step` (default 8192) tokens at all
+lengths. At long context each anchor payload is large, so the 8192 grid
+produces heavy disk write traffic while the re-prefill an extra anchor saves
+shrinks in relative value.
+
+## Decision
+Above `DS4_KVSTORE_WIDE_STEP_ABOVE_TOKENS` (49152 = 48k) live tokens the
+effective continued-store step doubles (default 8192 -> 16384), via
+`kv_cache_step_for()` used by `ds4_kvstore_continued_store_target` and both
+divergence-grid dedup sites (kvstore and server). New public API
+`ds4_kvstore_continued_step_at(kc, live_tokens)`.
+
+Grid properties: doubling keeps the wide grid a subset of the base grid, and
+49152 is a multiple of both, so the crossing fires exactly once and sessions
+restored from legacy odd-8192 anchors resume cleanly at the next 16384
+multiple. Divergence targets at odd 8192 multiples above 48k are no longer
+"on the grid" and correctly keep their own anchor.
+
+## Consequences
+- Half the anchor writes above 48k; worst-case re-prefill after a miss there
+  rises from 8191 to 16383 tokens.
+- Retention ladder above 48k thins accordingly (fewer files per lineage).
+- `--kv-cache-anchor-step` semantics unchanged below 48k; above, the
+  user-set step doubles too (grid nesting preserved).
+- Regression coverage: `test_kv_cache_continued_uses_aligned_frontiers`
+  (crossing, odd-multiple suppression, legacy-anchor resume).

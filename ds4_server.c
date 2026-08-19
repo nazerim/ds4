@@ -9742,7 +9742,10 @@ static void kv_cache_maybe_store_continued(server *s, server_slot *slot) {
          * still much deeper than the anchor A that caused the miss. */
         int div_target = slot->divergence_target_tokens;
         if (div_target > 0 && tokens->len >= div_target) {
-            const int step = ds4_kvstore_continued_step(kc);
+            /* Grid effective AT the target length: above 48k the grid doubles,
+             * so an odd 8192 multiple up there is not covered by continued
+             * stores and keeps its divergence anchor. */
+            const int step = ds4_kvstore_continued_step_at(kc, div_target);
             if (step > 0 && div_target % step == 0)
                 div_target = 0; /* on the continued grid: already covered */
             else
@@ -17685,6 +17688,19 @@ static void test_kv_cache_continued_uses_aligned_frontiers(void) {
     kc.continued_last_store_tokens = 8192;
     TEST_ASSERT(kv_cache_continued_store_target(&kc, 12288) == 0);
     TEST_ASSERT(kv_cache_continued_store_target(&kc, 16384) == 16384);
+
+    /* Above 48k (49152) the grid doubles 8192 -> 16384: odd 8192 multiples
+     * stop firing, multiples of 16384 keep firing.  49152 sits on both grids
+     * so the crossing fires exactly once. */
+    kc.continued_last_store_tokens = 40960;
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 49152) == 49152);
+    kc.continued_last_store_tokens = 49152;
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 57344) == 0);
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 65536) == 65536);
+    /* A legacy anchor on an odd 8192 multiple resumes cleanly on the wide
+     * grid at the next multiple of 16384. */
+    kc.continued_last_store_tokens = 57344;
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 65536) == 65536);
 
     /* anchor_step unset -> fall back to continued_interval (10000) aligned to
      * boundary_align (2048) = 10240. */

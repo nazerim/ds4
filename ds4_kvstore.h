@@ -15,6 +15,11 @@
 #define DS4_KVSTORE_HIT_HALF_LIFE_SECONDS (6ull * 60ull * 60ull)
 
 #define DS4_KVSTORE_DEFAULT_ANCHOR_STEP 8192
+/* Above this live length the continued-store grid doubles (default
+ * 8192 -> 16384): at long context anchor writes are heavy relative to the
+ * re-prefill they save, so halve the anchor rate past 48k tokens.  49152 is
+ * a multiple of both grids, so the switch is seamless. */
+#define DS4_KVSTORE_WIDE_STEP_ABOVE_TOKENS 49152
 #define DS4_KVSTORE_DEFAULT_SMALL_DENSE 16384
 #define DS4_KVSTORE_DEFAULT_TAIL_ANCHORS 2
 #define DS4_KVSTORE_DEFAULT_MID_SPACING 131072
@@ -209,6 +214,9 @@ int ds4_kvstore_chat_anchor_pos(const ds4_kvstore *kc,
 int ds4_kvstore_continued_store_target(const ds4_kvstore *kc, int live_tokens);
 /* Effective continued-store step (anchor_step aligned to prefill chunk). */
 int ds4_kvstore_continued_step(const ds4_kvstore *kc);
+/* Effective step at a given live length: doubled above
+ * DS4_KVSTORE_WIDE_STEP_ABOVE_TOKENS. */
+int ds4_kvstore_continued_step_at(const ds4_kvstore *kc, int live_tokens);
 void ds4_kvstore_note_store(ds4_kvstore *kc, int tokens);
 int ds4_kvstore_suppress_continued_store(ds4_kvstore *kc, int tokens);
 void ds4_kvstore_restore_suppressed_continued(ds4_kvstore *kc,

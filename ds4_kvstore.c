@@ -1313,9 +1313,14 @@ void ds4_kvstore_evict(ds4_kvstore *kc, const ds4_tokens *live,
 }
 
 static int kv_cache_continued_step(const ds4_kvstore *kc);
+static int kv_cache_step_for(const ds4_kvstore *kc, int live_tokens);
 
 int ds4_kvstore_continued_step(const ds4_kvstore *kc) {
     return kv_cache_continued_step(kc);
+}
+
+int ds4_kvstore_continued_step_at(const ds4_kvstore *kc, int live_tokens) {
+    return kv_cache_step_for(kc, live_tokens);
 }
 
 /* Crash-orphaned store temps (<sha>.kv.tmp.<pid>) never match the <sha>.kv
@@ -1409,10 +1414,11 @@ bool ds4_kvstore_open(ds4_kvstore *kc, const char *dir, uint64_t budget_mb,
             kc->opt.boundary_align_tokens,
             (unsigned long long)DS4_KVSTORE_HIT_HALF_LIFE_SECONDS);
     kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
-            "%s: KV retention anchor_step=%d continued_step=%d prefill_chunk=%d small_dense=%d tail=%d mid_spacing=%d min_anchors=%d max_conversations=%d model_fp=%llu",
+            "%s: KV retention anchor_step=%d continued_step=%d (doubles above %d tokens) prefill_chunk=%d small_dense=%d tail=%d mid_spacing=%d min_anchors=%d max_conversations=%d model_fp=%llu",
             kv_log_name(kc),
             kc->opt.anchor_step,
             kv_cache_continued_step(kc),
+            DS4_KVSTORE_WIDE_STEP_ABOVE_TOKENS,
             kc->opt.prefill_chunk,
             kc->opt.small_dense_tokens,
             kc->opt.tail_anchors,
@@ -1544,8 +1550,21 @@ static int kv_cache_continued_step(const ds4_kvstore *kc) {
     return step;
 }
 
+/* Length-dependent writing grid: the base step below 48k tokens, doubled
+ * above (default 8192 -> 16384).  Doubling keeps the wide grid a subset of
+ * the base grid, and DS4_KVSTORE_WIDE_STEP_ABOVE_TOKENS is a multiple of
+ * both, so crossing the threshold never skips or double-fires an anchor. */
+static int kv_cache_step_for(const ds4_kvstore *kc, int live_tokens) {
+    int step = kv_cache_continued_step(kc);
+    if (step > 0 && live_tokens > DS4_KVSTORE_WIDE_STEP_ABOVE_TOKENS) {
+        long long s = (long long)step * 2;
+        step = s > INT_MAX ? INT_MAX : (int)s;
+    }
+    return step;
+}
+
 int ds4_kvstore_continued_store_target(const ds4_kvstore *kc, int live_tokens) {
-    const int step = kv_cache_continued_step(kc);
+    const int step = kv_cache_step_for(kc, live_tokens);
     if (step <= 0) return 0;
     if (live_tokens < kc->opt.min_tokens) return 0;
     if (live_tokens % step != 0) return 0;
@@ -1601,8 +1620,10 @@ static void kv_cache_maybe_store_divergence(ds4_kvstore *kc,
     if (tokens->len < target) return;
     kc->divergence_target_tokens = 0;
     /* Skip if the target sits exactly on the continued grid: the continued
-     * store already covers it (dedup via existing-compatible anyway). */
-    const int step = kv_cache_continued_step(kc);
+     * store already covers it (dedup via existing-compatible anyway).  Use
+     * the grid effective AT the target length (the grid doubles above 48k,
+     * so an odd 8192 multiple up there is NOT covered). */
+    const int step = kv_cache_step_for(kc, target);
     if (step > 0 && target % step == 0) return;
     ds4_kvstore_store_live_prefix(kc, engine, session, tokens, tokens->len,
                                   "cold", hooks, err, err_len);

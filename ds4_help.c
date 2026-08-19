@@ -358,7 +358,7 @@ static void print_kv_cache(FILE *fp, const help_colors *c) {
     opt(fp, c, "--kv-cache-continued-interval-tokens N", "Save aligned continued frontiers. 0 disables. Default: 10000");
     opt(fp, c, "--kv-cache-boundary-trim-tokens N", "Trim tail tokens for cold boundary saves. Default: 32");
     opt(fp, c, "--kv-cache-boundary-align-tokens N", "Align cold boundary saves to this multiple. Default: 2048");
-    opt(fp, c, "--kv-cache-anchor-step N", "Continued-anchor grid spacing in tokens. 0 falls back to the continued interval. Default: 8192");
+    opt(fp, c, "--kv-cache-anchor-step N", "Continued-anchor grid spacing in tokens (doubles above 48k context). 0 falls back to the continued interval. Default: 8192");
     opt(fp, c, "--kv-cache-small-dense N", "Keep every anchor of a conversation up to N tokens. Default: 16384");
     opt(fp, c, "--kv-cache-tail-anchors N", "Dense anchors kept behind each conversation frontier. Default: 2");
     opt(fp, c, "--kv-cache-mid-spacing N", "Sparse middle-anchor window in tokens (one kept anchor per window). Default: 131072");
