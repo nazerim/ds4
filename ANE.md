@@ -1,6 +1,9 @@
 # ANE Prefill Offload — Feasibility Investigation (ds4 server)
 
 Status: **investigated, not adopted** (Aug 2026). No code changes.
+This document is self-contained for handoff: an agent picking this up can
+start at "Revisit trigger / cheap pilot — HANDOFF" below without reading
+the oMLX tree first (references cite exact files/lines).
 
 Reference implementation: [jundot/omlx](https://github.com/jundot/omlx),
 `omlx/custom_kernels/qwen35_prefill/csrc/qwen35_ane.mm` and
@@ -119,14 +122,82 @@ Technically viable — the mechanism is standalone C/Objective-C-portable
 MLX. Strategically marginal on M5 Max: high engineering cost and permanent
 OS-update fragility against a low single-digit percent prefill gain.
 
-### Revisit trigger / cheap pilot
+### Revisit trigger / cheap pilot — HANDOFF
 
-If pursued later, do NOT integrate first. Build a standalone micro-bench:
+Do NOT integrate into the engine first. Build a standalone micro-bench in
+`speed-bench/` with three gates; stop at the first gate that fails its kill
+criterion. Total cost to a go/no-go answer: **2–4 focused days** (Gates 1–2);
+Gate 3 adds 2–4 days only if the gates pass.
 
-1. Compile one `q_b`-shaped INT8 conv program (1024 → 32768, seq 4096)
-   against the private runtime on the current macOS.
-2. Measure raw ANE evaluation throughput and the GPU-overlap headroom with a
-   concurrent MXFP4 MoE stream.
-3. Kill the effort unless the overlapped composite clears ~1.10x on a
-   synthetic 43-layer loop; otherwise the full integration cannot beat the
-   oMLX M5 reference ratio.
+#### Porting source (all in oMLX `custom_kernels/qwen35_prefill/csrc/qwen35_ane.mm`, 1965 lines)
+
+Only these pieces are needed; the bank/dual-ANE/fp16/SwiGLU machinery is not:
+
+| Component | oMLX reference | Notes |
+|---|---|---|
+| Framework load | `load_ane_framework()` :95 | `dlopen("/System/Library/PrivateFrameworks/AppleNeuralEngine.framework/...")` |
+| MIL text gen | `int8_linear_mil()` :154 | 1x1 conv, fixed shape `[1, C_in, 1, seq]`; hardcoded `buildInfo` coremlc version strings |
+| Weight blob helpers | `make_blob()` :114, `quantize_rows()` :330 | per-output-channel INT8 + fp16 scales |
+| Model build/load | `AneLinearModel::Impl` ctor :426–557 | `_ANEInMemoryModelDescriptor modelWithMILText:weights:optionsPlist:` → `_ANEInMemoryModel inMemoryModelWithDescriptor:` → `compileWithQoS:options:error:` → `loadWithQoS:` (QoS arg 21) |
+| I/O surfaces | `make_surface()` :354, ctor :521–545 | IOSurface → `_ANEIOSurfaceObject`, wrapped as Metal buffers via private `newBufferWithIOSurface:`, `newSharedEvent` |
+| Dispatch | `_ANERequest requestWithInputs:...` :547, `evaluate_and_signal()` :798 | `evaluateWithQoS:options:request:error:` on a dispatch thread; keep the BLOCKING input-pack wait — async/completion-callback variants destroyed overlap (:257–263 of the doc) |
+
+Estimated new code: ~400–500 lines ObjC. ds4 already builds ObjC
+(`ds4_metal.m`) and standalone benches — copy the Makefile pattern at
+`Makefile:120–126` (`metal-prefill-variant-bench` target: `.o` rule +
+`$(CORE_OBJS)` link + convenience target).
+
+#### Gate 1 — compile + raw throughput (1–2 days)
+
+1. Port the pieces above into `speed-bench/ane_linear_bench.m` (Objective-C,
+   plain `main`, no engine headers needed).
+2. Shape: ds4 Flash `q_b` projection — input_dim 1024, output_dim 32768,
+   seq 4096 (matches `--prefill-chunk` default for Flash). Random weights
+   are fine: this measures throughput, not quality. Memory: INT8 weights
+   ~34 MB; fp16 output surface 32768×4096×2 = 256 MB; input surface 8 MB.
+3. Loop N evaluations, time with the shared-event signal path, report
+   tokens/s equivalent (4096 tokens per evaluation) and ms/eval.
+4. Compare against the GPU cost of the same GEMM in prefill (derivable from
+   `ds4-bench` per-chunk prefill numbers: 790 t/s @2k on M5 Max ⇒ ~5.2 ms
+   per 4096-token chunk total, all layers — so a single projection must be
+   a small fraction of that to matter).
+- **Kill criterion:** the private runtime rejects the MIL or no working
+  `buildInfo` version string is found within ~1 day of probing → stop; the
+  API surface is not available on this macOS. (oMLX pins coremlc `3505.4.1`/
+  `3510.2.1` for single programs and `3520.4.1`/`3520.5.1` for banks.)
+- **Also kill if:** single-program ANE eval is slower than the GPU MXFP4
+  cost of the same projection — no overlap story can then beat GPU-only.
+
+#### Gate 2 — overlap headroom (+1–2 days)
+
+1. Add a concurrent GPU stream executing a representative MXFP4 MoE GEMM.
+   Reuse the existing harness `tests/test_mxfp4_metal.c` (`make
+   test-mxfp4-metal`, Makefile:137) or lift its kernel setup into the bench.
+2. Run ANE evals and the GPU stream concurrently; measure the composite vs
+   each alone. Sync strategy: blocking input-pack wait + shared-event
+   signal only — do not experiment with completion-callback launching
+   (oMLX measured it 5.6% SLOWER than GPU-only).
+- **Kill criterion:** composite throughput gain < ~10% over GPU-alone at
+  the best tested split. Below that, the full integration cannot beat the
+  oMLX M5 reference (+5%) after ds4's smaller overlap window.
+
+#### Gate 3 — synthetic 43-layer loop (+2–4 days, only if Gates 1–2 pass)
+
+Simulate one prefill chunk: per layer, GPU attention/MoE stream with the
+ANE projection forked/joined at the right point, including the serial
+sections (indexer top-k, compressor) that bound overlap. Decision number:
+composite ≥ ~1.10x vs GPU-only. Anything less cannot justify the engine
+integration cost (weight-window banks, mode flag, test carve-outs,
+OS-update maintenance).
+
+#### Known gotchas carried from oMLX
+
+- M5 Max is single-die: ONE physical ANE instance, ~4 GiB weight window —
+  no dual-ANE striping (oMLX measured unpinned single calls 39.5% slower
+  than dual-pinned, but dual does not exist here).
+- `kANEFAneInstanceHint` pinning accepts instances 1–4; probe which value
+  the M5 Max exposes (omlx: M3 Ultra = 1 and 2).
+- Eager compile is 15–40 s in oMLX; fine for a bench, relevant to server
+  startup if ever integrated.
+- The path is approximate INT8 — never let the bench feed engine
+  correctness tests; it is throughput-only.
