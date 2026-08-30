@@ -70,9 +70,17 @@ Override model: `DS4_TEST_MODEL=/path/to/model.gguf ./ds4_test --server`
 - **Local mirror:** `/Users/naz/Projects/ds4-upstream` tracks `antirez/ds4` for comparison
 - **Merged 2026-08-04:** upstream through `b7e9f00` (merge `e23cb2f`): MXFP4 (CUDA native + portable Metal experts + GGUF format), CUDA TP/HMMA work, decode-island graphs, batched-serving knobs (`--mixed-prefill-quantum` replaces the `DS4_SERVER_MIXED_PREFILL_QUANTUM` env var), checkpoint-versioned test fixtures. Merge was conflict-free; upstream never touched `ds4_kvstore.c/h` or the agent path.
 
-### DSpark — temperature-aware speculative decoding (in-progress)
+### DSpark — temperature-aware speculative decoding (ABANDONED — superseded upstream)
 
-**Status:** M4 validation complete (M4.1 pass, M4.2 pass, M4.3 follow-up complete)
+**Status (2026-08-31):** Investigation stopped; the fork's rejection-sampling
+verifier (`DS4_DSPARK_SPEC_SAMPLE`, capture q/rows, `test_spec_rejection`) was
+removed after merging upstream's own exact stochastic speculative decoding +
+opportunistic temperature sampling (commits `769a8ba`, `8d683d6`, `abd4ed3`),
+which solves the same problem and is the maintained implementation.  Upstream
+mechanism: `dspark_exact_sampling` engine flag / exact MTP sampling mode.
+Historical notes below kept for the record.
+
+**Historical status:** M4 validation complete (M4.1 pass, M4.2 pass, M4.3 follow-up complete)
 **Commits (local only, not pushed):** `e0e5f40`, `7ed3225`, `ce13aac`, `0701b6c` (pushed through `600dbab`)
 **Design:** `PLAN-DSPARK-TEMP-SPEC.md`
 **State:** `misc/experiment-a-state.md`

@@ -398,15 +398,6 @@ tests/test_engine_mgpu_placement.o: tests/test_engine_mgpu_placement.c ds4.h ds4
 tests/test_engine_mgpu_placement: tests/test_engine_mgpu_placement.o ds4_cpu_test_hooks.o ds4_distributed.o ds4_tp.o ds4_ssd.o ds4_layer_pack.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-tests/test_spec_rejection.o: tests/test_spec_rejection.c ds4.h
-	$(CC) $(CFLAGS) -DDS4_TEST_HOOKS -I. -c -o $@ $<
-
-tests/test_spec_rejection: tests/test_spec_rejection.o ds4_cpu_test_hooks.o ds4_distributed.o ds4_tp.o ds4_ssd.o ds4_layer_pack.o
-	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
-
-test-spec-rejection: tests/test_spec_rejection
-	./tests/test_spec_rejection
-
 tests/test_sampling.o: tests/test_sampling.c ds4.h
 	$(CC) $(CFLAGS) -fno-finite-math-only -DDS4_TEST_HOOKS -I. -c -o $@ $<
 
@@ -494,7 +485,7 @@ tests/kv_policy_harness: tests/kv_policy_harness.c ds4_kvstore.o ds4_help.o rax.
 
 test: ds4_test ds4_agent_test ds4-eval q4k-dot-test mxfp4-dot-test \
 	tests/test_layer_pack tests/test_engine_mgpu_placement tests/test_gpu_args \
-	tests/test_spec_rejection tests/kv_policy_harness \
+	tests/kv_policy_harness \
 	$(SAMPLING_TEST) ds4 ds4-server ds4-bench ds4-agent
 	./ds4-eval --self-test-extractors
 	./ds4_agent_test
@@ -504,7 +495,6 @@ test: ds4_test ds4_agent_test ds4-eval q4k-dot-test mxfp4-dot-test \
 	./tests/test_engine_mgpu_placement
 	./tests/test_gpu_args
 	./tests/test_gpu_args_cli.sh
-	./tests/test_spec_rejection
 	./tests/test_sampling
 
 dspark-acceptance: ds4
