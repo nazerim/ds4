@@ -42,7 +42,15 @@ KV_MAX_DIVERGENCE_ANCHORS="${KV_MAX_DIVERGENCE_ANCHORS:-8}"
 LOG_DIR="./log"
 LOG_FILE="$LOG_DIR/ds4.log"
 TOKENS=384000
-MTP_MODEL="gguf/DeepSeek-V4-Flash-DSpark-support-0731.gguf"
+# Two DISTINCT speculative-decoding pathways, not interchangeable:
+#  - DSpark  (--dspark): block drafter; REQUIRES the 0731 support GGUF and 0731
+#    main models only (checkpoint-specific). Non-greedy uses opportunistic
+#    sampling; set DSPARK_EXACT=1 for --mtp-exact-sampling (target distribution).
+#  - Legacy MTP (--mtp-draft): one-stage nextn drafter (May 2026 GGUF). Same
+#    engine flag (--mtp) but WITHOUT --dspark; ds4 detects the kind by tensor
+#    names. Upstream: DSpark replaces this for the 0731 checkpoint.
+DSPARK_MODEL="gguf/DeepSeek-V4-Flash-DSpark-support-0731.gguf"
+MTP_MODEL="gguf/DeepSeek-V4-Flash-MTP-Q4K-Q8_0-F32.gguf"
 # Cache-miss trace: set TRACE_PATH to a file path (e.g. ./log/ds4.trace) to make
 # the server write the exact cache-decision + first-mismatch token window for
 # every request. Used for debugging KV divergence (see DS4FORK.md KVCACHE —
@@ -57,13 +65,16 @@ MODEL_PATHS=(
     "gguf/DeepSeek-V4-Flash-Layers37-42Q4KExperts-OtherExpertLayersIQ2XXSGateUp-Q2KDown-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-fixed-0731.gguf"
 )
 
-# Alternative MTP (draft) model map: short name -> full GGUF path.
-# Used by start-<model>-mtp / restart-<model>-mtp. If a key has no MTP
-# entry, the default MTP_MODEL above is used instead.
-MTP_KEYS=("0731")
-MTP_PATHS=(
+# Alternative DSpark (draft) model map: short name -> full GGUF path.
+# Used by start-<model>-dspark / restart-<model>-dspark. If a key has no
+# entry, the default DSPARK_MODEL above is used instead.
+DSPARK_KEYS=("0731")
+DSPARK_PATHS=(
     "/Users/naz/Projects/ds4/gguf/DeepSeek-V4-Flash-DSpark-support-0731.gguf"
 )
+# Per-model legacy MTP drafter map (start-<model>-mtp).
+MTP_KEYS=()
+MTP_PATHS=()
 
 lookup_model() {
     local key="$1"
@@ -88,11 +99,29 @@ lookup_mtp_model() {
     done
     return 1
 }
-MTP_DRAFT="${MTP_DRAFT:-1}"
+
+lookup_dspark_model() {
+    local key="$1"
+    local i
+    for i in "${!DSPARK_KEYS[@]}"; do
+        if [ "${DSPARK_KEYS[$i]}" = "$key" ]; then
+            echo "${DSPARK_PATHS[$i]}"
+            return 0
+        fi
+    done
+    return 1
+}
+# Legacy MTP only: max autoregressive draft tokens. The server speculation gate
+# needs > 1, so depth 1 (the old default) silently disables speculation.
+MTP_DRAFT="${MTP_DRAFT:-2}"
 MTP_MARGIN="${MTP_MARGIN:-3}"
 # 0.6 balances speculation acceptance vs verification cost; 0.9 was too
 # conservative, rejecting most drafts and negating MTP throughput gains.
 DSPARK_CONFIDENCE="${DSPARK_CONFIDENCE:-0.6}"
+# DSPARK_EXACT=1 adds --mtp-exact-sampling: at non-zero temperature the drafts
+# follow the ordinary target distribution instead of opportunistic greedy-suffix
+# matching (default confidence 0.8 when unset explicitly).
+DSPARK_EXACT="${DSPARK_EXACT:-0}"
 MAX_LOG_ROTATIONS=10
 
 # Debug mode: set DEBUG=1 to enable verbose output
@@ -120,8 +149,9 @@ rotate_logs() {
 
 start_server() {
   local model_path="${1:-}"
-  local enable_mtp="${2:-}"
-  local mtp_model_path="${3:-}"
+  # spec mode: "" (none) | "mtp" (legacy one-stage) | "dspark" (block drafter)
+  local spec_mode="${2:-}"
+  local spec_model_path="${3:-}"
 
   if [ -f "$PID_FILE" ]; then
     local pid
@@ -140,15 +170,19 @@ start_server() {
   # Rotate and clean up old logs
   rotate_logs
 
-  # Choose MTP draft model (per-model override, else default)
-  local mtp_used="$MTP_MODEL"
-  if [ -n "$mtp_model_path" ]; then
-    mtp_used="$mtp_model_path"
+  # Choose the support/draft model (per-model override, else pathway default)
+  local spec_used=""
+  case "$spec_mode" in
+    mtp)    spec_used="$MTP_MODEL" ;;
+    dspark) spec_used="$DSPARK_MODEL" ;;
+  esac
+  if [ -n "$spec_mode" ] && [ -n "$spec_model_path" ]; then
+    spec_used="$spec_model_path"
   fi
 
-  # Validate MTP model exists if requested
-  if [ "$enable_mtp" = "mtp" ] && [ ! -f "$mtp_used" ]; then
-    echo "Error: MTP model not found: $mtp_used"
+  # Validate the support model exists if requested
+  if [ -n "$spec_mode" ] && [ ! -f "$spec_used" ]; then
+    echo "Error: $spec_mode support model not found: $spec_used"
     return 1
   fi
 
@@ -157,9 +191,14 @@ start_server() {
   else
     echo "Starting ds4-server on port $PORT (ctx: $CTX)..."
   fi
-  if [ "$enable_mtp" = "mtp" ]; then
-    echo "MTP speculative decoding enabled (draft: $mtp_used)"
-  fi
+  case "$spec_mode" in
+    mtp)
+      echo "Legacy MTP speculative decoding enabled (drafter: $spec_used, draft: $MTP_DRAFT)"
+      ;;
+    dspark)
+      echo "DSpark speculative decoding enabled (support: $spec_used, confidence: $DSPARK_CONFIDENCE, exact: $DSPARK_EXACT)"
+      ;;
+  esac
   echo "Logging to $LOG_FILE"
 
   # Build model argument
@@ -168,10 +207,19 @@ start_server() {
     MODEL_ARGS+=(--model "$model_path")
   fi
 
-  # Build MTP arguments
+  # Build speculative-decoding arguments (pathway-specific; --mtp is shared)
   MTP_ARGS=()
-  if [ "$enable_mtp" = "mtp" ]; then
-    MTP_ARGS+=(--mtp "$mtp_used" --dspark --mtp-draft "$MTP_DRAFT" --mtp-margin "$MTP_MARGIN")
+  if [ "$spec_mode" = "mtp" ]; then
+    # Legacy one-stage nextn drafter: no --dspark. --mtp-draft must be > 1 or
+    # the server's speculation gate never fires.
+    MTP_ARGS+=(--mtp "$spec_used" --mtp-draft "$MTP_DRAFT" --mtp-margin "$MTP_MARGIN")
+  elif [ "$spec_mode" = "dspark" ]; then
+    # DSpark: block size comes from the support model metadata; --mtp-draft /
+    # --mtp-margin are legacy flags and are NOT passed here.
+    MTP_ARGS+=(--mtp "$spec_used" --dspark)
+    if [ "$DSPARK_EXACT" = "1" ]; then
+      MTP_ARGS+=(--mtp-exact-sampling)
+    fi
     MTP_ARGS+=(--dspark-confidence "$DSPARK_CONFIDENCE")
   fi
 
@@ -340,6 +388,9 @@ case "${1:-}" in
   start-mtp)
     start_server "" mtp ""
     ;;
+  start-dspark)
+    start_server "" dspark ""
+    ;;
   stop)
     stop_server
     ;;
@@ -348,6 +399,9 @@ case "${1:-}" in
     ;;
   restart-mtp)
     stop_server; start_server "" mtp ""
+    ;;
+  restart-dspark)
+    stop_server; start_server "" dspark ""
     ;;
   status)
     status_server
@@ -376,10 +430,13 @@ case "${1:-}" in
       do_restart=1
     fi
 
-    # Check for -mtp variant
-    enable_mtp=""
-    if [[ "$suffix" == *-mtp ]]; then
-      enable_mtp="mtp"
+    # Check for the speculative-decoding variant: -mtp (legacy) or -dspark
+    spec_mode=""
+    if [[ "$suffix" == *-dspark ]]; then
+      spec_mode="dspark"
+      suffix="${suffix%-dspark}"
+    elif [[ "$suffix" == *-mtp ]]; then
+      spec_mode="mtp"
       suffix="${suffix%-mtp}"
     fi
 
@@ -390,29 +447,37 @@ case "${1:-}" in
       exit 1
     fi
 
-    # Look up per-model MTP draft path (empty => default MTP_MODEL)
-    mtp_model_path=$(lookup_mtp_model "$suffix") || true
+    # Look up per-model support path (empty => pathway default)
+    spec_model_path=""
+    if [ "$spec_mode" = "dspark" ]; then
+      spec_model_path=$(lookup_dspark_model "$suffix") || true
+    elif [ "$spec_mode" = "mtp" ]; then
+      spec_model_path=$(lookup_mtp_model "$suffix") || true
+    fi
 
     if [ "$do_restart" = 1 ]; then
-      stop_server; start_server "$model_path" "$enable_mtp" "$mtp_model_path"
+      stop_server; start_server "$model_path" "$spec_mode" "$spec_model_path"
     else
-      start_server "$model_path" "$enable_mtp" "$mtp_model_path"
+      start_server "$model_path" "$spec_mode" "$spec_model_path"
     fi
     ;;
   *)
-    echo "Usage: $0 {start|start-mtp|start-<model>|stop|restart|restart-mtp|restart-<model>|status"
+    echo "Usage: $0 {start|start-mtp|start-dspark|start-<model>|stop|restart|restart-mtp|restart-dspark|restart-<model>|status"
     echo "       |start-proxy|stop-proxy|restart-proxy|status-proxy}"
     echo ""
     echo "Options:"
-    echo "  start              - Start ds4-server (default model)"
-    echo "  start-mtp          - Start ds4-server with MTP speculative decoding"
-    echo "  start-<model>      - Start ds4-server with an alternative model"
-    echo "  start-<model>-mtp  - Start ds4-server with an alternative model + MTP"
-    echo "  stop               - Stop ds4-server"
-    echo "  restart            - Restart ds4-server (default model)"
-    echo "  restart-mtp        - Restart ds4-server with MTP speculative decoding"
-    echo "  restart-<model>    - Restart ds4-server with an alternative model"
-    echo "  restart-<model>-mtp - Restart ds4-server with an alternative model + MTP"
+    echo "  start               - Start ds4-server (default model)"
+    echo "  start-mtp           - Start with LEGACY one-stage MTP speculation (--mtp-draft, no --dspark)"
+    echo "  start-dspark        - Start with DSpark block speculation (--mtp ... --dspark)"
+    echo "  start-<model>       - Start ds4-server with an alternative model"
+    echo "  start-<model>-mtp   - Alternative model + legacy MTP drafter"
+    echo "  start-<model>-dspark - Alternative model + DSpark support"
+    echo "  stop                - Stop ds4-server"
+    echo "  restart             - Restart ds4-server (default model)"
+    echo "  restart-mtp         - Restart with legacy MTP speculative decoding"
+    echo "  restart-dspark      - Restart with DSpark speculative decoding"
+    echo "  restart-<model>     - Restart ds4-server with an alternative model"
+    echo "  restart-<model>-mtp / -dspark - as above, with restart"
     echo "  status             - Check if ds4-server is running"
     echo "  start-proxy        - Start the auth-gated proxy on PROXY_HOST:PROXY_PORT"
     echo "                        (requires DS4_API_KEY)"
@@ -430,15 +495,19 @@ case "${1:-}" in
       echo "  ${MODEL_KEYS[$i]}  -> ${MODEL_PATHS[$i]}"
     done
     echo ""
-    echo "MTP model: $MTP_MODEL"
-    echo "Per-model MTP drafts (used by start-<model>-mtp):"
-    for i in "${!MTP_KEYS[@]}"; do
-      echo "  ${MTP_KEYS[$i]}  -> ${MTP_PATHS[$i]}"
+    echo "Legacy MTP drafter: $MTP_MODEL"
+    echo "DSpark support model: $DSPARK_MODEL"
+    echo "Per-model DSpark support (used by start-<model>-dspark):"
+    for i in "${!DSPARK_KEYS[@]}"; do
+      echo "  ${DSPARK_KEYS[$i]}  -> ${DSPARK_PATHS[$i]}"
     done
     echo "MTP/DSpark tuning (script variables or env overrides):"
-    echo "  MTP_DRAFT           - Max autoregressive draft tokens (default: 1)"
-    echo "  MTP_MARGIN          - Verifier confidence margin (default: 3)"
+    echo "  MTP_DRAFT           - Legacy MTP only: max draft tokens (default: 2; server"
+    echo "                        gate requires > 1 for speculation to fire)"
+    echo "  MTP_MARGIN          - Legacy MTP verifier confidence margin (default: 3)"
     echo "  DSPARK_CONFIDENCE   - DSpark confidence threshold 0..1 (default: 0.6)"
+    echo "  DSPARK_EXACT        - 1 = --mtp-exact-sampling (target distribution at"
+    echo "                        non-zero temperature; default 0 = opportunistic)"
     echo ""
     echo "Environment:"
     echo "  DEBUG=1             - Enable verbose output"

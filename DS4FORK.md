@@ -220,11 +220,16 @@ unbounded retries. This change hardens that path end-to-end.
   byte offsets after stripping so clients never see out-of-range positions.
 
 ### 3.5 Launch-script tuning (`ds4-server.sh`)
-- `CTX=256000` (:9), `MTP_DRAFT=1` (:37), `MTP_MARGIN=3` (:38), `DSPARK_CONFIDENCE=0.6` (:41).
-- Wired through `--mtp … --dspark --mtp-draft … --mtp-margin …` (:113) and
-  `--dspark-confidence …` (:114).
+- `CTX=512000` (:9), `MTP_DRAFT=2` / `MTP_MARGIN=3` / `DSPARK_CONFIDENCE=0.6` /
+  `DSPARK_EXACT=0` (top of script, env-overridable).
+- **Pathways split 2026-08-31:** `start-<model>-mtp` now runs the **legacy**
+  one-stage MTP drafter (`--mtp <May file> --mtp-draft … --mtp-margin …`, no
+  `--dspark`); `start-<model>-dspark` (and `start-dspark`) runs DSpark
+  (`--mtp <dspark-support> --dspark [--mtp-exact-sampling] --dspark-confidence …`).
+  Previously `-mtp` silently meant DSpark.
 - Alternative models: `MODEL_KEYS`/`MODEL_PATHS` parallel arrays (:21–24), `lookup_model` (:26),
-  `start-<model>`/`restart-<model>` dispatch (commit 70568c2).
+  `start-<model>`/`restart-<model>` dispatch (commit 70568c2); per-model DSpark map
+  `DSPARK_KEYS`/`DSPARK_PATHS` + `lookup_dspark_model`.
 
 ## 4. Tests (`tests/ds4_test.c`)
 
@@ -837,15 +842,56 @@ The think-tool recovery path injects tokens into the live session that diverge f
 ## TL;DR — use the official support GGUF
 
 DSpark drafting works with antirez's official support model
-(`DeepSeek-V4-Flash-DSpark-support.gguf`, ~6 GB, from `antirez/deepseek-v4-gguf`
-via `./download_model.sh dspark-support`). It loads with `invalid=0` **with no
+(`DeepSeek-V4-Flash-DSpark-support-0731.gguf`, ~6 GB, from `antirez/deepseek-v4-gguf`
+via `./download_model.sh ds4f-dspark`). It loads with `invalid=0` **with no
 tensor renaming** and, against the `0731` mixed-quant main model, drafts at
-**~89% acceptance** and is net-profitable. `ds4-server.sh` points
-`MTP_PATHS["0731"]` at it:
+**~83–89% acceptance** and is net-profitable. `ds4-server.sh` has separate
+commands per pathway (updated 2026-08-31 — the old `start-0731-mtp` was really
+DSpark):
 
 ```sh
-./ds4-server.sh start-0731-mtp
+./ds4-server.sh start-0731-dspark   # --mtp <dspark-support-0731> --dspark
+./ds4-server.sh start-0731-mtp      # LEGACY one-stage MTP (May drafter, no --dspark)
+DSPARK_EXACT=1 ./ds4-server.sh start-0731-dspark   # + --mtp-exact-sampling
 ```
+
+**Legacy MTP vs DSpark are distinct pathways** in the engine (`support_model_detect`,
+`ds4.c:2812`): DSpark requires `stages>=3` + main_proj/markov/confidence tensors;
+the legacy file (`DeepSeek-V4-Flash-MTP-Q4K-Q8_0-F32.gguf`, 3.6 GB, uploaded to HF
+2026-05-06, still the only official standalone MTP drafter — **no 0731 refresh**)
+is detected by `mtp.0.e_proj/h_proj/hc_head_base` → `mtp_ready=true`, one-stage
+autoregressive drafts capped by `--mtp-draft`.
+
+Measured 2026-08-31 on M5 Max 128 GB, current q2-q4 `fixed-0731` gguf, identical
+greedy `/v1/completions` prompt (predictable code continuation, 300 tok, warm KV):
+
+| Config | t/s (2nd run) | vs baseline |
+|---|---|---|
+| baseline (no speculation) | 43.0 | — |
+| legacy MTP `--mtp-draft 2 --mtp-margin 3` | 41.2 | −4% |
+| legacy MTP `--mtp-draft 2 --mtp-margin 1` | 41.2 | −4% |
+| DSpark conf 0.6, greedy | 45.4 | **+5.6%** |
+| DSpark conf 0.6, opportunistic temp 1 | 40.9 | −5% |
+| DSpark `--mtp-exact-sampling` conf 0.8, temp 1 | 40.4 | −6% |
+
+The legacy May drafter **does** load and draft against the 0731 main model
+(94% of cycles accepted full depth-2, output coherent — the old checkpoint
+mismatch fear was wrong), but per-cycle cost (draft ~2 ms + batch verify ~22 ms)
+is not repaid at depth 2 on Metal: net-negative here. **DSpark is the supported
+speculation path for 0731; legacy MTP is effectively retired** (upstream removed
+the `mtp` download target from `download_model.sh`).
+
+DSpark stats on the same workload: `accept_rate=82.79% avg_accept=0.359
+no_draft=713/844 scheduler_skips=561` — the adaptive scheduler declines most
+cycles; the gain concentrates in predictable stretches.
+
+Non-greedy DSpark is **no longer greedy-only** (upstream `769a8ba`/`8d683d6`,
+merged in `d887a74`): at `temperature > 0` plain `--dspark` uses opportunistic
+sampling (commits target-greedy-matched suffixes); `--mtp-exact-sampling`
+preserves the target distribution (probabilistic accept, default conf 0.8).
+Server spec gate is now `ds4_server.c:11872-11877` (`ds4_engine_mtp_draft_tokens
+> 1`, no temperature term). Fork's own rejection-sampling verifier dropped in
+`dd1a02a` in favor of upstream.
 
 The third-party HF-converted drafter
 (`alessandrobologna/DeepSeek-V4-Flash-0731-DSpark-Drafter-GGUF`) is **not
@@ -855,10 +901,14 @@ the target model. See "HF conversion (reference only)" below.
 
 ## How DSpark is enabled (and the gotchas)
 
-Invocation is `--mtp <support.gguf> --dspark --temp 0` (README §DSpark). Notes:
+Invocation is `--mtp <support.gguf> --dspark` (README §DSpark). Notes:
 
-- **Greedy only.** Sampled decoding ignores DSpark proposals. The server's
-  speculative gate (`ds4_server.c:11554`) requires `temperature <= 0`.
+- **Non-greedy works since the upstream stochastic merge.** At `temperature > 0`
+  plain `--dspark` drafts opportunistically; `--mtp-exact-sampling` keeps the
+  target distribution. The old "gate requires `temperature <= 0`" behavior is
+  gone (gate now `ds4_server.c:11872`). Legacy MTP (no `--dspark`) remains
+  greedy-only: `ds4_session_eval_speculative` falls back to one-token decode
+  at `temperature > 0` for non-DSpark engines (`ds4.c:67391`).
 - **`--mtp-draft` / `--mtp-margin` are legacy-MTP flags.** For DSpark the block
   size comes from the support model metadata (`block=5`); `mtp_ready` is *not*
   set for DSpark (`ds4.c:55886`), so `ds4_engine_mtp_draft_tokens` returns the
