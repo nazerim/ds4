@@ -1237,14 +1237,86 @@ static int ds4_gpu_wait_pending_command_buffers(const char *label) {
     return ok;
 }
 
+static bool g_metal_label_profile_enabled = false;
+
+static void ds4_gpu_label_profile_set_enabled(void) {
+    static bool checked = false;
+    if (!checked) {
+        checked = true;
+        g_metal_label_profile_enabled = getenv("DS4_METAL_LABEL_PROFILE") != NULL;
+    }
+}
+
+typedef struct {
+    const char *label;
+    double busy_ms;
+    uint64_t calls;
+} ds4_gpu_label_profile_entry;
+
+#define DS4_GPU_LABEL_PROFILE_MAX 48
+static ds4_gpu_label_profile_entry
+    g_ds4_gpu_label_profile[DS4_GPU_LABEL_PROFILE_MAX];
+
+static void ds4_gpu_label_profile_note(const char *label, double busy_ms) {
+    if (!label) label = "(null)";
+    for (int i = 0; i < DS4_GPU_LABEL_PROFILE_MAX; i++) {
+        if (g_ds4_gpu_label_profile[i].label &&
+            !strcmp(g_ds4_gpu_label_profile[i].label, label)) {
+            g_ds4_gpu_label_profile[i].busy_ms += busy_ms;
+            g_ds4_gpu_label_profile[i].calls++;
+            return;
+        }
+        if (!g_ds4_gpu_label_profile[i].label) {
+            g_ds4_gpu_label_profile[i].label = label;
+            g_ds4_gpu_label_profile[i].busy_ms = busy_ms;
+            g_ds4_gpu_label_profile[i].calls = 1;
+            return;
+        }
+    }
+}
+
+static void ds4_gpu_label_profile_print(const char *when) {
+    if (!g_metal_label_profile_enabled) return;
+    ds4_gpu_label_profile_entry tmp[DS4_GPU_LABEL_PROFILE_MAX];
+    int n = 0;
+    double total = 0.0;
+    for (int i = 0; i < DS4_GPU_LABEL_PROFILE_MAX; i++) {
+        if (!g_ds4_gpu_label_profile[i].label) continue;
+        tmp[n++] = g_ds4_gpu_label_profile[i];
+        total += g_ds4_gpu_label_profile[i].busy_ms;
+    }
+    for (int i = 0; i < n; i++) {
+        for (int j = i + 1; j < n; j++) {
+            if (tmp[j].busy_ms > tmp[i].busy_ms) {
+                ds4_gpu_label_profile_entry t = tmp[i];
+                tmp[i] = tmp[j];
+                tmp[j] = t;
+            }
+        }
+    }
+    fprintf(stderr, "ds4: Metal label profile %s total=%.1f ms\n", when, total);
+    for (int i = 0; i < n; i++) {
+        fprintf(stderr,
+                "ds4:   %-32s %10.1f ms  %8.2f%%  %llu calls\n",
+                tmp[i].label, tmp[i].busy_ms,
+                total > 0.0 ? 100.0 * tmp[i].busy_ms / total : 0.0,
+                (unsigned long long)tmp[i].calls);
+    }
+}
+
 static int ds4_gpu_finish_command_buffer(id<MTLCommandBuffer> cb, int owned, const char *label) {
     if (!owned) return 1;
 
+    ds4_gpu_label_profile_set_enabled();
     [cb commit];
     int ok = ds4_gpu_wait_pending_command_buffers(label);
     if (!ds4_gpu_wait_command_buffer(cb, label)) {
         ok = 0;
         ds4_gpu_invalidate_zero_prefix_prefill_block_maps();
+    }
+    if (g_metal_label_profile_enabled) {
+        const double busy = (cb.GPUEndTime - cb.GPUStartTime) * 1000.0;
+        if (busy > 0.0) ds4_gpu_label_profile_note(label, busy);
     }
     ds4_gpu_stream_expert_cache_note_owned_completed();
     [g_transient_buffers removeAllObjects];
@@ -10214,6 +10286,8 @@ void ds4_gpu_cleanup(void) {
             getenv("DS4_METAL_MEMORY_REPORT") == NULL) {
             ds4_gpu_print_memory_report("at cleanup");
         }
+        ds4_gpu_label_profile_set_enabled();
+        ds4_gpu_label_profile_print("at cleanup");
         g_selected_readback_event = nil;
         g_selected_readback_event_value = 0;
         [g_transient_buffers removeAllObjects];
