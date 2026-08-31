@@ -1188,3 +1188,116 @@ At the miss (12:13:32, `prompt=159353`, `cached=16384`) a **32768 anchor was sti
   - Tests: `test_kv_cache_retire_grace_protects_recent`, `test_kv_cache_retire_grace_halves_before_retire`, `test_kv_cache_divergence_target_logic` (in `--server`); `tests/kv_policy_harness` (model-free, in `make test`).
 
 **Wrap-up:** KV-cache divergence work for this investigation is complete. The deployed mitigation (`KV_SMALL_DENSE=49152`) bounds AGENTS.md-style head-divergence rebuilds to restart from the deepest valid anchor; the synthetic regression test (`./ds4_test --kv-head-divergence`) guards it; restitch was evaluated and declined; divergent small-dense branches are now pruned automatically; the budget default handles ultra-long conversations; and the v2 eviction redesign (retire-grace + divergence anchors + 128 GiB budget, PLAN-KV-REWRITE.md) removes the cross-session retirement churn that dominated rebuild cost.
+
+---
+
+# PREFILL — M5 Max Performance Attribution (Investigation, 2026-08-31)
+
+**Model under test:** q2-q4 mixed `fixed-0731` (97.6 GB), Metal, M5 Max 128 GB,
+`prefill_chunk=4096` default. ANE is a separate, closed track (not viable).
+
+## Headline numbers
+
+| Frontier | Prefill t/s | Per-4096-chunk wall |
+|---|---|---|
+| 2048 (cold) | 675–735 | ~2.8 s per 2048 |
+| 34816 | 574–590 | ~7.2 s |
+| 65536 | 478–529 | ~7.7 s |
+| 160k+ (server) | 304 | ~13.5 s |
+
+## Attribution (per 4096-token chunk)
+
+| Component | 2k ctx | 65k ctx | Method |
+|---|---|---|---|
+| Routed MoE gemm | ~53% (1.48 s/2048) | ~33% (2.55 s) | `DS4_METAL_MOE_STAGE_PROFILE` all layers |
+| Flash-attn incl. mask/copies | <1% | **0.4%** (497 ms whole run) | `DS4_METAL_FLASH_ATTN_STAGE_PROFILE` |
+| Dense Q8 attn-out | ~2% | ~2% | `DS4_METAL_Q8_PREFILL_PROFILE` |
+| Residual (shared-exp/qkv fused, HC, **indexer**, compressor, norms) | ~0.64 ms/tok | **~1.27 ms/tok** | difference |
+
+The ctx-decay lives **entirely in the non-MoE residual**. MoE is ctx-flat and
+actually gets *more* efficient at bigger chunks (avg ~48–96 rows/expert tile).
+Attention kernels cannot be the cause: DSv4 attention is window-128 + ratio-4
+compressed and its `keys=` parameter is **constant at 4128** regardless of ctx.
+The indexer pipeline (`kernel_dsv4_indexer_scores_nax` — Tensor-API, already
+M5-optimized — + top-k/argsort over `n_comp`, which grows with ctx) and the
+compressor pooling are the only ctx-scaling non-MoE code left.
+
+## Levers tested
+
+1. **Chunk size** `--prefill-chunk` 2048/4096/8192: 2048 wins @2k, loses @65k;
+   4096 ≈ 8192. **Default 4096 already optimal.** Closed.
+2. **Q4_K Tensor-API (MPP) grouped matmul.** `kernel_mul_mm_id_mpp` was only
+   instantiated for IQ2_XXS/Q2_K; the 6 Q4_K layers of the mixed quant ran the
+   legacy fused `kernel_mul_mm_id_q4_K_pair_swiglu_f16` (simdgroup). Added
+   `kernel_mul_mm_id_q4_K_{f32,f16}_mpp` instantiations + env-gated dispatch
+   (`DS4_METAL_MOE_Q4_MPP`, kept in git history of this session only). Split
+   mpp MoE stages ≈ fused control (118 vs 123 ms/4096-chunk), and the
+   non-fused `activation_weight` pass (+5 ms) erased the gain: 560 vs 567 t/s
+   overall (within noise). **Reverted — no lever.** A *fused* gate+up+swiglu
+   MPP kernel (`pair_swiglu` on the tensor path) would keep the epilogue win
+   and is the only way this direction pays (ceiling ≈ +2% total prefill).
+3. **Thermal discriminator:** 5 min idle → 34816 prefill: 587.9/580.1 t/s vs
+   back-to-back 556.7/555.2. Cold-start bonus ≈ **+5–6%**, roughly constant
+   across ctx. The 2k→65k decay (−29%) is algorithmic, not throttling.
+
+## New instrumentation kept in tree
+
+`DS4_METAL_LABEL_PROFILE=1` (`ds4_metal.m`): accumulates GPU busy time
+(`GPUEndTime-GPUStartTime`) per owned command-buffer label, summary printed at
+cleanup. Caveat found: during prefill nearly everything runs inside batched
+command buffers (`owned==0` fast path), so label profiles show only ~0.02% —
+useful for the decode path and to prove host-side stalls are absent (65k
+prefill: 121.9 s GPU-busy vs ~124 s wall → GPU-bound, no host gap).
+
+## Indexer attribution (RESOLVED — `DS4_METAL_INDEXER_STAGE_PROFILE`)
+
+Per 4096-token chunk, only 21 of 43 layers run the compressed indexer (the
+window covers the rest). At ctx 65k, per layer at `n_comp=16384`:
+
+| Stage | ms/layer-call | ×21 = ms/chunk | share of 7.7 s chunk | Rate |
+|---|---|---|---|---|
+| indexer `score` (NAX TensorOps) | 81.5 | 1712 | 22% | ~13.5–14 TF/s, linear in comp |
+| indexer `topk` (full f32 argsort/row) | 27.6 | 580 | 7.5% | ~2.4 G elem/s sorted |
+| (2k chunk, for scale) score@comp=1024 | 3.1 | 66 | 0.9% | 22 TF/s |
+
+Cross-check: MoE 2545 + indexer 2292 + attn ~31 + dense-out ~272 +
+fused-residual ~2600 ≈ 7.74 s = measured wall at 65k. **Attribution is now
+complete.** The ctx-decay is quantified: score+topk grow linearly with
+`n_comp` (≈ ctx/4), so at 160k they consume ~5.7 s of a 13.5 s chunk (~42%).
+
+Kernel-level ceiling: score sits at ~14 TF/s (same plateau as the IQ2 MoE
+MPP gemms — this is the effective M5 tensor-op rate for these tile shapes,
+not an outlier bug; headroom realistically ≤1.5x via tile/K-packing tuning).
+`topk` is already block-merge partial selection (`kernel_argsort_f32_i32_desc`
+stages nth≤1024-element rows, keeps min(top_k,nth)=512 per block, then 4 merge
+rounds re-read the score row each time — that re-read ladder, not sorting, is
+most of its 27.6 ms). Tuning = larger shared stage (fewer blocks/rounds) +
+carry scores forward with indices so merge rounds stop re-reading the row.
+
+**Total realistic improvement from this track:** ~10–15% prefill t/s at 65k,
+~20–30% at 160k+ (where the server spends its worst rebuilds), from:
+topk merge-round restructuring (~+2–4% at 65k), f16 score buffer halves
+merge re-reads + write BW (~+2–3%), score-kernel tile/K-packing tuning
+(~+3–6% if 14→18 TF/s — the kernel is the single biggest ctx-scaling item
+and sits at the same ~14 TF/s plateau as the IQ2 MPP gemms). Beyond that, the
+remaining big bucket is the ~2.6 s/chunk fused-residual (shared-expert, qkv,
+HC, compressor, norms), which needs MTLCounterSampleBuffer per-kernel
+profiling to decompose — no batch-level tool can see inside it.
+
+## Remaining open levers (ranked) — superseded by table above where noted
+
+1. **Indexer scores/top-k + compressor at long ctx** — needs batch-internal
+   attribution: either an MTLCounterSampleBuffer per-encoder profile or
+   targeted stage-split flushes (pattern: `DS4_METAL_MOE_STAGE_PROFILE`) around
+   the indexer/top-k/compressor graph nodes. This is where the +0.63 ms/tok
+   growth at 65k must be.
+2. **HC/sinkhorn** (20 iterations × 43 layers): ctx-flat, so only a
+   constant-factor win; would need a batch-internal profiler or a
+   sinkhorn-iterations quality sweep to evaluate.
+3. **Fused MPP pair_swiglu for Q4_K** (~+2% ceiling, see lever 2 above).
+4. **Thermal:** ~5% is recoverable via `--power` scheduling or burst
+   interleaving only — cosmetic.
+
+**Negative results recorded so we don't re-try:** chunk-size tuning (done),
+Q4 non-fused MPP (done), attention-kernel optimization (<0.5% share, done),
+ANE (separate track, dead).
