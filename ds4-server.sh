@@ -46,8 +46,8 @@ TOKENS=384000
 #  - DSpark  (--dspark): block drafter; REQUIRES the 0731 support GGUF and 0731
 #    main models only (checkpoint-specific). Non-greedy uses opportunistic
 #    sampling; set DSPARK_EXACT=1 for --mtp-exact-sampling (target distribution).
-#  - Legacy MTP (--mtp-draft): one-stage nextn drafter (May 2026 GGUF). Same
-#    engine flag (--mtp) but WITHOUT --dspark; ds4 detects the kind by tensor
+#  - Legacy MTP (--mtp-draft): one-stage nextn drafter (May 2026 GGUF). Pass the
+#    drafter via --mtp-model WITHOUT --dspark; ds4 detects the kind by tensor
 #    names. Upstream: DSpark replaces this for the 0731 checkpoint.
 DSPARK_MODEL="gguf/DeepSeek-V4-Flash-DSpark-support-0731.gguf"
 MTP_MODEL="gguf/DeepSeek-V4-Flash-MTP-Q4K-Q8_0-F32.gguf"
@@ -212,11 +212,11 @@ start_server() {
   if [ "$spec_mode" = "mtp" ]; then
     # Legacy one-stage nextn drafter: no --dspark. --mtp-draft must be > 1 or
     # the server's speculation gate never fires.
-    MTP_ARGS+=(--mtp "$spec_used" --mtp-draft "$MTP_DRAFT" --mtp-margin "$MTP_MARGIN")
+    MTP_ARGS+=(--mtp-model "$spec_used" --mtp-draft "$MTP_DRAFT" --mtp-margin "$MTP_MARGIN")
   elif [ "$spec_mode" = "dspark" ]; then
     # DSpark: block size comes from the support model metadata; --mtp-draft /
     # --mtp-margin are legacy flags and are NOT passed here.
-    MTP_ARGS+=(--mtp "$spec_used" --dspark)
+    MTP_ARGS+=(--mtp-model "$spec_used" --dspark)
     if [ "$DSPARK_EXACT" = "1" ]; then
       MTP_ARGS+=(--mtp-exact-sampling)
     fi
