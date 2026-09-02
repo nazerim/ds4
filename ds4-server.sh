@@ -51,6 +51,11 @@ TOKENS=384000
 #    names. Upstream: DSpark replaces this for the 0731 checkpoint.
 DSPARK_MODEL="gguf/DeepSeek-V4-Flash-DSpark-support-0731.gguf"
 MTP_MODEL="gguf/DeepSeek-V4-Flash-MTP-Q4K-Q8_0-F32.gguf"
+# Vision encoder sidecar.  The default model (./ds4flash.gguf, re-linked by
+# `./download_model.sh ds4f-vision-q2-q4`) is the DeepSeek V4 Flash Vision-Exp
+# checkpoint and is served WITH vision.  start-0731 and other text-only models
+# never receive --vision (the encoder does not match their checkpoint).
+VISION_ENCODER="gguf/DeepSeek-V4-Flash-Vision-Encoder.gguf"
 # Cache-miss trace: set TRACE_PATH to a file path (e.g. ./log/ds4.trace) to make
 # the server write the exact cache-decision + first-mismatch token window for
 # every request. Used for debugging KV divergence (see DS4FORK.md KVCACHE —
@@ -201,6 +206,35 @@ start_server() {
   esac
   echo "Logging to $LOG_FILE"
 
+  # Vision arguments: the default model (./ds4flash.gguf) is Vision-Exp once
+  # `download_model.sh ds4f-vision-*` has relinked it; serve it WITH the
+  # encoder, and only then.  A Vision-Exp link without the encoder is fatal
+  # (image support would silently vanish).
+  DEFAULT_MODEL_RESOLVED=$(readlink "ds4flash.gguf" 2>/dev/null || echo "ds4flash.gguf")
+  VISION_ARGS=()
+  if [ -z "$model_path" ]; then
+    case "$DEFAULT_MODEL_RESOLVED" in
+      *Vision*)
+        if [ ! -f "$VISION_ENCODER" ]; then
+          echo "Error: default model is Vision-Exp but encoder not found: $VISION_ENCODER"
+          echo "       Run: ./download_model.sh ds4f-vision-encoder"
+          return 1
+        fi
+        if [ "$spec_mode" = "dspark" ] && [ "$spec_used" = "$DSPARK_MODEL" ]; then
+          echo "Error: the default Vision-Exp model needs its own drafter"
+          echo "       (gguf/DeepSeek-V4-Flash-Vision-Exp-DSpark-support.gguf), not the 0731 one."
+          echo "       Use start-0731-dspark for text, or set DSPARK_MODEL to the Vision-Exp support GGUF."
+          return 1
+        fi
+        VISION_ARGS+=(--vision "$VISION_ENCODER")
+        echo "Vision encoder attached: $VISION_ENCODER"
+        ;;
+      *)
+        echo "Note: default model is text-only ($(basename "$DEFAULT_MODEL_RESOLVED")); no --vision"
+        ;;
+    esac
+  fi
+
   # Build model argument
   MODEL_ARGS=()
   if [ -n "$model_path" ]; then
@@ -243,6 +277,7 @@ start_server() {
     --kv-cache-retire-grace-seconds "$KV_RETIRE_GRACE" \
     --kv-cache-max-divergence-anchors "$KV_MAX_DIVERGENCE_ANCHORS" \
     ${MTP_ARGS[@]+"${MTP_ARGS[@]}"} \
+    ${VISION_ARGS[@]+"${VISION_ARGS[@]}"} \
     ${TRACE_ARGS[@]+"${TRACE_ARGS[@]}"} \
     > "$LOG_FILE" 2>&1 &
 
@@ -490,7 +525,7 @@ case "${1:-}" in
     echo "  PROXY_PORT        - Proxy port (default: 8002)"
     echo "  DS4_API_KEY       - Bearer token clients must present (required to start proxy)"
     echo ""
-    echo "Available models (default: ds4flash.gguf):"
+    echo "Available models (default: ds4flash.gguf = Vision-Exp, served with --vision $VISION_ENCODER):"
     for i in "${!MODEL_KEYS[@]}"; do
       echo "  ${MODEL_KEYS[$i]}  -> ${MODEL_PATHS[$i]}"
     done
