@@ -11005,9 +11005,31 @@ static int kv_cache_try_load_vision(server *s, server_slot *slot,
             }
         }
     }
-    if (ok && (req->prompt.len < loaded ||
-               memcmp(lt->v, req->prompt.v, (size_t)loaded * sizeof(int)) != 0))
+    /* Token alignment, best to worst: (a) the request's own token vector
+     * shares the snapshot prefix exactly -> use it verbatim; (b) client
+     * re-render BPE-merged across the snapshot boundary (the familiar
+     * sampled-vs-re-tokenized divergence) -> keep the loader's
+     * exact-prefix-plus-tokenized-suffix effective prompt, but only when
+     * every image is attested fully below the frontier, so the text suffix
+     * cannot contain image placeholders. */
+    bool req_prompt_matches = req->prompt.len >= loaded &&
+        !memcmp(lt->v, req->prompt.v, (size_t)loaded * sizeof(int));
+    if (ok && !req_prompt_matches) {
+        for (size_t k = 0; k < req->image_count && ok; k++) {
+            const ds4_vision_span *sp = &req->images[k];
+            if ((uint64_t)sp->token_start + sp->embedding.token_count >
+                (uint64_t)loaded)
+                ok = 0;
+        }
+    } else if (ok) {
+        /* Replace the text-derived effective prompt with the request's own
+         * token vector (verified to share the snapshot prefix). */
+        ds4_tokens_free(effective_prompt);
+        *effective_prompt = (ds4_tokens){0};
+        tokens_copy_prefix(effective_prompt, &req->prompt, req->prompt.len);
+    } else {
         ok = 0;
+    }
     if (ok) {
         ds4_vision_span *below = NULL;
         size_t nb = 0;
@@ -11020,11 +11042,6 @@ static int kv_cache_try_load_vision(server *s, server_slot *slot,
         free(below);
     }
     if (ok) {
-        /* Replace the text-derived effective prompt with the request's own
-         * token vector (verified to share the snapshot prefix). */
-        ds4_tokens_free(effective_prompt);
-        *effective_prompt = (ds4_tokens){0};
-        tokens_copy_prefix(effective_prompt, &req->prompt, req->prompt.len);
         if (loaded_path_out && lr.path) *loaded_path_out = xstrdup(lr.path);
         if (loaded_ext_flags_out) *loaded_ext_flags_out = lr.ext_flags;
     } else {
