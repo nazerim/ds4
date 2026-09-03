@@ -9164,6 +9164,30 @@ typedef struct {
     size_t visible_len;
 } visible_live_state;
 
+#define KV_VISION_RECORD 40u
+#define KV_VISION_MAX_RECORDS 64u
+
+typedef struct {
+    uint32_t token_start;
+    uint32_t token_count;
+    uint8_t fingerprint[32];
+} kv_vision_record;
+
+/* Slot-owned multimodal disk-store context for the request currently owning
+ * the slot.  base_text is the request prompt with image marker nonces
+ * replaced by fingerprint-derived ids (deterministic across replays); recs
+ * are the request's image identities; base_tokens is the prompt token count
+ * covered by base_text.  valid=false whenever no multimodal request owns
+ * this slot, so stores from a stale session never see stale bytes. */
+typedef struct {
+    char *base_text;
+    size_t base_len;
+    int base_tokens;
+    kv_vision_record recs[KV_VISION_MAX_RECORDS];
+    size_t rec_count;
+    bool valid;
+} slot_vision_store;
+
 struct server_slot {
     server *srv;
     int id;
@@ -9171,6 +9195,11 @@ struct server_slot {
     live_tool_state responses_live;
     live_tool_state anthropic_live;
     visible_live_state thinking_live;
+    slot_vision_store vision_store;
+    /* Session frontier at the last successful image-conditioned snapshot;
+     * a multimodal disk load only proceeds when the live frontier equals it
+     * (so loading can never discard a newer unsaved image state). */
+    int vision_saved_tokens;
     int continued_last_store_tokens;
     /* Pending divergence anchor (miss common-prefix point): once this slot's
      * live session reaches the target, a reason=cold anchor is stored at
@@ -9986,23 +10015,17 @@ static void apply_anthropic_stream_tool_ids(tool_calls *calls,
 #define KV_TOOL_MAP_HEADER 8u
 
 /* Composite trailer sections.  The server owns the trailer chain after the
- * payload: zero or more sections, each "[3-char magic][version u8][u32 body]"
- * with the tool map as today, plus an optional vision identity section that
- * makes image-conditioned payloads verifiable on disk restore. */
+ * payload: zero or more "[3-char magic][version u8][u32 body]" sections -
+ * the legacy KVTM tool map plus an optional KVV1 vision identity section
+ * (kv_vision_record type and sizing constants live above server_slot).
+ * A file's presence of any section is advertised by KV_EXT_TOOL_MAP; the
+ * vision section additionally sets KV_EXT_VISION. */
 #define KV_EXT_VISION DS4_KVSTORE_EXT_VISION
 #define KV_VISION_MAGIC0 'K'
 #define KV_VISION_MAGIC1 'V'
 #define KV_VISION_MAGIC2 'I'
 #define KV_VISION_VERSION 1u
 #define KV_VISION_HEADER 8u
-#define KV_VISION_RECORD 40u
-#define KV_VISION_MAX_RECORDS 64u
-
-typedef struct {
-    uint32_t token_start;
-    uint32_t token_count;
-    uint8_t fingerprint[32];
-} kv_vision_record;
 
 /* Per-call trailer context passed through hooks.ud.  On store, records_in
  * carries the identities to serialize.  On load, records_out/record_count
@@ -10408,6 +10431,38 @@ static bool byte_prefix_match_visible(const char *text, size_t text_len,
     return true;
 }
 
+/* Deterministic disk-key form of a multimodal prompt: replace each marker
+ * nonce (which is request-random) with 24 hex characters of the matching
+ * span's embedding fingerprint (which identifies the image content).  The
+ * replacement is length-preserving and marker order equals span order by
+ * construction (both follow document order).  Returns a malloc'd string on
+ * success, or NULL when marker/span counts disagree. */
+static char *ds4_normalize_image_text(const char *text, size_t text_len,
+                                      const ds4_vision_span *spans,
+                                      size_t span_count, size_t *out_len) {
+    if (!text || span_count == 0) return NULL;
+    static const char hexd[] = "0123456789abcdef";
+    char *out = xmalloc(text_len + 1);
+    memcpy(out, text, text_len);
+    out[text_len] = '\0';
+    size_t k = 0;
+    for (size_t i = 0; i < text_len; ) {
+        const size_t e = ds4_image_marker_span(out, text_len, i);
+        if (!e) { i++; continue; }
+        if (k >= span_count) { free(out); return NULL; }
+        const size_t nonce_off = i + 11; /* "\x1e" + "DS4_IMAGE_" */
+        for (size_t b = 0; b < 12; b++) {
+            out[nonce_off + b * 2] = hexd[spans[k].embedding.fingerprint[b] >> 4];
+            out[nonce_off + b * 2 + 1] = hexd[spans[k].embedding.fingerprint[b] & 15];
+        }
+        k++;
+        i = e;
+    }
+    if (k != span_count) { free(out); return NULL; }
+    if (out_len) *out_len = text_len;
+    return out;
+}
+
 
 static void tokens_copy_prefix(ds4_tokens *dst, const ds4_tokens *src, int n) {
     ds4_kvstore_tokens_copy_prefix(dst, src, n);
@@ -10572,24 +10627,65 @@ static bool kv_cache_store_live_prefix_text(server *s, server_slot *slot,
                                             size_t evict_protect_len) {
     if (!s || !slot) return false;
     char err[160] = {0};
+    pthread_mutex_lock(&s->inference_mu);
+    /* sync_image_count covers progress-callback writes during prefill;
+     * checkpoint_image_count covers completed sessions. */
+    const bool has_vision = ds4_session_has_vision_state(slot->session);
     kv_trailer_ctx tctx = {0};
     tctx.s = s;
-    ds4_kvstore_trailer_hooks hooks = kv_cache_tool_map_hooks(&tctx, false);
-    pthread_mutex_lock(&s->inference_mu);
-    /* The payload contains image-conditioned KV rows, but the disk key and
-     * trailer do not contain image fingerprints. Never let generic image
-     * placeholder tokens become a cache hit for a different image.
-     * sync_image_count covers progress-callback writes during prefill;
-     * checkpoint_image_count covers completed sessions. */
-    if (ds4_session_has_vision_state(slot->session)) {
-        pthread_mutex_unlock(&s->inference_mu);
-        return false;
+    char *vision_text = NULL;
+    kv_vision_record recs[KV_VISION_MAX_RECORDS];
+    const char *store_text = cache_text_override;
+    if (has_vision) {
+        /* Image-conditioned payloads reach disk only as a frontier snapshot
+         * (store_len == session length) carrying a verified identity trailer
+         * and a fingerprint-normalized key text.  Partial-frontier anchors
+         * cannot attest which rows depend on which image and stay rejected.
+         */
+        const slot_vision_store *vs = &slot->vision_store;
+        bool okv = vs->valid && store_len == tokens->len &&
+                   vs->base_tokens <= store_len &&
+                   vs->rec_count <= KV_VISION_MAX_RECORDS;
+        if (okv) {
+            for (size_t i = 0; i < vs->rec_count; i++) {
+                const uint64_t end = (uint64_t)vs->recs[i].token_start +
+                                     vs->recs[i].token_count;
+                if (vs->recs[i].token_count == 0 ||
+                    end > (uint64_t)store_len) {
+                    okv = false;  /* a span crossing the frontier is unusable */
+                    break;
+                }
+                recs[i] = vs->recs[i];
+            }
+        }
+        if (okv) {
+            ds4_tokens tail = {0};
+            tail.v = tokens->v + vs->base_tokens;
+            tail.len = store_len - vs->base_tokens;
+            size_t tail_len = 0;
+            char *tail_text = tail.len > 0
+                ? render_tokens_text(s->engine, &tail, &tail_len) : NULL;
+            vision_text = xmalloc(vs->base_len + tail_len + 1);
+            memcpy(vision_text, vs->base_text, vs->base_len);
+            if (tail_len) memcpy(vision_text + vs->base_len, tail_text, tail_len);
+            vision_text[vs->base_len + tail_len] = '\0';
+            free(tail_text);
+            tctx.records_in = recs;
+            tctx.record_count_in = vs->rec_count;
+            store_text = vision_text;
+        }
+        if (!okv) {
+            pthread_mutex_unlock(&s->inference_mu);
+            return false;
+        }
     }
+    ds4_kvstore_trailer_hooks hooks =
+        kv_cache_tool_map_hooks(&tctx, tctx.record_count_in != 0);
     pthread_mutex_lock(&s->kv_mu);
     bool ok = ds4_kvstore_store_live_prefix_text(&s->kv, s->engine,
                                                   slot->session,
                                                   tokens, store_len, reason,
-                                                  cache_text_override,
+                                                  store_text,
                                                   cache_text_ext,
                                                   cache_text_key,
                                                   &hooks, err, sizeof(err),
@@ -10597,6 +10693,8 @@ static bool kv_cache_store_live_prefix_text(server *s, server_slot *slot,
                                                   evict_protect_len);
     pthread_mutex_unlock(&s->kv_mu);
     pthread_mutex_unlock(&s->inference_mu);
+    free(vision_text);
+    if (ok && has_vision) slot->vision_saved_tokens = store_len;
     return ok;
 }
 
@@ -10828,6 +10926,117 @@ static int kv_cache_try_load(server *s, server_slot *slot, const request *req,
                                   loaded_path_out,
                                   loaded_ext_flags_out,
                                   req && req->api == API_RESPONSES);
+}
+
+/* Multimodal disk restore.  The snapshot's identity trailer must prove every
+ * row the payload holds: all trailer records match request spans; all request
+ * spans fully inside the restored frontier carry a record; a span crossing
+ * the frontier invalidates rows below it and rejects the load.  Spans beyond
+ * the frontier are simply new and will be prefilled by the ordinary sync.
+ * On success the effective prompt is the REQUEST's own token vector (the
+ * snapshot token list must match it as an exact prefix - re-tokenizing a
+ * text suffix would corrupt image placeholder ids), and the session's
+ * checkpoint identities are re-seeded so live reuse keeps working afterwards.
+ * Returns the restored prefix length or 0 (session left invalidated). */
+static int kv_cache_try_load_vision(server *s, server_slot *slot,
+                                    const request *req,
+                                    ds4_tokens *effective_prompt,
+                                    char **loaded_path_out,
+                                    uint8_t *loaded_ext_flags_out) {
+    if (!s || !slot || !req || !req->prompt_text || req->image_count == 0)
+        return 0;
+    size_t norm_len = 0;
+    char *norm = ds4_normalize_image_text(req->prompt_text,
+                                          strlen(req->prompt_text),
+                                          req->images, req->image_count,
+                                          &norm_len);
+    if (!norm) return 0;
+    ds4_kvstore_load_result lr = {0};
+    kv_trailer_ctx tctx = {0};
+    tctx.s = s;
+    ds4_kvstore_trailer_hooks hooks = kv_cache_tool_map_hooks(&tctx, true);
+    pthread_mutex_lock(&s->inference_mu);
+    if (ds4_session_has_vision_state(slot->session))
+        ds4_session_invalidate(slot->session);
+    pthread_mutex_lock(&s->kv_mu);
+    int loaded = ds4_kvstore_try_load_text(&s->kv, s->engine, slot->session,
+                                           norm, effective_prompt, &lr,
+                                           &hooks, req->api == API_RESPONSES);
+    pthread_mutex_unlock(&s->kv_mu);
+    int ok = loaded > 0;
+    const ds4_tokens *lt = NULL;
+    if (ok) {
+        lt = ds4_session_tokens(slot->session);
+        ok = lt && lt->len == loaded &&
+             (lr.ext_flags & KV_EXT_VISION) &&
+             tctx.vision_section_present && !tctx.vision_section_corrupt;
+    }
+    if (ok) {
+        for (size_t i = 0; i < tctx.record_count_out; i++) {
+            const kv_vision_record *r = &tctx.records_out[i];
+            bool found = false;
+            for (size_t k = 0; k < req->image_count; k++) {
+                const ds4_vision_embedding *em = &req->images[k].embedding;
+                if (r->token_start == req->images[k].token_start &&
+                    r->token_count == em->token_count &&
+                    !memcmp(r->fingerprint, em->fingerprint, 32)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) { ok = 0; break; }
+        }
+    }
+    if (ok) {
+        for (size_t k = 0; k < req->image_count && ok; k++) {
+            const ds4_vision_span *sp = &req->images[k];
+            const uint64_t end = (uint64_t)sp->token_start +
+                                 sp->embedding.token_count;
+            if (sp->token_start < (uint64_t)loaded &&
+                end > (uint64_t)loaded) { ok = 0; break; }  /* crosses */
+            if (end <= (uint64_t)loaded) {
+                bool covered = false;
+                for (size_t i = 0; i < tctx.record_count_out; i++)
+                    if (tctx.records_out[i].token_start == sp->token_start)
+                        { covered = true; break; }
+                if (!covered) ok = 0;
+            }
+        }
+    }
+    if (ok && (req->prompt.len < loaded ||
+               memcmp(lt->v, req->prompt.v, (size_t)loaded * sizeof(int)) != 0))
+        ok = 0;
+    if (ok) {
+        ds4_vision_span *below = NULL;
+        size_t nb = 0;
+        if (req->image_count != 0) below = xmalloc(sizeof(below[0]) * req->image_count);
+        for (size_t k = 0; k < req->image_count; k++)
+            if ((uint64_t)req->images[k].token_start +
+                    req->images[k].embedding.token_count <= (uint64_t)loaded)
+                below[nb++] = req->images[k];
+        ok = ds4_session_set_vision_identities(slot->session, below, nb);
+        free(below);
+    }
+    if (ok) {
+        /* Replace the text-derived effective prompt with the request's own
+         * token vector (verified to share the snapshot prefix). */
+        ds4_tokens_free(effective_prompt);
+        *effective_prompt = (ds4_tokens){0};
+        tokens_copy_prefix(effective_prompt, &req->prompt, req->prompt.len);
+        if (loaded_path_out && lr.path) *loaded_path_out = xstrdup(lr.path);
+        if (loaded_ext_flags_out) *loaded_ext_flags_out = lr.ext_flags;
+    } else {
+        ds4_tokens_free(effective_prompt);
+        *effective_prompt = (ds4_tokens){0};
+        /* inference_mu still held: the session is reset here, not after
+         * unlocking, so no other worker can observe the unverified load. */
+        ds4_session_invalidate(slot->session);
+        loaded = 0;
+    }
+    pthread_mutex_unlock(&s->inference_mu);
+    free(norm);
+    ds4_kvstore_load_result_free(&lr);
+    return loaded;
 }
 
 static int live_text_prefix_prompt(server *s, server_slot *slot,
@@ -12505,6 +12714,38 @@ static void generate_job_inner(server *s, server_slot *slot, job *j) {
     char err[160];
     err[0] = '\0';
     const bool multimodal = j->req.image_count != 0;
+    /* Vision snapshot slot context: a multimodal request owning this slot
+     * arms it with the normalized transcript and image identities, which is
+     * what lets frontier stores record image-conditioned KV safely.  Any
+     * other request disarms it (slot reuse must never inherit a stale key). */
+    free(slot->vision_store.base_text);
+    slot->vision_store.base_text = NULL;
+    slot->vision_store.valid = false;
+    slot->vision_store.rec_count = 0;
+    if (multimodal && s->kv.enabled && j->req.prompt_text &&
+        j->req.image_count <= KV_VISION_MAX_RECORDS)
+    {
+        size_t norm_len = 0;
+        char *norm = ds4_normalize_image_text(j->req.prompt_text,
+                                              strlen(j->req.prompt_text),
+                                              j->req.images, j->req.image_count,
+                                              &norm_len);
+        if (norm) {
+            slot->vision_store.base_text = norm;
+            slot->vision_store.base_len = norm_len;
+            slot->vision_store.base_tokens = (int)j->req.prompt.len;
+            for (size_t i = 0; i < j->req.image_count; i++) {
+                slot->vision_store.recs[i].token_start =
+                    j->req.images[i].token_start;
+                slot->vision_store.recs[i].token_count =
+                    j->req.images[i].embedding.token_count;
+                memcpy(slot->vision_store.recs[i].fingerprint,
+                       j->req.images[i].embedding.fingerprint, 32);
+            }
+            slot->vision_store.rec_count = j->req.image_count;
+            slot->vision_store.valid = true;
+        }
+    }
     pthread_mutex_lock(&s->inference_mu);
     const int old_pos = ds4_session_pos(slot->session);
     const int common = ds4_session_common_prefix(slot->session, &j->req.prompt);
@@ -12665,6 +12906,29 @@ static void generate_job_inner(server *s, server_slot *slot, job *j) {
                    j->req.image_count, cached, prompt_for_sync->len,
                    live_vision_exact_match ? "fingerprint-exact-match" :
                                              "fingerprint-prefix-match");
+    }
+    /* Vision disk restore.  Only attempted when the slot's live frontier is
+     * exactly the frontier of the last successful image snapshot: loading an
+     * older image state over a newer unsaved one is never worth the risk,
+     * and the cold rebuild keeps the live session authoritative. */
+    if (multimodal && cached == 0 && s->kv.enabled &&
+        slot->vision_store.valid &&
+        old_pos == slot->vision_saved_tokens)
+    {
+        disk_cached = kv_cache_try_load_vision(s, slot, &j->req,
+                                               &effective_prompt,
+                                               &disk_cache_path,
+                                               &disk_cache_ext_flags);
+        if (disk_cached > 0) {
+            cached = disk_cached;
+            cache_source = "disk-vision";
+            prompt_for_sync = &effective_prompt;
+            slot->continued_last_store_tokens = disk_cached;
+            slot->vision_saved_tokens = disk_cached;
+            server_log(DS4_LOG_KVCACHE,
+                       "ds4-server: multimodal disk kv hit images=%zu cached=%d prompt=%d",
+                       j->req.image_count, disk_cached, j->req.prompt.len);
+        }
     }
     if (cached == 0) slot->continued_last_store_tokens = 0;
     if (!multimodal && s->kv.enabled && cached == 0 &&
@@ -13693,6 +13957,19 @@ decode_again:
     } else if (!parsed_calls.len) {
         thinking_live_clear(s, slot);
     }
+    /* Snapshot the finished image turn immediately.  Text conversations can
+     * afford storing before a disk load (the next request's evict store);
+     * image-conditioned payloads must be written here, while the slot context
+     * describing this exact frontier is still armed, so a later slot handover
+     * or restart can restore the conversation from disk instead of
+     * re-prefilling the full image history. */
+    if (multimodal && s->kv.enabled && slot->vision_store.valid &&
+        ds4_session_has_vision_state(slot->session))
+    {
+        kv_cache_store_current(s, slot, "turn",
+                               j->req.prompt_text,
+                               j->req.prompt_text ? strlen(j->req.prompt_text) : 0);
+    }
 
     /* Record decode-only timing (post-prefill wall time) for API response. */
     j->req.decode_time_ms = (long long)((now_sec() - decode_t0) * 1000);
@@ -14552,6 +14829,9 @@ static void server_close_resources(server *s) {
         live_tool_state_free(&slot->responses_live);
         live_tool_state_free(&slot->anthropic_live);
         visible_live_free(&slot->thinking_live);
+        free(slot->vision_store.base_text);
+        slot->vision_store.base_text = NULL;
+        slot->vision_store.valid = false;
         if (slot->session) ds4_session_free(slot->session);
     }
     free(s->slot_threads);
@@ -19125,6 +19405,72 @@ static void test_byte_prefix_match_visible_markers(void) {
                                            prefix, plen));
 }
 
+static void test_normalize_image_text_and_trailer_roundtrip(void) {
+    ds4_vision_span spans[2];
+    memset(spans, 0, sizeof(spans));
+    spans[0].token_start = 5;
+    spans[0].embedding.token_count = 3;
+    for (int b = 0; b < 32; b++) spans[0].embedding.fingerprint[b] = (uint8_t)b;
+    spans[1].token_start = 20;
+    spans[1].embedding.token_count = 4;
+    memset(spans[1].embedding.fingerprint, 0xEE, 32);
+
+    char raw[256], want[256];
+    snprintf(raw, sizeof(raw),
+             "head\x1e" "DS4_IMAGE_00112233445566778899aabb" "\x1f"
+             "mid\x1e" "DS4_IMAGE_ccddeeff0011223344556677" "\x1f" "tail");
+    snprintf(want, sizeof(want),
+             "head\x1e" "DS4_IMAGE_000102030405060708090a0b" "\x1f"
+             "mid\x1e" "DS4_IMAGE_eeeeeeeeeeeeeeeeeeeeeeee" "\x1f" "tail");
+    size_t nlen = 0;
+    char *norm = ds4_normalize_image_text(raw, strlen(raw), spans, 2, &nlen);
+    TEST_ASSERT(norm != NULL);
+    TEST_ASSERT(nlen == strlen(raw));
+    TEST_ASSERT(!strcmp(norm, want));
+    free(norm);
+    /* Marker/span count mismatch is refused. */
+    TEST_ASSERT(ds4_normalize_image_text(raw, strlen(raw), spans, 1, &nlen) == NULL);
+    /* Second occurrence's fingerprint is used for the second marker. */
+    char swap[256];
+    snprintf(swap, sizeof(swap), "%s", raw);
+
+    /* Trailer section roundtrip through the load callback. */
+    kv_trailer_ctx wcx;
+    memset(&wcx, 0, sizeof(wcx));
+    kv_vision_record recs[2];
+    recs[0].token_start = 5; recs[0].token_count = 3;
+    memcpy(recs[0].fingerprint, spans[0].embedding.fingerprint, 32);
+    recs[1].token_start = 20; recs[1].token_count = 4;
+    memcpy(recs[1].fingerprint, spans[1].embedding.fingerprint, 32);
+    wcx.s = NULL;   /* no tool map: the guard returns the empty section */
+    wcx.records_in = recs;
+    wcx.record_count_in = 2;
+    uint64_t est = 0, written = 0;
+    TEST_ASSERT(kv_cache_trailer_size_cb(&wcx, "", &est));
+    TEST_ASSERT(est == KV_VISION_HEADER + 2 * KV_VISION_RECORD);
+    FILE *fp = tmpfile();
+    TEST_ASSERT(fp != NULL);
+    TEST_ASSERT(kv_cache_trailer_write_cb(&wcx, fp, "", &written));
+    TEST_ASSERT(written == est);
+    fflush(fp);
+    rewind(fp);
+    kv_trailer_ctx rcx;
+    memset(&rcx, 0, sizeof(rcx));
+    rcx.s = NULL;
+    TEST_ASSERT(kv_cache_trailer_load_cb(&rcx, fp, NULL) == 0);
+    TEST_ASSERT(rcx.vision_section_present && !rcx.vision_section_corrupt);
+    TEST_ASSERT(rcx.record_count_out == 2);
+    TEST_ASSERT(rcx.records_out[0].token_start == 5 &&
+                rcx.records_out[0].token_count == 3 &&
+                !memcmp(rcx.records_out[0].fingerprint,
+                        spans[0].embedding.fingerprint, 32));
+    TEST_ASSERT(rcx.records_out[1].token_start == 20 &&
+                !memcmp(rcx.records_out[1].fingerprint,
+                        spans[1].embedding.fingerprint, 32));
+    fclose(fp);
+    (void)swap;
+}
+
 static void test_thinking_checkpoint_remember_gate(void) {
     request r;
     request_init(&r, REQ_CHAT, 128);
@@ -22150,6 +22496,7 @@ static void ds4_server_unit_tests_run(void) {
     test_thinking_checkpoint_canonical_matches_future_prompt();
     test_preserved_thinking_canonical_matches_future_prompt();
     test_vembed_cache_store_hit_evict();
+    test_normalize_image_text_and_trailer_roundtrip();
     test_byte_prefix_match_visible_markers();
     test_thinking_canonical_empty_content();
     test_thinking_canonical_multi_turn();
