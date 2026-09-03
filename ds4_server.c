@@ -9196,10 +9196,10 @@ struct server_slot {
     live_tool_state anthropic_live;
     visible_live_state thinking_live;
     slot_vision_store vision_store;
-    /* Session frontier at the last successful image-conditioned snapshot;
-     * a multimodal disk load only proceeds when the live frontier equals it
-     * (so loading can never discard a newer unsaved image state). */
-    int vision_saved_tokens;
+    /* Token frontier of the last successful disk store from this slot (any
+     * kind).  A multimodal disk load only proceeds when the live session
+     * sits exactly there, so restore can never discard unsaved state. */
+    int durable_frontier_tokens;
     int continued_last_store_tokens;
     /* Pending divergence anchor (miss common-prefix point): once this slot's
      * live session reaches the target, a reason=cold anchor is stored at
@@ -10694,7 +10694,9 @@ static bool kv_cache_store_live_prefix_text(server *s, server_slot *slot,
     pthread_mutex_unlock(&s->kv_mu);
     pthread_mutex_unlock(&s->inference_mu);
     free(vision_text);
-    if (ok && has_vision) slot->vision_saved_tokens = store_len;
+    /* Any successful frontier store leaves the live session durable at this
+     * length, so a later multimodal disk load may discard it safely. */
+    if (ok && store_len == tokens->len) slot->durable_frontier_tokens = store_len;
     return ok;
 }
 
@@ -12913,7 +12915,7 @@ static void generate_job_inner(server *s, server_slot *slot, job *j) {
      * and the cold rebuild keeps the live session authoritative. */
     if (multimodal && cached == 0 && s->kv.enabled &&
         slot->vision_store.valid &&
-        old_pos == slot->vision_saved_tokens)
+        old_pos == slot->durable_frontier_tokens)
     {
         disk_cached = kv_cache_try_load_vision(s, slot, &j->req,
                                                &effective_prompt,
@@ -12924,7 +12926,7 @@ static void generate_job_inner(server *s, server_slot *slot, job *j) {
             cache_source = "disk-vision";
             prompt_for_sync = &effective_prompt;
             slot->continued_last_store_tokens = disk_cached;
-            slot->vision_saved_tokens = disk_cached;
+            slot->durable_frontier_tokens = disk_cached;
             server_log(DS4_LOG_KVCACHE,
                        "ds4-server: multimodal disk kv hit images=%zu cached=%d prompt=%d",
                        j->req.image_count, disk_cached, j->req.prompt.len);
