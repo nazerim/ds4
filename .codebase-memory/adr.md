@@ -56,3 +56,117 @@ multiple. Divergence targets at odd 8192 multiples above 48k are no longer
   user-set step doubles too (grid nesting preserved).
 - Regression coverage: `test_kv_cache_continued_uses_aligned_frontiers`
   (crossing, odd-multiple suppression, legacy-anchor resume).
+
+# ADR: Thinking-replay bridge for tool conversations (root cause of the ~30k live-KV drift)
+
+## Status
+Accepted (403914c, 0950ada; live-verified against pi.dev sessions Sep 3).
+
+## Context
+After the Vision-Exp switch, long tool conversations produced repeated
+"live kv cache miss ... reason=token-mismatch" with the common prefix stuck
+at the first non-canonical assistant turn (~30k) and drifting right each
+turn, forcing multi-minute cold re-prefills at 100-280k context. Trace
+diagnostics (TRACE_PATH, first-mismatch token window) pinned it: tool
+conversations render replayed assistant turns as think-open + reasoning +
+think-close + content, but plain (no tool-call) thinking turns were excluded
+from the thinking-live checkpoint bridge by the has_tools gate. The live
+graph therefore held sampled reasoning while every faithful replay rendered
+a different token stream, and BPE re-merges across block boundaries mean
+even identical bytes can tokenize differently (sampled autoregressive vs
+whole-string re-tokenize).
+
+## Decision
+1. should_remember_thinking_checkpoint() accepts the reasoning text; tool-
+   context / prompt_preserves-reasoning turns remember a PRESERVED-visible
+   key: prompt + sampled reasoning + think-close + content + eos, built by
+   build_preserved_thinking_visible_text(). The next replay hits the
+   thinking-visible path and rebuilds the effective prompt from the exact
+   live token prefix + re-tokenized suffix, which is immune to boundary
+   re-merge drift. finish=length turns remain excluded by design.
+2. Image markers ("\x1e DS4_IMAGE_<24 hex nonce> \x1f") are fixed-length,
+   request-random sentinels: visible-prefix matching now treats the nonce at
+   equal offsets as a wildcard (byte_prefix_match_visible) and refuses the
+   bridge when the unmatched suffix contains markers. Without this the
+   thinking bridge was silently dead for every image conversation.
+3. KV model_fp now folds the vision-encoder file fingerprint
+   (path+size+mtime) so encoder-only model swaps invalidate disk snapshots.
+   fp = fingerprint(llm) ^ (fingerprint(encoder) * GOLDEN_RATIO_MIX).
+4. Vision encoder results are cached by 128-bit hash of the encoded bytes
+   (LRU, 64 slots, 512 MiB): requests previously re-ran the ViT for every
+   history image on every turn even when live KV hit.
+
+## Consequences
+- Production drift misses eliminated: tool sessions show cached = live
+  frontier - O(1) token continuations; verified on real 100k-140k sessions.
+- The bridge only ever fires on byte-verified replays; mismatches degrade
+  to the pre-existing paths, never to wrong KV.
+- Truncated (length) turns still cold-rebuild once: their replay cannot be
+  attested (unclosed think), and Metal cannot rewind the compressor
+  frontier mid-stream (see rewind note below).
+- Tests: preserved-canonical-matches-future-prompt, marker wildcard,
+  vembed cache, gate matrix.
+
+# ADR: Multimodal disk KV snapshots with verified identity trailers
+
+## Status
+Accepted (17d334d, b8ff49e, 8f24741..c1381e7; live-verified Sep 3).
+
+## Context
+Image-conditioned KV never reached the disk cache (upstream stance: "disk
+payloads intentionally carry no image identity", b0982a1), so any restart
+or slot handover in a vision session paid a full cold re-prefill
+(minutes at 200-300k). Two facts make a safe design possible: marker
+nonces poison text keys, and every request carries its own images (they
+are always re-encoded, and now embed-cached), so the payload can be
+restored without persisting embeddings if the request can attest them.
+
+## Decision
+- KV files gain a magic-tagged section chain after the payload (server-
+  owned hooks): KVTM (existing tool map) + new KVV1 vision section of
+  [token_start u32 | token_count u32 | 32-byte embedding fingerprint]
+  records; KV_EXT_VISION flags files carrying it. Old binaries parse such
+  files' tool-map section and ignore the rest.
+- Multimodal stores are frontier-only: the request arms a slot_vision_store
+  (normalized transcript = marker nonces replaced by fingerprint hex, plus
+  identity records); post-generation "turn" stores write payload + trailer.
+  Partial-frontier anchors stay text-only (they cannot attest which rows
+  depend on which image).
+- Load (kv_cache_try_load_vision) verifies before trusting: trailer present
+  and intact, every record maps to an identical request span, every span
+  fully inside the frontier is attested, no span crosses the frontier, and
+  either the request token vector shares the snapshot prefix exactly
+  (effective prompt = request tokens verbatim - placeholders must never be
+  produced by text tokenization) or all images are attested below the
+  frontier (then the loader's exact-prefix + tokenized-suffix prompt is
+  safe against BPE re-merge). On success the session's checkpoint
+  identities are re-seeded via the new engine API
+  ds4_session_set_vision_identities() (ordered, non-overlapping, fully
+  inside the checkpoint).
+- A load is refused only when the live session is newer unsaved state of
+  the SAME conversation (durable_conv = FNV over the normalized base);
+  foreign (text or other) live state may be discarded with text-path
+  parity. Slots stamp durable_frontier_tokens/durable_conv on each frontier
+  store.
+- Compaction interacts cleanly: keys are prefix-based, so a compacted
+  conversation simply misses every old snapshot, rebuilds, and re-snapshots
+  with fresh positions; old files die via conv retirement + LRU.
+
+## Consequences
+- Vision sessions survive slot handover and restarts; measured restore
+  hits: 607/621 and 690/692 tokens cached post-takeover, ~0.5 KB trailer
+  per 10 images against ~30 MB+ payloads.
+- Disk budget churn grows with image-session frontiers (one ~GB-scale
+  snapshot per turn at large context; the 8k/16k grids plus LRU handle it,
+  watch the 128 GiB budget with many concurrent big sessions).
+- Image-count request cap raised 16 -> 64 (fail-fast DoS/OOM guard before
+  encode work; matches trailer capacity). Sessions beyond 64 images serve
+  but skip disk caching; compaction is the practical bound.
+- Deliberately NOT done: shutdown persist of vision sessions (slot ctx
+  dies with the request), multimodal partial anchors, and general
+  mid-stream live rewind - the Metal DS4 compressor frontier cannot be
+  reconstructed at arbitrary positions; GLM-only ds4_session_glm_mtp_rewind
+  remains the sole rewind. A real rewind requires frontier snapshots,
+  which is engine work beyond this scope.
+- Tests: trailer roundtrip, normalize, wildcard, record caps, plus live
+  handover/restart scenarios (recipes in this ADR's commits).

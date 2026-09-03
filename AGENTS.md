@@ -27,6 +27,10 @@ inference engine in C with Metal, CUDA, and ROCm backends. See `AGENT.md`
 
 - KV cache v2 rewrite: `PLAN-KV-REWRITE.md`, `PLAN-KV-LINEAGE.md`,
   `.codebase-memory/adr.md`
+- Vision cache (thinking bridge, encoder cache, multimodal disk KV):
+  `.codebase-memory/adr.md` (Sep 3 ADRs); server script serves Vision-Exp
+  by default (`./ds4-server.sh start`, TRACE_PATH=./log/ds4.trace for cache
+  forensics; first-mismatch window lands in log/ds4.trace on live misses)
 - DSpark: `PLAN-DSPARK-PERF.md`, `PLAN-DSPARK-TEMP-SPEC.md`
 - Fork divergence notes: `DS4FORK.md`
 
