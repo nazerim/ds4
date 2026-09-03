@@ -159,9 +159,10 @@ restored without persisting embeddings if the request can attest them.
 - Disk budget churn grows with image-session frontiers (one ~GB-scale
   snapshot per turn at large context; the 8k/16k grids plus LRU handle it,
   watch the 128 GiB budget with many concurrent big sessions).
-- Image-count request cap raised 16 -> 64 (fail-fast DoS/OOM guard before
-  encode work; matches trailer capacity). Sessions beyond 64 images serve
-  but skip disk caching; compaction is the practical bound.
+- Image-count request cap raised 16 to 128 (fail-fast DoS/OOM guard before
+  encode work; matches trailer capacity and the embed-cache slot count).
+  Sessions beyond it serve but skip disk caching; compaction and the 384k
+  context window are the practical bounds.
 - Deliberately NOT done: shutdown persist of vision sessions (slot ctx
   dies with the request), multimodal partial anchors, and general
   mid-stream live rewind - the Metal DS4 compressor frontier cannot be

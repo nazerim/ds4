@@ -3110,11 +3110,11 @@ static bool request_tokenize_multimodal_prompt(ds4_engine *e, server *s,
         return true;
     }
     /* Vision agent loops accumulate one screenshot per tool round; 16 was
-     * exhausted by real pi.dev sessions.  64 matches the disk snapshot
+     * exhausted by real pi.dev sessions.  128 matches the disk snapshot
      * identity-trailer capacity (KV_VISION_MAX_RECORDS); sessions beyond it
      * still serve, they simply stay outside multimodal disk caching. */
-    if (count > 64) {
-        snprintf(err, errlen, "too many images; at most 64 are allowed");
+    if (count > 128) {
+        snprintf(err, errlen, "too many images; at most 128 are allowed");
         return false;
     }
     if (!e || !s || !ds4_engine_has_vision(e)) {
@@ -9169,7 +9169,7 @@ typedef struct {
 } visible_live_state;
 
 #define KV_VISION_RECORD 40u
-#define KV_VISION_MAX_RECORDS 64u
+#define KV_VISION_MAX_RECORDS 128u
 
 typedef struct {
     uint32_t token_start;
@@ -9243,7 +9243,7 @@ static void id_list_push_unique(stop_list *ids, const char *id);
  * (immutable after insert) keyed by a 128-bit hash of those bytes and copy it
  * out on hit.  All access happens under inference_mu (the encode loop already
  * holds it), so entries need no individual locking. */
-#define DS4_VEMBED_CACHE_SLOTS 64
+#define DS4_VEMBED_CACHE_SLOTS 128
 #define DS4_VEMBED_CACHE_BYTES (512ull << 20)
 #define DS4_VEMBED_HIDDEN 4096u
 
