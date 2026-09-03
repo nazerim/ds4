@@ -9985,6 +9985,40 @@ static void apply_anthropic_stream_tool_ids(tool_calls *calls,
 #define KV_TOOL_MAP_VERSION 1u
 #define KV_TOOL_MAP_HEADER 8u
 
+/* Composite trailer sections.  The server owns the trailer chain after the
+ * payload: zero or more sections, each "[3-char magic][version u8][u32 body]"
+ * with the tool map as today, plus an optional vision identity section that
+ * makes image-conditioned payloads verifiable on disk restore. */
+#define KV_EXT_VISION DS4_KVSTORE_EXT_VISION
+#define KV_VISION_MAGIC0 'K'
+#define KV_VISION_MAGIC1 'V'
+#define KV_VISION_MAGIC2 'I'
+#define KV_VISION_VERSION 1u
+#define KV_VISION_HEADER 8u
+#define KV_VISION_RECORD 40u
+#define KV_VISION_MAX_RECORDS 64u
+
+typedef struct {
+    uint32_t token_start;
+    uint32_t token_count;
+    uint8_t fingerprint[32];
+} kv_vision_record;
+
+/* Per-call trailer context passed through hooks.ud.  On store, records_in
+ * carries the identities to serialize.  On load, records_out/record_count
+ * receive what the trailer held so the caller can verify against the
+ * request's freshly-encoded spans before trusting the payload. */
+typedef struct {
+    server *s;
+    const stop_list *wanted;
+    const kv_vision_record *records_in;
+    size_t record_count_in;
+    kv_vision_record records_out[KV_VISION_MAX_RECORDS];
+    size_t record_count_out;
+    bool vision_section_present;
+    bool vision_section_corrupt;
+} kv_trailer_ctx;
+
 typedef enum {
     KV_REASON_UNKNOWN   = DS4_KVSTORE_REASON_UNKNOWN,
     KV_REASON_COLD      = DS4_KVSTORE_REASON_COLD,
@@ -10191,19 +10225,17 @@ static bool kv_tool_map_write(server *s, FILE *fp, const char *text,
     return ok;
 }
 
-/* Returns the number of entries loaded; a negative value means the trailer is
- * corrupt (as opposed to absent), so the caller can log the degradation. */
-static int kv_tool_map_load_from_pos(server *s, FILE *fp, const stop_list *wanted) {
-    if (!s || s->disable_exact_dsml_tool_replay || !fp) return 0;
-    uint8_t h[KV_TOOL_MAP_HEADER];
-    size_t n = fread(h, 1, sizeof(h), fp);
-    if (n == 0 && feof(fp)) return 0;
-    if (n != sizeof(h)) return -1;
-    if (h[0] != KV_TOOL_MAP_MAGIC0 || h[1] != KV_TOOL_MAP_MAGIC1 ||
-        h[2] != KV_TOOL_MAP_MAGIC2 || h[3] != KV_TOOL_MAP_VERSION) return -1;
-
-    uint32_t count = le_get32(h + 4);
-    if ((uint64_t)count > (uint64_t)tool_memory_max_entries(&s->tool_mem) * 4u) return -1;
+/* Parses (and, unless exact replay is disabled, installs) one tool-map
+ * section body after its header was consumed.  Always consumes the full
+ * section so a following trailer section stays aligned.  Returns loaded
+ * entry count, or -1 on corruption (bytes may not have been fully consumed,
+ * which only matters for whole-trailer degradation). */
+static int kv_tool_map_load_body(server *s, FILE *fp, uint32_t count,
+                                 const stop_list *wanted) {
+    if (!s || !fp) return -1;
+    const bool disabled = s->disable_exact_dsml_tool_replay;
+    if ((uint64_t)count >
+        (uint64_t)tool_memory_max_entries(&s->tool_mem) * 4u) return -1;
     int loaded = 0;
     for (uint32_t i = 0; i < count; i++) {
         uint8_t lens[8];
@@ -10218,7 +10250,7 @@ static int kv_tool_map_load_from_pos(server *s, FILE *fp, const stop_list *wante
                   fread(dsml, 1, dsml_len, fp) == dsml_len;
         id[id_len] = '\0';
         dsml[dsml_len] = '\0';
-        if (ok && (!wanted || id_list_contains(wanted, id))) {
+        if (ok && !disabled && (!wanted || id_list_contains(wanted, id))) {
             tool_memory_put_source(s, id, dsml, TOOL_MEMORY_DISK);
             loaded++;
         }
@@ -10227,6 +10259,20 @@ static int kv_tool_map_load_from_pos(server *s, FILE *fp, const stop_list *wante
         if (!ok) return loaded;
     }
     return loaded;
+}
+
+/* Returns the number of entries loaded; a negative value means the trailer is
+ * corrupt (as opposed to absent), so the caller can log the degradation.
+ * Kept for the legacy single-section shape. */
+static int kv_tool_map_load_from_pos(server *s, FILE *fp, const stop_list *wanted) {
+    if (!s || s->disable_exact_dsml_tool_replay || !fp) return 0;
+    uint8_t h[KV_TOOL_MAP_HEADER];
+    size_t n = fread(h, 1, sizeof(h), fp);
+    if (n == 0 && feof(fp)) return 0;
+    if (n != sizeof(h)) return -1;
+    if (h[0] != KV_TOOL_MAP_MAGIC0 || h[1] != KV_TOOL_MAP_MAGIC1 ||
+        h[2] != KV_TOOL_MAP_MAGIC2 || h[3] != KV_TOOL_MAP_VERSION) return -1;
+    return kv_tool_map_load_body(s, fp, le_get32(h + 4), wanted);
 }
 
 #ifdef DS4_SERVER_TEST
@@ -10416,30 +10462,104 @@ static bool kv_cache_file_size_fits(const kv_disk_cache *kc,
 
 
 
-static bool kv_cache_tool_map_size_cb(void *ud, const char *text,
-                                      uint64_t *bytes_out) {
-    return kv_tool_map_serialized_size((server *)ud, text, bytes_out);
+static bool kv_cache_trailer_size_cb(void *ud, const char *text,
+                                     uint64_t *bytes_out) {
+    kv_trailer_ctx *cx = (kv_trailer_ctx *)ud;
+    uint64_t tool_bytes = 0;
+    *bytes_out = 0;
+    if (!kv_tool_map_serialized_size(cx->s, text, &tool_bytes)) return false;
+    /* tool_bytes already includes the tool-map section header. */
+    uint64_t total = tool_bytes;
+    if (cx->record_count_in != 0)
+        total += KV_VISION_HEADER +
+                 cx->record_count_in * KV_VISION_RECORD;
+    *bytes_out = total;
+    return true;
 }
 
-static bool kv_cache_tool_map_write_cb(void *ud, FILE *fp, const char *text,
-                                       uint64_t *written_bytes) {
-    return kv_tool_map_write((server *)ud, fp, text, written_bytes);
+static bool kv_cache_trailer_write_cb(void *ud, FILE *fp, const char *text,
+                                      uint64_t *written_bytes) {
+    kv_trailer_ctx *cx = (kv_trailer_ctx *)ud;
+    uint64_t written = 0;
+    if (!kv_tool_map_write(cx->s, fp, text, &written)) return false;
+    if (cx->record_count_in != 0) {
+        uint8_t h[KV_VISION_HEADER];
+        h[0] = KV_VISION_MAGIC0;
+        h[1] = KV_VISION_MAGIC1;
+        h[2] = KV_VISION_MAGIC2;
+        h[3] = KV_VISION_VERSION;
+        le_put32(h + 4, (uint32_t)cx->record_count_in);
+        if (fwrite(h, 1, sizeof(h), fp) != sizeof(h)) return false;
+        for (size_t i = 0; i < cx->record_count_in; i++) {
+            uint8_t rec[KV_VISION_RECORD];
+            le_put32(rec, cx->records_in[i].token_start);
+            le_put32(rec + 4, cx->records_in[i].token_count);
+            memcpy(rec + 8, cx->records_in[i].fingerprint, 32);
+            if (fwrite(rec, 1, sizeof(rec), fp) != sizeof(rec)) return false;
+        }
+        written += KV_VISION_HEADER +
+                   cx->record_count_in * KV_VISION_RECORD;
+    }
+    if (written_bytes) *written_bytes = written;
+    return true;
 }
 
-static int kv_cache_tool_map_load_cb(void *ud, FILE *fp, const void *wanted) {
-    return kv_tool_map_load_from_pos((server *)ud, fp, (const stop_list *)wanted);
+/* Returns 0 when the trailer parsed cleanly (possibly empty), negative on
+ * corruption.  Vision records land in cx->records_out regardless of the
+ * tool-map filter; the caller verifies them. */
+static int kv_cache_trailer_load_cb(void *ud, FILE *fp, const void *wanted) {
+    kv_trailer_ctx *cx = (kv_trailer_ctx *)ud;
+    cx->record_count_out = 0;
+    cx->vision_section_present = false;
+    cx->vision_section_corrupt = false;
+    for (;;) {
+        uint8_t h[8];
+        size_t n = fread(h, 1, sizeof(h), fp);
+        if (n == 0 && feof(fp)) return 0;
+        if (n != sizeof(h)) return -1;
+        if (h[0] == KV_TOOL_MAP_MAGIC0 && h[1] == KV_TOOL_MAP_MAGIC1 &&
+            h[2] == KV_TOOL_MAP_MAGIC2 && h[3] == KV_TOOL_MAP_VERSION) {
+            if (kv_tool_map_load_body(cx->s, fp, le_get32(h + 4),
+                                      (const stop_list *)wanted) < 0)
+                return -1;
+            continue;
+        }
+        if (h[0] == KV_VISION_MAGIC0 && h[1] == KV_VISION_MAGIC1 &&
+            h[2] == KV_VISION_MAGIC2 && h[3] == KV_VISION_VERSION) {
+            uint32_t count = le_get32(h + 4);
+            cx->vision_section_present = true;
+            if (count > KV_VISION_MAX_RECORDS) {
+                cx->vision_section_corrupt = true;
+                return -1;
+            }
+            for (uint32_t i = 0; i < count; i++) {
+                uint8_t rec[KV_VISION_RECORD];
+                if (fread(rec, 1, sizeof(rec), fp) != sizeof(rec)) {
+                    cx->vision_section_corrupt = true;
+                    return -1;
+                }
+                cx->records_out[i].token_start = le_get32(rec);
+                cx->records_out[i].token_count = le_get32(rec + 4);
+                memcpy(cx->records_out[i].fingerprint, rec + 8, 32);
+            }
+            cx->record_count_out = count;
+            continue;
+        }
+        return -1;
+    }
 }
 
-static ds4_kvstore_trailer_hooks kv_cache_tool_map_hooks(server *s,
-                                                         const stop_list *wanted) {
-    return (ds4_kvstore_trailer_hooks){
-        .ud = s,
-        .ext_flag = KV_EXT_TOOL_MAP,
-        .serialized_size = kv_cache_tool_map_size_cb,
-        .write = kv_cache_tool_map_write_cb,
-        .load = kv_cache_tool_map_load_cb,
-        .load_wanted = wanted,
-    };
+static ds4_kvstore_trailer_hooks kv_cache_tool_map_hooks(kv_trailer_ctx *cx,
+                                                         bool has_vision) {
+    ds4_kvstore_trailer_hooks hooks;
+    hooks.ud = cx;
+    hooks.ext_flag = has_vision ? (uint8_t)(KV_EXT_TOOL_MAP | KV_EXT_VISION)
+                                : KV_EXT_TOOL_MAP;
+    hooks.serialized_size = kv_cache_trailer_size_cb;
+    hooks.write = kv_cache_trailer_write_cb;
+    hooks.load = kv_cache_trailer_load_cb;
+    hooks.load_wanted = cx->wanted;
+    return hooks;
 }
 
 static bool kv_cache_store_live_prefix_text(server *s, server_slot *slot,
@@ -10452,7 +10572,9 @@ static bool kv_cache_store_live_prefix_text(server *s, server_slot *slot,
                                             size_t evict_protect_len) {
     if (!s || !slot) return false;
     char err[160] = {0};
-    ds4_kvstore_trailer_hooks hooks = kv_cache_tool_map_hooks(s, NULL);
+    kv_trailer_ctx tctx = {0};
+    tctx.s = s;
+    ds4_kvstore_trailer_hooks hooks = kv_cache_tool_map_hooks(&tctx, false);
     pthread_mutex_lock(&s->inference_mu);
     /* The payload contains image-conditioned KV rows, but the disk key and
      * trailer do not contain image fingerprints. Never let generic image
@@ -10673,7 +10795,9 @@ static int kv_cache_try_load_text(server *s, server_slot *slot,
     if (loaded_path_out) *loaded_path_out = NULL;
     if (loaded_ext_flags_out) *loaded_ext_flags_out = 0;
     ds4_kvstore_load_result lr = {0};
-    ds4_kvstore_trailer_hooks hooks = kv_cache_tool_map_hooks(s, NULL);
+    kv_trailer_ctx tctx = {0};
+    tctx.s = s;
+    ds4_kvstore_trailer_hooks hooks = kv_cache_tool_map_hooks(&tctx, false);
     pthread_mutex_lock(&s->inference_mu);
     /* Disk payloads intentionally carry no image identity. If this slot held
      * vision state, discard it before restoring a text-only checkpoint so the

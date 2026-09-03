@@ -31,6 +31,10 @@
 #define DS4_KVSTORE_EXT_RESPONSES_VISIBLE (1u << 1)
 #define DS4_KVSTORE_EXT_THINKING_VISIBLE  (1u << 2)
 #define DS4_KVSTORE_EXT_SESSION_TITLE     (1u << 3)
+/* Trailer carries image identities (token_start/token_count/fingerprint) for
+ * an image-conditioned payload.  Set together with EXT_TOOL_MAP because the
+ * server owns the composite trailer section chain. */
+#define DS4_KVSTORE_EXT_VISION            (1u << 4)
 
 typedef enum {
     DS4_KVSTORE_REASON_UNKNOWN   = 0,
