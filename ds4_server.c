@@ -3092,6 +3092,13 @@ static DS4_SERVER_MAYBE_UNUSED char *render_chat_prompt_text(
                                               tool_orders, think_mode);
 }
 
+static int ds4_vision_encode_cached(server *s, ds4_engine *e,
+                                    const uint8_t *encoded, size_t encoded_len,
+                                    ds4_vision_embedding *out,
+                                    char *error, size_t error_cap);
+static uint64_t ds4_vembed_hit_counter(server *s);
+static void ds4_vembed_log_reuse(server *s, uint64_t hits_before, size_t count);
+
 static bool request_tokenize_multimodal_prompt(ds4_engine *e, server *s,
                                                request *r,
                                                const chat_msgs *msgs,
@@ -3121,16 +3128,18 @@ static bool request_tokenize_multimodal_prompt(ds4_engine *e, server *s,
     }
 
     bool ok = true;
+    const uint64_t hits_before = ds4_vembed_hit_counter(s);
     server_inference_lock(s);
     for (size_t i = 0; i < count; i++) {
-        if (!ds4_engine_vision_encode_memory(e, inputs[i]->encoded,
-                                             inputs[i]->encoded_len,
-                                             &embeddings[i], err, errlen)) {
+        if (!ds4_vision_encode_cached(s, e, inputs[i]->encoded,
+                                      inputs[i]->encoded_len,
+                                      &embeddings[i], err, errlen)) {
             ok = false;
             break;
         }
     }
     server_inference_unlock(s);
+    if (ok) ds4_vembed_log_reuse(s, hits_before, count);
     if (!ok) goto done;
 
     r->images = xmalloc(count * sizeof(r->images[0]));
@@ -9185,6 +9194,26 @@ struct server_slot {
 static bool id_list_contains(const stop_list *ids, const char *id);
 static void id_list_push_unique(stop_list *ids, const char *id);
 
+/* Vision embedding cache.  Every multimodal request re-encodes ALL images in
+ * its history through the vision encoder, on every turn, even when the live KV
+ * prefix hits and the bytes are unchanged.  Encoder output is deterministic
+ * for identical encoded bytes on the same engine, so cache the embedding
+ * (immutable after insert) keyed by a 128-bit hash of those bytes and copy it
+ * out on hit.  All access happens under inference_mu (the encode loop already
+ * holds it), so entries need no individual locking. */
+#define DS4_VEMBED_CACHE_SLOTS 64
+#define DS4_VEMBED_CACHE_BYTES (512ull << 20)
+#define DS4_VEMBED_HIDDEN 4096u
+
+typedef struct {
+    uint64_t h1, h2;
+    size_t encoded_len;
+    ds4_vision_embedding emb;   /* owned deep copy */
+    uint64_t bytes;
+    uint64_t use_seq;
+    bool used;
+} ds4_vembed_entry;
+
 struct server {
     ds4_engine *engine;
     ds4_tp *tp_leader;
@@ -9197,6 +9226,11 @@ struct server {
     int default_tokens;
     kv_disk_cache kv;
     tool_memory tool_mem;
+    ds4_vembed_entry vembed_cache[DS4_VEMBED_CACHE_SLOTS];
+    uint64_t vembed_seq;
+    uint64_t vembed_bytes;
+    uint64_t vembed_hits;
+    uint64_t vembed_misses;
     bool disable_exact_dsml_tool_replay;
     bool enable_cors;
     pthread_mutex_t tool_mu;
@@ -9228,6 +9262,138 @@ static void server_inference_lock(server *s) {
 
 static void server_inference_unlock(server *s) {
     pthread_mutex_unlock(&s->inference_mu);
+}
+
+/* 128-bit FNV-1a over the encoded image bytes.  A collision would only trade
+ * one image's embedding for another's inside the SAME conversation window;
+ * combined with the 32-byte embedding fingerprint check on vision state and
+ * the length check here, the risk is negligible for a bounded session cache,
+ * and a miss (never a wrong image, given length+double-hash) is the worst
+ * realistic outcome. */
+static void ds4_vembed_hash(const uint8_t *p, size_t n,
+                            uint64_t *h1, uint64_t *h2) {
+    uint64_t a = 1469598103934665603ull, b = 0xcbf29ce484222325ull;
+    for (size_t i = 0; i < n; i++) {
+        a = (a ^ p[i]) * 1099511628211ull;
+        b = (b + p[i] + (uint64_t)i * 0x9E3779B97F4A7C15ull) *
+            1099511628211ull;
+    }
+    *h1 = a;
+    *h2 = b;
+}
+
+static uint64_t ds4_vembed_emb_bytes(const ds4_vision_embedding *emb) {
+    return (uint64_t)emb->token_count * DS4_VEMBED_HIDDEN * sizeof(float);
+}
+
+static bool ds4_vembed_copy_out(const ds4_vision_embedding *src,
+                                ds4_vision_embedding *dst) {
+    const uint64_t bytes = ds4_vembed_emb_bytes(src);
+    if (!src->data || src->token_count == 0 || bytes == 0) return false;
+    float *copy = malloc((size_t)bytes);
+    if (!copy) return false;
+    memcpy(copy, src->data, (size_t)bytes);
+    memset(dst, 0, sizeof(*dst));
+    dst->data = copy;
+    dst->token_count = src->token_count;
+    dst->layout = src->layout;
+    dst->grid_width = src->grid_width;
+    dst->grid_height = src->grid_height;
+    dst->width = src->width;
+    dst->height = src->height;
+    dst->content_width = src->content_width;
+    dst->content_height = src->content_height;
+    memcpy(dst->fingerprint, src->fingerprint, sizeof(dst->fingerprint));
+    return true;
+}
+
+static bool ds4_vembed_lookup(server *s, uint64_t h1, uint64_t h2,
+                              size_t encoded_len, ds4_vision_embedding *out) {
+    for (int i = 0; i < DS4_VEMBED_CACHE_SLOTS; i++) {
+        ds4_vembed_entry *en = &s->vembed_cache[i];
+        if (!en->used || en->h1 != h1 || en->h2 != h2 ||
+            en->encoded_len != encoded_len) continue;
+        if (!ds4_vembed_copy_out(&en->emb, out)) return false;
+        en->use_seq = ++s->vembed_seq;
+        s->vembed_hits++;
+        return true;
+    }
+    s->vembed_misses++;
+    return false;
+}
+
+static void ds4_vembed_store(server *s, uint64_t h1, uint64_t h2,
+                             size_t encoded_len,
+                             const ds4_vision_embedding *emb) {
+    const uint64_t bytes = ds4_vembed_emb_bytes(emb);
+    if (!emb->data || emb->token_count == 0 || bytes > DS4_VEMBED_CACHE_BYTES)
+        return;
+    ds4_vision_embedding copy = {0};
+    if (!ds4_vembed_copy_out(emb, &copy)) return;
+    while (s->vembed_bytes + bytes > DS4_VEMBED_CACHE_BYTES) {
+        int victim = -1;
+        uint64_t best = UINT64_MAX;
+        for (int i = 0; i < DS4_VEMBED_CACHE_SLOTS; i++) {
+            ds4_vembed_entry *en = &s->vembed_cache[i];
+            if (en->used && en->use_seq < best) { best = en->use_seq; victim = i; }
+        }
+        if (victim < 0) break;
+        ds4_vembed_entry *en = &s->vembed_cache[victim];
+        s->vembed_bytes -= en->bytes;
+        free(en->emb.data);
+        memset(en, 0, sizeof(*en));
+    }
+    int slot = -1;
+    for (int i = 0; i < DS4_VEMBED_CACHE_SLOTS; i++)
+        if (!s->vembed_cache[i].used) { slot = i; break; }
+    if (slot < 0) {
+        uint64_t best = UINT64_MAX;
+        for (int i = 0; i < DS4_VEMBED_CACHE_SLOTS; i++)
+            if (s->vembed_cache[i].use_seq < best) { best = s->vembed_cache[i].use_seq; slot = i; }
+        ds4_vembed_entry *en = &s->vembed_cache[slot];
+        s->vembed_bytes -= en->bytes;
+        free(en->emb.data);
+    }
+    ds4_vembed_entry *en = &s->vembed_cache[slot];
+    memset(en, 0, sizeof(*en));
+    en->h1 = h1;
+    en->h2 = h2;
+    en->encoded_len = encoded_len;
+    en->emb = copy;
+    en->bytes = bytes;
+    en->use_seq = ++s->vembed_seq;
+    en->used = true;
+    s->vembed_bytes += bytes;
+}
+
+static uint64_t ds4_vembed_hit_counter(server *s) {
+    return s->vembed_hits;
+}
+
+static void ds4_vembed_log_reuse(server *s, uint64_t hits_before, size_t count) {
+    if (s->vembed_hits == hits_before) return;
+    server_log(DS4_LOG_KVCACHE,
+               "ds4-server: vision encode reuse images=%zu encoder_runs=%llu cache_bytes=%llu MiB",
+               count,
+               (unsigned long long)(count - (s->vembed_hits - hits_before)),
+               (unsigned long long)(s->vembed_bytes >> 20));
+}
+
+/* ds4_engine_vision_encode_memory with a process-lifetime result cache.  The
+ * caller owns the returned embedding exactly as with the engine call, so the
+ * cache copy is always a fresh allocation.  Requires inference_mu. */
+static int ds4_vision_encode_cached(server *s, ds4_engine *e,
+                                    const uint8_t *encoded, size_t encoded_len,
+                                    ds4_vision_embedding *out,
+                                    char *error, size_t error_cap) {
+    uint64_t h1, h2;
+    ds4_vembed_hash(encoded, encoded_len, &h1, &h2);
+    if (ds4_vembed_lookup(s, h1, h2, encoded_len, out)) return 1;
+    if (!ds4_engine_vision_encode_memory(e, encoded, encoded_len, out,
+                                         error, error_cap))
+        return 0;
+    ds4_vembed_store(s, h1, h2, encoded_len, out);
+    return 1;
 }
 
 /* Jobs are stack-owned by the client thread.  A resident-slot worker signals
@@ -10158,6 +10324,44 @@ static bool byte_prefix_match(const char *text, size_t text_len,
     return ds4_kvstore_byte_prefix_match(text, text_len, prefix, prefix_len);
 }
 
+/* Image markers are request-scoped sentinels: "\x1e DS4_IMAGE_<24 hex> \x1f",
+ * fixed length by construction, regenerated with a fresh nonce on every
+ * request even when the replayed image is byte-identical.  A remembered
+ * visible transcript can therefore only prefix-match a future replay when
+ * marker nonces are treated as wildcards at equal offsets; the fixed length
+ * keeps byte alignment intact so the matched length indexes both strings
+ * identically. */
+static size_t ds4_image_marker_span(const char *s, size_t len, size_t i) {
+    static const char head[] = "\x1e" "DS4_IMAGE_";
+    const size_t head_len = sizeof(head) - 1;
+    if (len - i < head_len + 24 + 1) return 0;
+    if (memcmp(s + i, head, head_len) != 0) return 0;
+    for (size_t k = 0; k < 24; k++) {
+        const char c = s[i + head_len + k];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+              (c >= 'A' && c <= 'F'))) return 0;
+    }
+    if (s[i + head_len + 24] != '\x1f') return 0;
+    return i + head_len + 25;
+}
+
+static bool byte_prefix_match_visible(const char *text, size_t text_len,
+                                      const char *prefix, size_t prefix_len) {
+    if (text_len < prefix_len) return false;
+    size_t i = 0;
+    while (i < prefix_len) {
+        const size_t e = ds4_image_marker_span(prefix, prefix_len, i);
+        if (e) {
+            if (ds4_image_marker_span(text, text_len, i) != e) return false;
+            i = e;
+            continue;
+        }
+        if (text[i] != prefix[i]) return false;
+        i++;
+    }
+    return true;
+}
+
 
 static void tokens_copy_prefix(ds4_tokens *dst, const ds4_tokens *src, int n) {
     ds4_kvstore_tokens_copy_prefix(dst, src, n);
@@ -10656,9 +10860,16 @@ static int thinking_live_visible_prefix_prompt(server *s, server_slot *slot,
               slot->thinking_live.live_tokens == live_pos &&
               slot->thinking_live.visible_text &&
               slot->thinking_live.visible_len < prompt_len &&
-              byte_prefix_match(req->prompt_text, prompt_len,
-                                slot->thinking_live.visible_text,
-                                slot->thinking_live.visible_len);
+              byte_prefix_match_visible(req->prompt_text, prompt_len,
+                                        slot->thinking_live.visible_text,
+                                        slot->thinking_live.visible_len) &&
+              /* The remembered prefix can carry image sentinels (the live
+               * graph already holds their rows).  Anything AFTER the prefix
+               * is tokenized as plain text here, so a new image appearing
+               * beyond the visible key must not take this path. */
+              memchr(req->prompt_text + slot->thinking_live.visible_len,
+                     '\x1e',
+                     prompt_len - slot->thinking_live.visible_len) == NULL;
     if (ok) visible_len = slot->thinking_live.visible_len;
     pthread_mutex_unlock(&s->tool_mu);
     if (!ok) return 0;
@@ -14206,6 +14417,12 @@ static void server_close_resources(server *s) {
     }
     kv_cache_close(&s->kv);
     tool_memory_free(&s->tool_mem);
+    for (int i = 0; i < DS4_VEMBED_CACHE_SLOTS; i++) {
+        ds4_vembed_entry *en = &s->vembed_cache[i];
+        if (en->used) free(en->emb.data);
+        memset(en, 0, sizeof(*en));
+    }
+    s->vembed_bytes = 0;
     for (int i = 0; i < s->slot_count; i++) {
         server_slot *slot = &s->slots[i];
         live_tool_state_free(&slot->responses_live);
@@ -18709,6 +18926,81 @@ static void test_thinking_state_tracks_prompt_and_generated_tags(void) {
     request_free(&r);
 }
 
+static void test_vembed_cache_store_hit_evict(void) {
+    static server s;   /* only vembed_* fields are exercised; zero init ok */
+    const uint8_t img1[] = "png-bytes-one";
+    const uint8_t img2[] = "png-bytes-two";
+    const uint8_t img3[] = "png-bytes-three";
+    uint64_t h1, h2;
+
+    ds4_vision_embedding emb = {0};
+    emb.token_count = 2;
+    emb.grid_width = 2;
+    emb.grid_height = 1;
+    emb.data = malloc(ds4_vembed_emb_bytes(&emb));
+    TEST_ASSERT(emb.data != NULL);
+    for (uint64_t i = 0; i < ds4_vembed_emb_bytes(&emb) / sizeof(float); i++)
+        emb.data[i] = (float)(i + 1);
+    emb.fingerprint[0] = 0xAB;
+
+    ds4_vembed_hash(img1, sizeof(img1) - 1, &h1, &h2);
+    ds4_vision_embedding out = {0};
+    TEST_ASSERT(!ds4_vembed_lookup(&s, h1, h2, sizeof(img1) - 1, &out));
+    TEST_ASSERT(s.vembed_misses == 1);
+    ds4_vembed_store(&s, h1, h2, sizeof(img1) - 1, &emb);
+    TEST_ASSERT(s.vembed_bytes == ds4_vembed_emb_bytes(&emb));
+    TEST_ASSERT(ds4_vembed_lookup(&s, h1, h2, sizeof(img1) - 1, &out));
+    TEST_ASSERT(s.vembed_hits == 1);
+    TEST_ASSERT(out.data != emb.data);
+    TEST_ASSERT(out.token_count == 2 && out.grid_width == 2 &&
+                out.fingerprint[0] == 0xAB);
+    TEST_ASSERT(!memcmp(out.data, emb.data, (size_t)ds4_vembed_emb_bytes(&emb)));
+    free(out.data);
+
+    /* Length guard: same hash inputs recorded for a different length miss. */
+    ds4_vembed_hash(img2, sizeof(img2) - 1, &h1, &h2);
+    TEST_ASSERT(!ds4_vembed_lookup(&s, h1, h2, sizeof(img2) - 1, &out));
+
+    /* Cap accounting: an entry that cannot ever fit is not cached. */
+    ds4_vision_embedding big = {0};
+    big.token_count = DS4_VEMBED_CACHE_BYTES / (DS4_VEMBED_HIDDEN * sizeof(float)) + 1;
+    big.data = malloc(1);
+    ds4_vembed_hash(img3, sizeof(img3) - 1, &h1, &h2);
+    ds4_vembed_store(&s, h1, h2, sizeof(img3) - 1, &big);
+    TEST_ASSERT(s.vembed_bytes == ds4_vembed_emb_bytes(&emb));  /* unchanged */
+    free(big.data);
+
+    free(emb.data);
+}
+
+static void test_byte_prefix_match_visible_markers(void) {
+    char prefix[128], text[128], skewed[160];
+    snprintf(prefix, sizeof(prefix),
+             "A\x1e" "DS4_IMAGE_aaaaaaaaaaaaaaaaaaaaaaaa" "\x1f" "B tail");
+    snprintf(text, sizeof(text),
+             "A\x1e" "DS4_IMAGE_bbbbbbbbbbbbbbbbbbbbbbbb" "\x1f" "B tail");
+    snprintf(skewed, sizeof(skewed),
+             "X\x1e" "DS4_IMAGE_aaaaaaaaaaaaaaaaaaaaaaaa" "\x1f" "B tail");
+    const size_t plen = strlen(prefix);
+    TEST_ASSERT(byte_prefix_match_visible(text, strlen(text), prefix, plen));
+    /* Same nonce trivially matches. */
+    TEST_ASSERT(byte_prefix_match_visible(prefix, plen, prefix, plen));
+    /* A marker shifted by one byte is not an equal-offset marker. */
+    TEST_ASSERT(!byte_prefix_match_visible(skewed, strlen(skewed), prefix, plen));
+    /* Malformed nonce (too short) on the text side must not wildcard-match. */
+    char broken[128];
+    snprintf(broken, sizeof(broken),
+             "A\x1e" "DS4_IMAGE_short" "\x1f" "B tail more");
+    TEST_ASSERT(!byte_prefix_match_visible(broken, strlen(broken),
+                                           prefix, plen));
+    /* Divergence in the non-marker region still fails. */
+    char differ[128];
+    snprintf(differ, sizeof(differ),
+             "A\x1e" "DS4_IMAGE_bbbbbbbbbbbbbbbbbbbbbbbb" "\x1f" "B talX more");
+    TEST_ASSERT(!byte_prefix_match_visible(differ, strlen(differ),
+                                           prefix, plen));
+}
+
 static void test_thinking_checkpoint_remember_gate(void) {
     request r;
     request_init(&r, REQ_CHAT, 128);
@@ -21733,6 +22025,8 @@ static void ds4_server_unit_tests_run(void) {
     test_kv_tool_map_restores_before_prompt_render();
     test_thinking_checkpoint_canonical_matches_future_prompt();
     test_preserved_thinking_canonical_matches_future_prompt();
+    test_vembed_cache_store_hit_evict();
+    test_byte_prefix_match_visible_markers();
     test_thinking_canonical_empty_content();
     test_thinking_canonical_multi_turn();
     test_thinking_canonical_with_tools_preserves_reasoning();
