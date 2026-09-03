@@ -14617,6 +14617,16 @@ int main(int argc, char **argv) {
 
     if (cfg.kv_disk_dir) {
         uint64_t model_fp = ds4_kvstore_model_fingerprint(cfg.engine.model_path);
+        /* The vision encoder sidecar is part of the weights that produce the
+         * KV payload: its projection feeds every post-image layer, so a cache
+         * written under one encoder is corrupt under another.  Fold the
+         * encoder's file fingerprint (path + size + mtime) into model_fp so
+         * swapping the encoder alone rejects stale snapshots too. */
+        if (cfg.engine.vision_path && cfg.engine.vision_path[0]) {
+            uint64_t vision_fp =
+                ds4_kvstore_model_fingerprint(cfg.engine.vision_path);
+            model_fp ^= vision_fp * 0x9E3779B97F4A7C15ull;
+        }
         /* Align the continued-checkpoint grid to the engine's effective prefill
          * chunk (explicit setting, env override, or backend default) so anchors
          * actually land on chunk boundaries (kv_cache_continued_step). */
