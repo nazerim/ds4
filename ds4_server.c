@@ -3109,8 +3109,12 @@ static bool request_tokenize_multimodal_prompt(ds4_engine *e, server *s,
         ds4_tokenize_rendered_chat(e, r->prompt_text, &r->prompt);
         return true;
     }
-    if (count > 16) {
-        snprintf(err, errlen, "too many images; at most 16 are allowed");
+    /* Vision agent loops accumulate one screenshot per tool round; 16 was
+     * exhausted by real pi.dev sessions.  64 matches the disk snapshot
+     * identity-trailer capacity (KV_VISION_MAX_RECORDS); sessions beyond it
+     * still serve, they simply stay outside multimodal disk caching. */
+    if (count > 64) {
+        snprintf(err, errlen, "too many images; at most 64 are allowed");
         return false;
     }
     if (!e || !s || !ds4_engine_has_vision(e)) {
