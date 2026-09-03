@@ -11012,8 +11012,10 @@ static int kv_cache_try_load_vision(server *s, server_slot *slot,
      * exact-prefix-plus-tokenized-suffix effective prompt, but only when
      * every image is attested fully below the frontier, so the text suffix
      * cannot contain image placeholders. */
-    bool req_prompt_matches = req->prompt.len >= loaded &&
-        !memcmp(lt->v, req->prompt.v, (size_t)loaded * sizeof(int));
+    bool req_prompt_matches = false;
+    if (ok && lt)
+        req_prompt_matches = req->prompt.len >= loaded &&
+            !memcmp(lt->v, req->prompt.v, (size_t)loaded * sizeof(int));
     if (ok && !req_prompt_matches) {
         for (size_t k = 0; k < req->image_count && ok; k++) {
             const ds4_vision_span *sp = &req->images[k];
