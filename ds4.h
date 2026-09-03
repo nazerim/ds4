@@ -445,8 +445,22 @@ bool ds4_session_vision_state_matches(const ds4_session *s,
                                       const ds4_vision_span *images,
                                       size_t image_count);
 /* True while a session contains, or is actively syncing, image-conditioned
- * state. Such state must not be written to the text-keyed disk KV cache. */
+ * state. Such state may only reach the disk KV cache through a snapshot that
+ * records and verifies the image identities (vision trailer). */
 bool ds4_session_has_vision_state(const ds4_session *s);
+/* Record the image identities that produced the CURRENT checkpoint from a
+ * disk snapshot whose vision trailer has been verified against the incoming
+ * request by the caller. Every span must lie fully inside the checkpoint and
+ * spans must be ordered and non-overlapping. Returns 1 on success. */
+int ds4_session_set_vision_identities(ds4_session *s,
+                                      const ds4_vision_span *images,
+                                      size_t image_count);
+/* Read the recorded checkpoint identities (see ds4_vision_identity). */
+size_t ds4_session_vision_identity_count(const ds4_session *s);
+int ds4_session_vision_identity_at(const ds4_session *s, size_t index,
+                                   uint32_t *token_start,
+                                   uint32_t *token_count,
+                                   uint8_t fingerprint[32]);
 #ifdef DS4_SERVER_TEST
 /* Lightweight checkpoint shell for server cache-routing tests. */
 ds4_session *ds4_session_new_test_vision_checkpoint(

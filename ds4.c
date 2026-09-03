@@ -65995,6 +65995,57 @@ bool ds4_session_has_vision_state(const ds4_session *s) {
     return s && (s->checkpoint_image_count != 0 || s->sync_image_count != 0);
 }
 
+int ds4_session_set_vision_identities(ds4_session *s,
+                                       const ds4_vision_span *images,
+                                       size_t image_count) {
+    if (!s || !s->checkpoint_valid) return 0;
+    if (image_count != 0 && !images) return 0;
+    ds4_vision_identity *copy = NULL;
+    if (image_count != 0) {
+        if (image_count > SIZE_MAX / sizeof(copy[0])) return 0;
+        copy = calloc(image_count, sizeof(copy[0]));
+        if (!copy) return 0;
+        uint64_t previous_end = 0;
+        for (size_t i = 0; i < image_count; i++) {
+            const ds4_vision_span *span = &images[i];
+            const uint64_t end = (uint64_t)span->token_start +
+                                 span->embedding.token_count;
+            /* Identity may only describe rows the snapshot actually holds. */
+            if (span->embedding.token_count == 0 ||
+                span->token_start < previous_end ||
+                end > (uint64_t)s->checkpoint.len) {
+                free(copy);
+                return 0;
+            }
+            previous_end = end;
+            copy[i].token_start = span->token_start;
+            copy[i].token_count = span->embedding.token_count;
+            memcpy(copy[i].fingerprint, span->embedding.fingerprint,
+                   sizeof(copy[i].fingerprint));
+        }
+    }
+    free(s->checkpoint_images);
+    s->checkpoint_images = copy;
+    s->checkpoint_image_count = image_count;
+    return 1;
+}
+
+size_t ds4_session_vision_identity_count(const ds4_session *s) {
+    return s ? s->checkpoint_image_count : 0;
+}
+
+int ds4_session_vision_identity_at(const ds4_session *s, size_t index,
+                                   uint32_t *token_start,
+                                   uint32_t *token_count,
+                                   uint8_t fingerprint[32]) {
+    if (!s || index >= s->checkpoint_image_count) return 0;
+    const ds4_vision_identity *id = &s->checkpoint_images[index];
+    if (token_start) *token_start = id->token_start;
+    if (token_count) *token_count = id->token_count;
+    if (fingerprint) memcpy(fingerprint, id->fingerprint, 32);
+    return 1;
+}
+
 static bool ds4_session_vision_range_overlaps(
         const ds4_session *s,
         uint32_t           token_start,
