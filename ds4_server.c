@@ -9173,6 +9173,12 @@ typedef struct {
     uint8_t fingerprint[32];
 } kv_vision_record;
 
+static uint64_t kv_fnv64(const char *p, size_t n) {
+    uint64_t h = 1469598103934665603ull;
+    for (size_t i = 0; i < n; i++) h = (h ^ (unsigned char)p[i]) * 1099511628211ull;
+    return h ? h : 1;   /* never 0, which means "conversation unknown" */
+}
+
 /* Slot-owned multimodal disk-store context for the request currently owning
  * the slot.  base_text is the request prompt with image marker nonces
  * replaced by fingerprint-derived ids (deterministic across replays); recs
@@ -9197,9 +9203,12 @@ struct server_slot {
     visible_live_state thinking_live;
     slot_vision_store vision_store;
     /* Token frontier of the last successful disk store from this slot (any
-     * kind).  A multimodal disk load only proceeds when the live session
-     * sits exactly there, so restore can never discard unsaved state. */
+     * kind), and the conversation hash that store keyed on (0 = unknown).
+     * A multimodal disk load skips only when the live session is NEWER
+     * unsaved state of THAT SAME conversation; a different conversation's
+     * live state may be discarded exactly as the text path discards it. */
     int durable_frontier_tokens;
+    uint64_t durable_conv;
     int continued_last_store_tokens;
     /* Pending divergence anchor (miss common-prefix point): once this slot's
      * live session reaches the target, a reason=cold anchor is stored at
@@ -10673,6 +10682,13 @@ static bool kv_cache_store_live_prefix_text(server *s, server_slot *slot,
             tctx.records_in = recs;
             tctx.record_count_in = vs->rec_count;
             store_text = vision_text;
+            /* The normalized transcript is the exact frontier text with
+             * deterministic image keys - it is neither a hidden-reasoning nor
+             * a responses-visible substitution, so the store must not carry
+             * those key classes (the loader only matches them in their own
+             * protocol paths). */
+            cache_text_ext = 0;
+            cache_text_key = NULL;
         }
         if (!okv) {
             pthread_mutex_unlock(&s->inference_mu);
@@ -10696,7 +10712,17 @@ static bool kv_cache_store_live_prefix_text(server *s, server_slot *slot,
     free(vision_text);
     /* Any successful frontier store leaves the live session durable at this
      * length, so a later multimodal disk load may discard it safely. */
-    if (ok && store_len == tokens->len) slot->durable_frontier_tokens = store_len;
+    if (ok && store_len == tokens->len) {
+        slot->durable_frontier_tokens = store_len;
+        /* Only image stores carry a stable conversation key; text payloads
+         * render token-exact transcripts that churn per turn, and the text
+         * load path already protects itself via the evict store.  0 keeps
+         * the multimodal guard conservative in the other direction. */
+        slot->durable_conv = has_vision && slot->vision_store.valid
+            ? kv_fnv64(slot->vision_store.base_text,
+                       slot->vision_store.base_len)
+            : 0;
+    }
     return ok;
 }
 
@@ -12928,27 +12954,32 @@ static void generate_job_inner(server *s, server_slot *slot, job *j) {
                    live_vision_exact_match ? "fingerprint-exact-match" :
                                              "fingerprint-prefix-match");
     }
-    /* Vision disk restore.  Only attempted when the slot's live frontier is
-     * exactly the frontier of the last successful image snapshot: loading an
-     * older image state over a newer unsaved one is never worth the risk,
-     * and the cold rebuild keeps the live session authoritative. */
-    if (multimodal && cached == 0 && s->kv.enabled &&
-        slot->vision_store.valid &&
-        old_pos == slot->durable_frontier_tokens)
+    /* Vision disk restore.  Skipped only when the slot's live session is
+     * newer, unsaved state of the SAME conversation we are about to restore;
+     * a different (e.g. interleaved text) session may be discarded with the
+     * same semantics the text load path already uses. */
+    if (multimodal && cached == 0 && s->kv.enabled && slot->vision_store.valid)
     {
-        disk_cached = kv_cache_try_load_vision(s, slot, &j->req,
-                                               &effective_prompt,
-                                               &disk_cache_path,
-                                               &disk_cache_ext_flags);
-        if (disk_cached > 0) {
-            cached = disk_cached;
-            cache_source = "disk-vision";
-            prompt_for_sync = &effective_prompt;
-            slot->continued_last_store_tokens = disk_cached;
-            slot->durable_frontier_tokens = disk_cached;
-            server_log(DS4_LOG_KVCACHE,
-                       "ds4-server: multimodal disk kv hit images=%zu cached=%d prompt=%d",
-                       j->req.image_count, disk_cached, j->req.prompt.len);
+        const uint64_t req_conv = kv_fnv64(slot->vision_store.base_text,
+                                           slot->vision_store.base_len);
+        const bool newer_unsaved = req_conv == slot->durable_conv &&
+                                   old_pos > slot->durable_frontier_tokens;
+        if (!newer_unsaved) {
+            disk_cached = kv_cache_try_load_vision(s, slot, &j->req,
+                                                   &effective_prompt,
+                                                   &disk_cache_path,
+                                                   &disk_cache_ext_flags);
+            if (disk_cached > 0) {
+                cached = disk_cached;
+                cache_source = "disk-vision";
+                prompt_for_sync = &effective_prompt;
+                slot->continued_last_store_tokens = disk_cached;
+                slot->durable_frontier_tokens = disk_cached;
+                slot->durable_conv = req_conv;
+                server_log(DS4_LOG_KVCACHE,
+                           "ds4-server: multimodal disk kv hit images=%zu cached=%d prompt=%d",
+                           j->req.image_count, disk_cached, j->req.prompt.len);
+            }
         }
     }
     if (cached == 0) slot->continued_last_store_tokens = 0;
