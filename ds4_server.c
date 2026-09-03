@@ -11475,12 +11475,18 @@ static bool continue_after_invalid_dsml(server *s, server_slot *slot,
 
 static bool should_remember_thinking_checkpoint(const request *r,
                                                 const thinking_state *thinking,
-                                                const char *finish) {
-    if (!r || r->kind != REQ_CHAT || r->has_tools) return false;
-    if (r->prompt_preserves_reasoning) return false;
+                                                const char *finish,
+                                                const char *reasoning) {
+    if (!r || r->kind != REQ_CHAT) return false;
     if (!ds4_think_mode_enabled(r->think_mode)) return false;
     if (finish && (!strcmp(finish, "error") || !strcmp(finish, "length"))) return false;
     if (thinking && thinking->inside) return false;
+    /* Tool-context and reasoning-preserving replays render assistant thinking
+     * back into history: use the preserved-reasoning bridge, which requires
+     * the sampled reasoning bytes.  Plain toolless replays drop reasoning: use
+     * the visible-only bridge. */
+    if (r->has_tools || r->prompt_preserves_reasoning)
+        return reasoning && reasoning[0];
     return true;
 }
 
@@ -11699,10 +11705,53 @@ static char *build_toolless_thinking_visible_text(const request *r,
     return buf_take(&visible);
 }
 
+/* Variant for tool-context replays (and any prompt that already renders
+ * assistant reasoning back into history).  In that regime
+ * render_chat_prompt_text() emits open-think + reasoning + close-think for
+ * history assistant turns, so the bytes the next request will replay for the
+ * turn we just sampled are:
+ *
+ *   prompt-with-final-<think> + reasoning + </think> + visible-content + eos
+ *
+ * Remembering these bytes lets the next request hit the thinking-visible path
+ * and rebuild the effective prompt from the EXACT live token prefix plus a
+ * newly tokenized text suffix.  That is immune to the BPE re-merge divergence
+ * that makes an identical-text replay still miss the token-prefix check
+ * (sampled reasoning tokenizes autoregressively; replay re-tokenizes the whole
+ * string and merges can differ at block boundaries).  Without this bridge a
+ * plain thinking turn in a tool conversation permanently diverges the live
+ * graph from every future replay, forcing full cold re-prefills. */
+static char *build_preserved_thinking_visible_text(const request *r,
+                                                   const char *content,
+                                                   const char *reasoning) {
+    if (!r || !r->prompt_text) return NULL;
+    if (!ds4_think_mode_enabled(r->think_mode)) return NULL;
+
+    size_t pt_len = strlen(r->prompt_text);
+    const char *think_tag = "<think>";
+    size_t tag_len = strlen(think_tag);
+    if (pt_len < tag_len ||
+        memcmp(r->prompt_text + pt_len - tag_len, think_tag, tag_len) != 0) {
+        return NULL;
+    }
+
+    buf visible = {0};
+    buf_puts(&visible, r->prompt_text);
+    buf_puts(&visible, reasoning ? reasoning : "");
+    buf_puts(&visible, "</think>");
+    buf_puts(&visible, content ? content : "");
+    buf_puts(&visible, "<｜end▁of▁sentence｜>");
+    return buf_take(&visible);
+}
+
 static void remember_thinking_checkpoint(server *s, server_slot *slot,
                                          const job *j, const char *ctx,
-                                         uint64_t trace_id, const char *content) {
-    char *visible = build_toolless_thinking_visible_text(&j->req, content);
+                                         uint64_t trace_id, const char *content,
+                                         const char *reasoning) {
+    const bool preserved = j->req.has_tools || j->req.prompt_preserves_reasoning;
+    char *visible = preserved
+        ? build_preserved_thinking_visible_text(&j->req, content, reasoning)
+        : build_toolless_thinking_visible_text(&j->req, content);
     if (!visible) return;
 
     thinking_live_remember(s, slot, visible);
@@ -13284,9 +13333,11 @@ decode_again:
     } else if (parsed_calls.len) {
         thinking_live_clear(s, slot);
     } else if (!parsed_calls.len &&
-               should_remember_thinking_checkpoint(&j->req, &thinking, final_finish)) {
+               should_remember_thinking_checkpoint(&j->req, &thinking, final_finish,
+                                                   parsed_reasoning)) {
         remember_thinking_checkpoint(s, slot, j, ctx_span, trace_id,
-                                     parsed_content ? parsed_content : "");
+                                     parsed_content ? parsed_content : "",
+                                     parsed_reasoning);
     } else if (!parsed_calls.len) {
         thinking_live_clear(s, slot);
     }
@@ -18560,21 +18611,28 @@ static void test_thinking_checkpoint_remember_gate(void) {
     r.think_mode = DS4_THINK_HIGH;
     thinking_state st = {.inside = true};
 
-    TEST_ASSERT(!should_remember_thinking_checkpoint(&r, &st, "length"));
-    TEST_ASSERT(!should_remember_thinking_checkpoint(&r, &st, "stop"));
+    TEST_ASSERT(!should_remember_thinking_checkpoint(&r, &st, "length", "why"));
+    TEST_ASSERT(!should_remember_thinking_checkpoint(&r, &st, "stop", "why"));
 
     st.inside = false;
-    TEST_ASSERT(!should_remember_thinking_checkpoint(&r, &st, "length"));
-    TEST_ASSERT(should_remember_thinking_checkpoint(&r, &st, "stop"));
+    TEST_ASSERT(!should_remember_thinking_checkpoint(&r, &st, "length", "why"));
+    TEST_ASSERT(should_remember_thinking_checkpoint(&r, &st, "stop", "why"));
 
+    /* Toolless replay drops reasoning: the visible-only bridge still fires
+     * with empty reasoning. */
+    TEST_ASSERT(should_remember_thinking_checkpoint(&r, &st, "stop", ""));
+
+    /* Preserved-reasoning regime needs the sampled bytes to build the key. */
     r.prompt_preserves_reasoning = true;
-    TEST_ASSERT(!should_remember_thinking_checkpoint(&r, &st, "stop"));
+    TEST_ASSERT(!should_remember_thinking_checkpoint(&r, &st, "stop", ""));
+    TEST_ASSERT(should_remember_thinking_checkpoint(&r, &st, "stop", "why"));
     r.prompt_preserves_reasoning = false;
     r.has_tools = true;
-    TEST_ASSERT(!should_remember_thinking_checkpoint(&r, &st, "stop"));
+    TEST_ASSERT(!should_remember_thinking_checkpoint(&r, &st, "stop", NULL));
+    TEST_ASSERT(should_remember_thinking_checkpoint(&r, &st, "stop", "why"));
     r.has_tools = false;
     r.think_mode = DS4_THINK_NONE;
-    TEST_ASSERT(!should_remember_thinking_checkpoint(&r, &st, "stop"));
+    TEST_ASSERT(!should_remember_thinking_checkpoint(&r, &st, "stop", "why"));
 
     request_free(&r);
 }
@@ -21049,6 +21107,56 @@ static void test_thinking_checkpoint_canonical_matches_future_prompt(void) {
     chat_msgs_free(&history_msgs);
 }
 
+static void test_preserved_thinking_canonical_matches_future_prompt(void) {
+    chat_msgs prefix_msgs = {0};
+    chat_msg u1 = {0};
+    u1.role = xstrdup("user");
+    u1.content = xstrdup("Check the logs.");
+    chat_msgs_push(&prefix_msgs, u1);
+    char *prompt_text = render_chat_prompt_text(&prefix_msgs, "{}", NULL,
+                                                DS4_THINK_HIGH);
+    size_t pt_len = strlen(prompt_text);
+    TEST_ASSERT(pt_len >= 7 && !memcmp(prompt_text + pt_len - 7, "<think>", 7));
+
+    const char *reasoning = "Reading the log now...";
+    const char *content = "Nothing failed.";
+
+    request r;
+    request_init(&r, REQ_CHAT, 128);
+    r.think_mode = DS4_THINK_HIGH;
+    r.has_tools = true;
+    r.prompt_text = xstrdup(prompt_text);
+    char *visible = build_preserved_thinking_visible_text(&r, content, reasoning);
+    TEST_ASSERT(visible != NULL);
+    request_free(&r);
+
+    chat_msgs history_msgs = {0};
+    chat_msg h_user = {0};
+    h_user.role = xstrdup("user");
+    h_user.content = xstrdup("Check the logs.");
+    chat_msgs_push(&history_msgs, h_user);
+    chat_msg h_asst = {0};
+    h_asst.role = xstrdup("assistant");
+    h_asst.reasoning = xstrdup(reasoning);
+    h_asst.content = xstrdup(content);
+    chat_msgs_push(&history_msgs, h_asst);
+    chat_msg h_user2 = {0};
+    h_user2.role = xstrdup("user");
+    h_user2.content = xstrdup("And now?");
+    chat_msgs_push(&history_msgs, h_user2);
+    char *future = render_chat_prompt_text(&history_msgs, "{}", NULL,
+                                           DS4_THINK_HIGH);
+    size_t vlen = strlen(visible);
+    TEST_ASSERT(strlen(future) > vlen);
+    TEST_ASSERT(!memcmp(future, visible, vlen));
+
+    free(visible);
+    free(future);
+    free(prompt_text);
+    chat_msgs_free(&prefix_msgs);
+    chat_msgs_free(&history_msgs);
+}
+
 static void test_thinking_canonical_empty_content(void) {
     /* Edge case: model thinks but produces empty content (e.g. tool-less
      * thinking where answer is entirely in reasoning).  Canonical should
@@ -21169,8 +21277,9 @@ static void test_thinking_canonical_multi_turn(void) {
 
 static void test_thinking_canonical_with_tools_preserves_reasoning(void) {
     /* When tools ARE present, reasoning is preserved in re-render.
-     * The toolless thinking live binding should NOT fire (has_tools gate),
-     * and the tool-call replay path handles it.  Verify the template
+     * Plain (no tool-call) thinking turns in a tool conversation now use the
+     * PRESERVED thinking bridge (build_preserved_thinking_visible_text);
+     * tool-call turns keep their own replay path.  Verify the template
      * preserves reasoning when tool_context is true. */
     const char *tool_schemas = "{\"name\":\"bash\"}";
 
@@ -21518,6 +21627,7 @@ static void ds4_server_unit_tests_run(void) {
     test_kv_tool_map_filters_by_dsml_text();
     test_kv_tool_map_restores_before_prompt_render();
     test_thinking_checkpoint_canonical_matches_future_prompt();
+    test_preserved_thinking_canonical_matches_future_prompt();
     test_thinking_canonical_empty_content();
     test_thinking_canonical_multi_turn();
     test_thinking_canonical_with_tools_preserves_reasoning();
