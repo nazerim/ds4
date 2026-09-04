@@ -9344,9 +9344,10 @@ static void id_list_push_unique(stop_list *ids, const char *id);
  * holds it), so entries need no individual locking.  The byte budget is a
  * ceiling, not a reservation: memory only materializes for embeddings that
  * were actually produced, and LRU eviction caps growth; a session that never
- * encodes images costs nothing.  512 MiB covers roughly a hundred distinct
- * 4k-hidden vision embeddings, generous for agent screenshot loops on
- * inference hosts; smaller hosts can lower it at compile time. */
+ * encodes images costs nothing.  A vision embedding is a few MiB, so the
+ * slot table is the binding limit (worst case ~410 MiB at 128 slots); the
+ * byte budget sits just above it as a safety net for larger embeddings,
+ * and both constants can be lowered at compile time for small hosts. */
 #define DS4_VEMBED_CACHE_SLOTS 128
 #define DS4_VEMBED_CACHE_BYTES (512ull << 20)
 #define DS4_VEMBED_HIDDEN 4096u
