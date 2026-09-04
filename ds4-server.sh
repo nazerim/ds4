@@ -62,6 +62,13 @@ VISION_ENCODER="gguf/DeepSeek-V4-Flash-Vision-Encoder.gguf"
 # Deep Divergence Investigation). Empty = tracing off.
 TRACE_PATH="${TRACE_PATH:-}"
 
+# Vision image budget (see README, ds4_server.c): N > 0 opts into auto-reduce
+# of over-budget multimodal histories (keep last N, drop oldest). The fork
+# default is 128; the upstream default (unset in the server binary) rejects
+# requests over 16 images. 0 = disable auto-reduce in the server too.
+DS4_VISION_KEEP_IMAGES="${DS4_VISION_KEEP_IMAGES:-128}"
+export DS4_VISION_KEEP_IMAGES
+
 # Alternative model map: short name -> full GGUF path
 # Add entries here for each model variant. Use `start-<name>` / `restart-<name>`.
 # Uses parallel indexed arrays (bash 3.2 compatible — macOS default).
@@ -554,6 +561,9 @@ case "${1:-}" in
     echo "  DS4_API_KEY         - Bearer token for the auth proxy (required to start)"
     echo "  TRACE_PATH          - Write cache-decision trace to this file (e.g."
     echo "                        TRACE_PATH=./log/ds4.trace). Empty = off."
+    echo "  DS4_VISION_KEEP_IMAGES - Auto-reduce over-budget image histories to"
+    echo "                        the last N images (default: 128; 0 = reject"
+    echo "                        requests over 16 images instead)."
     echo "  KV_SMALL_DENSE      - Keep ALL KV anchors ≤ this token count sticky"
     echo "                        (default: 49152). Raise to bound head-divergence rebuilds."
     exit 1

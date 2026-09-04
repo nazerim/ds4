@@ -3096,21 +3096,50 @@ static int ds4_vision_encode_cached(server *s, ds4_engine *e,
                                     const uint8_t *encoded, size_t encoded_len,
                                     ds4_vision_embedding *out,
                                     char *error, size_t error_cap);
-static uint64_t ds4_vembed_hit_counter(server *s);
-static void ds4_vembed_log_reuse(server *s, uint64_t hits_before, size_t count);
+static uint64_t ds4_vembed_hits_now(server *s);
+static uint64_t ds4_vembed_bytes_now(server *s);
+static void ds4_vembed_log_reuse(uint64_t hits, size_t count,
+                                 uint64_t cache_bytes);
 
-/* Vision image budget: a screenshot-per-tool-round agent loop accumulates
- * images without bound.  Requests beyond the budget are auto-reduced rather
- * than rejected: the OLDEST images are dropped (the freshest views matter
- * most to the agent) and each dropped image sentinel in the rendered
+static void server_log(ds4_log_type type, const char *fmt, ...);
+
+/* Vision image budget.  Dropping older images is an intentionally lossy
+ * policy, so it is opt-in: by default requests with more than
+ * DS4_VISION_REJECT_LIMIT images are rejected.  Setting the environment
+ * variable DS4_VISION_KEEP_IMAGES=N (0 < N <= DS4_VISION_HARD_LIMIT) enables
+ * auto-reduction instead: the OLDEST images are dropped (the freshest views
+ * matter most to agent loops) and each dropped image sentinel in the rendered
  * transcript is replaced by a fixed text note, so the model still sees an
  * honest history and the prompt remains a deterministic cache key.  The
- * retained set is always the last DS4_VISION_KEEP_IMAGES in document order. */
-#define DS4_VISION_KEEP_IMAGES 128
+ * retained set is always the last N in document order; a hard limit still
+ * fails absurd requests fast, before any work. */
+#define DS4_VISION_REJECT_LIMIT 16
 #define DS4_VISION_HARD_LIMIT 1024
 #define DS4_VISION_OMIT_NOTE "[oldest image omitted to fit the vision budget]"
 
-static void server_log(ds4_log_type type, const char *fmt, ...);
+static size_t ds4_vision_keep_cached;   /* 0 = auto-reduce disabled */
+static pthread_once_t ds4_vision_keep_once = PTHREAD_ONCE_INIT;
+
+static void ds4_vision_keep_images_init(void) {
+    const char *env = getenv("DS4_VISION_KEEP_IMAGES");
+    if (!env || !env[0]) return;
+    char *end = NULL;
+    long v = strtol(env, &end, 10);
+    if (*end == '\0' && v >= 1 && v <= DS4_VISION_HARD_LIMIT) {
+        ds4_vision_keep_cached = (size_t)v;
+    } else {
+        server_log(DS4_LOG_WARNING,
+                   "ds4-server: ignoring invalid DS4_VISION_KEEP_IMAGES='%s' "
+                   "(valid range 1..%d); auto-reduce stays disabled",
+                   env, DS4_VISION_HARD_LIMIT);
+    }
+}
+
+/* Effective auto-reduce target, 0 when disabled. */
+static size_t ds4_vision_keep_images(void) {
+    pthread_once(&ds4_vision_keep_once, ds4_vision_keep_images_init);
+    return ds4_vision_keep_cached;
+}
 
 /* Rewrite r->prompt_text dropping the first `dropped` image sentinels.
  * Returns false if a sentinel went missing during rendering. */
@@ -3151,7 +3180,17 @@ static bool request_tokenize_multimodal_prompt(ds4_engine *e, server *s,
         ds4_tokenize_rendered_chat(e, r->prompt_text, &r->prompt);
         return true;
     }
-    if (count > DS4_VISION_HARD_LIMIT) {
+    const size_t keep = ds4_vision_keep_images();   /* 0 = reject, not reduce */
+    if (keep == 0) {
+        if (count > DS4_VISION_REJECT_LIMIT) {
+            snprintf(err, errlen,
+                     "too many images; at most %d are allowed "
+                     "(set DS4_VISION_KEEP_IMAGES=N to serve the request "
+                     "with the oldest images dropped instead)",
+                     DS4_VISION_REJECT_LIMIT);
+            return false;
+        }
+    } else if (count > DS4_VISION_HARD_LIMIT) {
         snprintf(err, errlen, "too many images; at most %d are allowed",
                  DS4_VISION_HARD_LIMIT);
         return false;
@@ -3173,8 +3212,8 @@ static bool request_tokenize_multimodal_prompt(ds4_engine *e, server *s,
     server_image_input **inputs_base = inputs;
     ds4_vision_embedding *embeddings_base = embeddings;
     size_t total_images = count;
-    if (count > DS4_VISION_KEEP_IMAGES) {
-        size_t dropped = count - DS4_VISION_KEEP_IMAGES;
+    if (keep != 0 && count > keep) {
+        size_t dropped = count - keep;
         if (!ds4_prompt_text_drop_oldest_images(r, inputs, count, dropped)) {
             free(inputs_base);
             free(embeddings_base);
@@ -3190,8 +3229,8 @@ static bool request_tokenize_multimodal_prompt(ds4_engine *e, server *s,
     }
 
     bool ok = true;
-    const uint64_t hits_before = ds4_vembed_hit_counter(s);
     server_inference_lock(s);
+    const uint64_t hits_before = ds4_vembed_hits_now(s);
     for (size_t i = 0; i < count; i++) {
         if (!ds4_vision_encode_cached(s, e, inputs[i]->encoded,
                                       inputs[i]->encoded_len,
@@ -3200,8 +3239,10 @@ static bool request_tokenize_multimodal_prompt(ds4_engine *e, server *s,
             break;
         }
     }
+    const uint64_t vembed_hits = ds4_vembed_hits_now(s) - hits_before;
+    const uint64_t vembed_bytes = ds4_vembed_bytes_now(s);
     server_inference_unlock(s);
-    if (ok) ds4_vembed_log_reuse(s, hits_before, count);
+    if (ok) ds4_vembed_log_reuse(vembed_hits, count, vembed_bytes);
     if (!ok) goto done;
 
     r->images = xmalloc(count * sizeof(r->images[0]));
@@ -9300,7 +9341,12 @@ static void id_list_push_unique(stop_list *ids, const char *id);
  * for identical encoded bytes on the same engine, so cache the embedding
  * (immutable after insert) keyed by a 128-bit hash of those bytes and copy it
  * out on hit.  All access happens under inference_mu (the encode loop already
- * holds it), so entries need no individual locking. */
+ * holds it), so entries need no individual locking.  The byte budget is a
+ * ceiling, not a reservation: memory only materializes for embeddings that
+ * were actually produced, and LRU eviction caps growth; a session that never
+ * encodes images costs nothing.  512 MiB covers roughly a hundred distinct
+ * 4k-hidden vision embeddings, generous for agent screenshot loops on
+ * inference hosts; smaller hosts can lower it at compile time. */
 #define DS4_VEMBED_CACHE_SLOTS 128
 #define DS4_VEMBED_CACHE_BYTES (512ull << 20)
 #define DS4_VEMBED_HIDDEN 4096u
@@ -9466,17 +9512,28 @@ static void ds4_vembed_store(server *s, uint64_t h1, uint64_t h2,
     s->vembed_bytes += bytes;
 }
 
-static uint64_t ds4_vembed_hit_counter(server *s) {
+/* Counter snapshots; call only under inference_mu (all cache traffic, and
+ * therefore these counters, mutates under that same lock). */
+static uint64_t ds4_vembed_hits_now(server *s) {
     return s->vembed_hits;
 }
 
-static void ds4_vembed_log_reuse(server *s, uint64_t hits_before, size_t count) {
-    if (s->vembed_hits == hits_before) return;
+static uint64_t ds4_vembed_bytes_now(server *s) {
+    return s->vembed_bytes;
+}
+
+/* Log the reuse ratio for one request.  All arguments are values captured
+ * under inference_mu by the caller; the logger itself takes no lock and
+ * reads no shared state, so the before/after counters cannot interleave
+ * with a concurrent request's cache traffic. */
+static void ds4_vembed_log_reuse(uint64_t hits, size_t count,
+                                 uint64_t cache_bytes) {
+    if (hits == 0) return;
     server_log(DS4_LOG_KVCACHE,
                "ds4-server: vision encode reuse images=%zu encoder_runs=%llu cache_bytes=%llu MiB",
                count,
-               (unsigned long long)(count - (s->vembed_hits - hits_before)),
-               (unsigned long long)(s->vembed_bytes >> 20));
+               (unsigned long long)(count - hits),
+               (unsigned long long)(cache_bytes >> 20));
 }
 
 /* ds4_engine_vision_encode_memory with a process-lifetime result cache.  The
