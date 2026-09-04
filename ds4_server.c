@@ -9345,15 +9345,17 @@ static void id_list_push_unique(stop_list *ids, const char *id);
  * ceiling, not a reservation: memory only materializes for embeddings that
  * were actually produced, and LRU eviction caps growth; a session that never
  * encodes images costs nothing.  A vision embedding is a few MiB, so the
- * slot table is the binding limit (worst case ~410 MiB at 128 slots); the
- * byte budget sits just above it as a safety net for larger embeddings,
- * and both constants can be lowered at compile time for small hosts. */
+ * slot table caps ordinary embeddings at roughly 410 MiB at 128 slots.  The
+ * byte budget is a hard cap over embeddings plus their exact encoded-byte
+ * keys, so unusually large inputs may make the byte budget bind first.
+ * Both constants can be lowered at compile time for small hosts. */
 #define DS4_VEMBED_CACHE_SLOTS 128
 #define DS4_VEMBED_CACHE_BYTES (512ull << 20)
 #define DS4_VEMBED_HIDDEN 4096u
 
 typedef struct {
     uint64_t h1, h2;
+    uint8_t *encoded;            /* exact cache key, owned */
     size_t encoded_len;
     ds4_vision_embedding emb;   /* owned deep copy */
     uint64_t bytes;
@@ -9411,12 +9413,9 @@ static void server_inference_unlock(server *s) {
     pthread_mutex_unlock(&s->inference_mu);
 }
 
-/* 128-bit FNV-1a over the encoded image bytes.  A collision would only trade
- * one image's embedding for another's inside the SAME conversation window;
- * combined with the 32-byte embedding fingerprint check on vision state and
- * the length check here, the risk is negligible for a bounded session cache,
- * and a miss (never a wrong image, given length+double-hash) is the worst
- * realistic outcome. */
+/* 128-bit FNV-1a over the encoded image bytes.  This is only a fast candidate
+ * filter: lookup also compares the complete encoded bytes, so a hash collision
+ * is an ordinary cache miss rather than a false image hit. */
 static void ds4_vembed_hash(const uint8_t *p, size_t n,
                             uint64_t *h1, uint64_t *h2) {
     uint64_t a = 1469598103934665603ull, b = 0xcbf29ce484222325ull;
@@ -9455,11 +9454,13 @@ static bool ds4_vembed_copy_out(const ds4_vision_embedding *src,
 }
 
 static bool ds4_vembed_lookup(server *s, uint64_t h1, uint64_t h2,
-                              size_t encoded_len, ds4_vision_embedding *out) {
+                              const uint8_t *encoded, size_t encoded_len,
+                              ds4_vision_embedding *out) {
     for (int i = 0; i < DS4_VEMBED_CACHE_SLOTS; i++) {
         ds4_vembed_entry *en = &s->vembed_cache[i];
         if (!en->used || en->h1 != h1 || en->h2 != h2 ||
-            en->encoded_len != encoded_len) continue;
+            en->encoded_len != encoded_len ||
+            memcmp(en->encoded, encoded, encoded_len) != 0) continue;
         if (!ds4_vembed_copy_out(&en->emb, out)) return false;
         en->use_seq = ++s->vembed_seq;
         s->vembed_hits++;
@@ -9469,14 +9470,30 @@ static bool ds4_vembed_lookup(server *s, uint64_t h1, uint64_t h2,
     return false;
 }
 
+static void ds4_vembed_entry_clear(ds4_vembed_entry *en) {
+    if (!en) return;
+    free(en->encoded);
+    ds4_vision_embedding_free(&en->emb);
+    memset(en, 0, sizeof(*en));
+}
+
 static void ds4_vembed_store(server *s, uint64_t h1, uint64_t h2,
-                             size_t encoded_len,
+                             const uint8_t *encoded, size_t encoded_len,
                              const ds4_vision_embedding *emb) {
-    const uint64_t bytes = ds4_vembed_emb_bytes(emb);
-    if (!emb->data || emb->token_count == 0 || bytes > DS4_VEMBED_CACHE_BYTES)
+    const uint64_t emb_bytes = ds4_vembed_emb_bytes(emb);
+    if (!encoded || encoded_len == 0 || !emb->data || emb->token_count == 0 ||
+        encoded_len > UINT64_MAX - emb_bytes)
         return;
+    const uint64_t bytes = emb_bytes + encoded_len;
+    if (bytes > DS4_VEMBED_CACHE_BYTES) return;
     ds4_vision_embedding copy = {0};
     if (!ds4_vembed_copy_out(emb, &copy)) return;
+    uint8_t *encoded_copy = malloc(encoded_len);
+    if (!encoded_copy) {
+        ds4_vision_embedding_free(&copy);
+        return;
+    }
+    memcpy(encoded_copy, encoded, encoded_len);
     while (s->vembed_bytes + bytes > DS4_VEMBED_CACHE_BYTES) {
         int victim = -1;
         uint64_t best = UINT64_MAX;
@@ -9487,8 +9504,7 @@ static void ds4_vembed_store(server *s, uint64_t h1, uint64_t h2,
         if (victim < 0) break;
         ds4_vembed_entry *en = &s->vembed_cache[victim];
         s->vembed_bytes -= en->bytes;
-        free(en->emb.data);
-        memset(en, 0, sizeof(*en));
+        ds4_vembed_entry_clear(en);
     }
     int slot = -1;
     for (int i = 0; i < DS4_VEMBED_CACHE_SLOTS; i++)
@@ -9499,12 +9515,13 @@ static void ds4_vembed_store(server *s, uint64_t h1, uint64_t h2,
             if (s->vembed_cache[i].use_seq < best) { best = s->vembed_cache[i].use_seq; slot = i; }
         ds4_vembed_entry *en = &s->vembed_cache[slot];
         s->vembed_bytes -= en->bytes;
-        free(en->emb.data);
+        ds4_vembed_entry_clear(en);
     }
     ds4_vembed_entry *en = &s->vembed_cache[slot];
     memset(en, 0, sizeof(*en));
     en->h1 = h1;
     en->h2 = h2;
+    en->encoded = encoded_copy;
     en->encoded_len = encoded_len;
     en->emb = copy;
     en->bytes = bytes;
@@ -9546,11 +9563,11 @@ static int ds4_vision_encode_cached(server *s, ds4_engine *e,
                                     char *error, size_t error_cap) {
     uint64_t h1, h2;
     ds4_vembed_hash(encoded, encoded_len, &h1, &h2);
-    if (ds4_vembed_lookup(s, h1, h2, encoded_len, out)) return 1;
+    if (ds4_vembed_lookup(s, h1, h2, encoded, encoded_len, out)) return 1;
     if (!ds4_engine_vision_encode_memory(e, encoded, encoded_len, out,
                                          error, error_cap))
         return 0;
-    ds4_vembed_store(s, h1, h2, encoded_len, out);
+    ds4_vembed_store(s, h1, h2, encoded, encoded_len, out);
     return 1;
 }
 
@@ -14992,8 +15009,7 @@ static void server_close_resources(server *s) {
     tool_memory_free(&s->tool_mem);
     for (int i = 0; i < DS4_VEMBED_CACHE_SLOTS; i++) {
         ds4_vembed_entry *en = &s->vembed_cache[i];
-        if (en->used) free(en->emb.data);
-        memset(en, 0, sizeof(*en));
+        ds4_vembed_entry_clear(en);
     }
     s->vembed_bytes = 0;
     for (int i = 0; i < s->slot_count; i++) {
@@ -19521,32 +19537,41 @@ static void test_vembed_cache_store_hit_evict(void) {
 
     ds4_vembed_hash(img1, sizeof(img1) - 1, &h1, &h2);
     ds4_vision_embedding out = {0};
-    TEST_ASSERT(!ds4_vembed_lookup(&s, h1, h2, sizeof(img1) - 1, &out));
+    TEST_ASSERT(!ds4_vembed_lookup(&s, h1, h2, img1,
+                                   sizeof(img1) - 1, &out));
     TEST_ASSERT(s.vembed_misses == 1);
-    ds4_vembed_store(&s, h1, h2, sizeof(img1) - 1, &emb);
-    TEST_ASSERT(s.vembed_bytes == ds4_vembed_emb_bytes(&emb));
-    TEST_ASSERT(ds4_vembed_lookup(&s, h1, h2, sizeof(img1) - 1, &out));
+    ds4_vembed_store(&s, h1, h2, img1, sizeof(img1) - 1, &emb);
+    TEST_ASSERT(s.vembed_bytes ==
+                ds4_vembed_emb_bytes(&emb) + sizeof(img1) - 1);
+    TEST_ASSERT(ds4_vembed_lookup(&s, h1, h2, img1,
+                                  sizeof(img1) - 1, &out));
     TEST_ASSERT(s.vembed_hits == 1);
     TEST_ASSERT(out.data != emb.data);
     TEST_ASSERT(out.token_count == 2 && out.grid_width == 2 &&
                 out.fingerprint[0] == 0xAB);
     TEST_ASSERT(!memcmp(out.data, emb.data, (size_t)ds4_vembed_emb_bytes(&emb)));
-    free(out.data);
+    ds4_vision_embedding_free(&out);
 
-    /* Length guard: same hash inputs recorded for a different length miss. */
-    ds4_vembed_hash(img2, sizeof(img2) - 1, &h1, &h2);
-    TEST_ASSERT(!ds4_vembed_lookup(&s, h1, h2, sizeof(img2) - 1, &out));
+    /* A forced hash+length collision with different bytes must still miss. */
+    TEST_ASSERT(sizeof(img1) == sizeof(img2));
+    TEST_ASSERT(!ds4_vembed_lookup(&s, h1, h2, img2,
+                                   sizeof(img2) - 1, &out));
+    TEST_ASSERT(out.data == NULL);
 
     /* Cap accounting: an entry that cannot ever fit is not cached. */
     ds4_vision_embedding big = {0};
     big.token_count = DS4_VEMBED_CACHE_BYTES / (DS4_VEMBED_HIDDEN * sizeof(float)) + 1;
     big.data = malloc(1);
     ds4_vembed_hash(img3, sizeof(img3) - 1, &h1, &h2);
-    ds4_vembed_store(&s, h1, h2, sizeof(img3) - 1, &big);
-    TEST_ASSERT(s.vembed_bytes == ds4_vembed_emb_bytes(&emb));  /* unchanged */
+    ds4_vembed_store(&s, h1, h2, img3, sizeof(img3) - 1, &big);
+    TEST_ASSERT(s.vembed_bytes ==
+                ds4_vembed_emb_bytes(&emb) + sizeof(img1) - 1); /* unchanged */
     free(big.data);
 
     free(emb.data);
+    for (int i = 0; i < DS4_VEMBED_CACHE_SLOTS; i++)
+        ds4_vembed_entry_clear(&s.vembed_cache[i]);
+    s.vembed_bytes = 0;
 }
 
 static void test_prompt_text_drop_oldest_images(void) {
