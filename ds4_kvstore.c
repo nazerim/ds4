@@ -2252,6 +2252,47 @@ static int kv_cache_try_load_one(ds4_kvstore *kc, ds4_engine *engine,
         return 0;
     }
 
+    /* Tokenizer fingerprint pre-check.  Stamped files carry a behavioral
+     * fingerprint of the engine that produced their token history as the
+     * first trailer section.  A mismatch means this engine can no longer
+     * reproduce those token ids from the stored bytes (tokenizer code or
+     * data changed since), so restoring it would re-import a tokenization
+     * that every future request mismatches — the stale-token reload loop.
+     * Reject before touching the payload (session untouched); the next
+     * store under this text key writes a fresh stamped file.  Unstamped
+     * legacy files keep today's trusted behavior. */
+    if (hdr.ext_flags & DS4_KVSTORE_EXT_TOKFP) {
+        long payload_start = ftell(fp);
+        uint64_t tokfp = 0;
+        bool have_fp = false;
+        if (payload_start >= 0 &&
+            fseek(fp, payload_start + (long)hdr.payload_bytes, SEEK_SET) == 0) {
+            uint8_t sh[8];
+            uint8_t fb[8];
+            if (fread(sh, 1, sizeof(sh), fp) == (long)sizeof(sh) &&
+                sh[0] == 'T' && sh[1] == 'K' && sh[2] == 'F' &&
+                sh[3] == 1 && ds4_kvstore_le_get32(sh + 4) == 8 &&
+                fread(fb, 1, sizeof(fb), fp) == (long)sizeof(fb)) {
+                for (int i = 0; i < 8; i++) tokfp |= (uint64_t)fb[i] << (8 * i);
+                have_fp = true;
+            }
+            fseek(fp, payload_start, SEEK_SET);
+        }
+        if (have_fp && tokfp != ds4_engine_tokenizer_fingerprint(engine)) {
+            *retryable = true;
+            kv_logf(kc, DS4_KVSTORE_LOG_WARNING,
+                    "%s: kv cache tokenizer fingerprint mismatch, refusing stale tokenization%s%s %s",
+                    kv_log_name(kc),
+                    responses_protocol ? " " : "",
+                    responses_protocol ? "RESPPROTO" : "",
+                    path);
+            fclose(fp);
+            free(cached_text);
+            free(path);
+            return 0;
+        }
+    }
+
     char err[160] = {0};
     int loaded = 0;
     if (ds4_session_load_payload(session, fp, hdr.payload_bytes, err,
@@ -2259,61 +2300,25 @@ static int kv_cache_try_load_one(ds4_kvstore *kc, ds4_engine *engine,
     {
         const ds4_tokens *loaded_tokens = ds4_session_tokens(session);
         if (loaded_tokens && loaded_tokens->len == (int)hdr.tokens) {
-            /* Token-drift guard.  The stored text matched the prompt as bytes,
-             * but the graph state is exactly the stored token history.  If a
-             * fresh tokenization of that same text yields different token ids
-             * (a checkpoint written under different tokenizer rules than the
-             * running engine), the loaded frontier can never agree again with
-             * any future request: every turn would live-miss at the drift
-             * point, reload this same stale file by text key, and re-poison
-             * the session in a permanent loop.  Reject the load, drop the
-             * file, and let the caller fall back to a smaller valid candidate
-             * or a cold rebuild, which rewrites fresh tokens under the same
-             * text key. */
-            ds4_tokens fresh = {0};
-            ds4_tokenize_rendered_chat(engine, cached_text, &fresh);
-            bool drift = fresh.len != (int)hdr.tokens;
-            for (int i = 0; !drift && i < fresh.len; i++) {
-                if (fresh.v[i] != loaded_tokens->v[i]) drift = true;
+            loaded = (int)hdr.tokens;
+            if (effective_prompt) {
+                /* The cache lookup was by bytes, but the graph state is still
+                 * the exact token history stored in the payload.  Build the
+                 * prompt from that exact history and tokenize only the text
+                 * suffix after the byte prefix. */
+                ds4_kvstore_build_prompt_from_exact_prefix_and_text_suffix(
+                    engine, loaded_tokens, prompt_text + text_bytes,
+                    effective_prompt);
             }
-            ds4_tokens_free(&fresh);
-            if (drift) {
-                /* Reject without unlinking: sampled-boundary checkpoints
-                 * legitimately differ from a whole-text re-tokenization (the
-                 * preserved-thinking bridge keeps its own token history), and
-                 * a false positive must not destroy a valid file.  A truly
-                 * stale floor tokenization is re-rejected cheaply every turn
-                 * while the fallback chain (smaller clean candidates, then
-                 * cold rebuild) self-heals the session anyway. */
-                ds4_session_invalidate(session);
-                *retryable = true;
-                kv_logf(kc, DS4_KVSTORE_LOG_WARNING,
-                        "%s: kv cache token drift, refusing stale tokenization%s%s %s (falling back)",
-                        kv_log_name(kc),
-                        responses_protocol ? " " : "",
-                        responses_protocol ? "RESPPROTO" : "",
-                        path);
-            } else {
-                loaded = (int)hdr.tokens;
-                if (effective_prompt) {
-                    /* The cache lookup was by bytes, but the graph state is still
-                     * the exact token history stored in the payload.  Build the
-                     * prompt from that exact history and tokenize only the text
-                     * suffix after the byte prefix. */
-                    ds4_kvstore_build_prompt_from_exact_prefix_and_text_suffix(
-                        engine, loaded_tokens, prompt_text + text_bytes,
-                        effective_prompt);
-                }
-                if (hooks && hooks->load && (hdr.ext_flags & hooks->ext_flag)) {
-                    if (hooks->load(hooks->ud, fp, hooks->load_wanted) < 0) {
-                        /* The KV payload itself restored fine; only the trailer
-                         * (e.g. tool map) is corrupt.  Degrade to canonical
-                         * re-render, but say so — otherwise a corrupt checkpoint is
-                         * indistinguishable from an ordinary miss. */
-                        kv_logf(kc, DS4_KVSTORE_LOG_WARNING,
-                                "%s: kv cache trailer corrupt, continuing without it %s",
-                                kv_log_name(kc), path);
-                    }
+            if (hooks && hooks->load && (hdr.ext_flags & hooks->ext_flag)) {
+                if (hooks->load(hooks->ud, fp, hooks->load_wanted) < 0) {
+                    /* The KV payload itself restored fine; only the trailer
+                     * (e.g. tool map) is corrupt.  Degrade to canonical
+                     * re-render, but say so — otherwise a corrupt checkpoint is
+                     * indistinguishable from an ordinary miss. */
+                    kv_logf(kc, DS4_KVSTORE_LOG_WARNING,
+                            "%s: kv cache trailer corrupt, continuing without it %s",
+                            kv_log_name(kc), path);
                 }
             }
         } else {

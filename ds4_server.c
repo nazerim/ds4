@@ -10160,6 +10160,7 @@ static void apply_anthropic_stream_tool_ids(tool_calls *calls,
 #define KV_CACHE_FIXED_HEADER DS4_KVSTORE_FIXED_HEADER
 #define KV_CACHE_HIT_HALF_LIFE_SECONDS DS4_KVSTORE_HIT_HALF_LIFE_SECONDS
 #define KV_EXT_TOOL_MAP DS4_KVSTORE_EXT_TOOL_MAP
+#define KV_EXT_TOKFP DS4_KVSTORE_EXT_TOKFP
 #define KV_EXT_RESPONSES_VISIBLE DS4_KVSTORE_EXT_RESPONSES_VISIBLE
 #define KV_EXT_THINKING_VISIBLE DS4_KVSTORE_EXT_THINKING_VISIBLE
 #define KV_TOOL_MAP_MAGIC0 'K'
@@ -10175,6 +10176,16 @@ static void apply_anthropic_stream_tool_ids(tool_calls *calls,
  * A file's presence of any section is advertised by KV_EXT_TOOL_MAP; the
  * vision section additionally sets KV_EXT_VISION. */
 #define KV_EXT_VISION DS4_KVSTORE_EXT_VISION
+/* Tokenizer fingerprint section: the first trailer section in stamped
+ * files.  8-byte header (3 magic, 1 version, 4 payload length) + u64 fp. */
+#define KV_TOKFP_MAGIC0 'T'
+#define KV_TOKFP_MAGIC1 'K'
+#define KV_TOKFP_MAGIC2 'F'
+#define KV_TOKFP_VERSION 1u
+#define KV_TOKFP_HEADER 8u
+#define KV_TOKFP_PAYLOAD 8u
+#define KV_TOKFP_BYTES (KV_TOKFP_HEADER + KV_TOKFP_PAYLOAD)
+
 #define KV_VISION_MAGIC0 'K'
 #define KV_VISION_MAGIC1 'V'
 #define KV_VISION_MAGIC2 'I'
@@ -10663,7 +10674,7 @@ static bool kv_cache_trailer_size_cb(void *ud, const char *text,
     *bytes_out = 0;
     if (!kv_tool_map_serialized_size(cx->s, text, &tool_bytes)) return false;
     /* tool_bytes already includes the tool-map section header. */
-    uint64_t total = tool_bytes;
+    uint64_t total = KV_TOKFP_BYTES + tool_bytes;
     if (cx->record_count_in != 0)
         total += KV_VISION_HEADER +
                  cx->record_count_in * KV_VISION_RECORD;
@@ -10675,7 +10686,23 @@ static bool kv_cache_trailer_write_cb(void *ud, FILE *fp, const char *text,
                                       uint64_t *written_bytes) {
     kv_trailer_ctx *cx = (kv_trailer_ctx *)ud;
     uint64_t written = 0;
-    if (!kv_tool_map_write(cx->s, fp, text, &written)) return false;
+    {
+        uint8_t h[KV_TOKFP_HEADER];
+        h[0] = KV_TOKFP_MAGIC0;
+        h[1] = KV_TOKFP_MAGIC1;
+        h[2] = KV_TOKFP_MAGIC2;
+        h[3] = KV_TOKFP_VERSION;
+        le_put32(h + 4, KV_TOKFP_PAYLOAD);
+        uint8_t fpb[8];
+        uint64_t tok_fp = cx->s ? ds4_engine_tokenizer_fingerprint(cx->s->engine) : 0;
+        for (int i = 0; i < 8; i++) fpb[i] = (uint8_t)(tok_fp >> (8 * i));
+        if (fwrite(h, 1, sizeof(h), fp) != sizeof(h)) return false;
+        if (fwrite(fpb, 1, sizeof(fpb), fp) != sizeof(fpb)) return false;
+        written += KV_TOKFP_BYTES;
+    }
+    uint64_t tool_written = 0;
+    if (!kv_tool_map_write(cx->s, fp, text, &tool_written)) return false;
+    written += tool_written;
     if (cx->record_count_in != 0) {
         uint8_t h[KV_VISION_HEADER];
         h[0] = KV_VISION_MAGIC0;
@@ -10711,6 +10738,11 @@ static int kv_cache_trailer_load_cb(void *ud, FILE *fp, const void *wanted) {
         size_t n = fread(h, 1, sizeof(h), fp);
         if (n == 0 && feof(fp)) return 0;
         if (n != sizeof(h)) return -1;
+        if (h[0] == KV_TOKFP_MAGIC0 && h[1] == KV_TOKFP_MAGIC1 &&
+            h[2] == KV_TOKFP_MAGIC2 && h[3] == KV_TOKFP_VERSION) {
+            if (fseek(fp, (long)le_get32(h + 4), SEEK_CUR) != 0) return -1;
+            continue;
+        }
         if (h[0] == KV_TOOL_MAP_MAGIC0 && h[1] == KV_TOOL_MAP_MAGIC1 &&
             h[2] == KV_TOOL_MAP_MAGIC2 && h[3] == KV_TOOL_MAP_VERSION) {
             if (kv_tool_map_load_body(cx->s, fp, le_get32(h + 4),
@@ -10747,8 +10779,9 @@ static ds4_kvstore_trailer_hooks kv_cache_tool_map_hooks(kv_trailer_ctx *cx,
                                                          bool has_vision) {
     ds4_kvstore_trailer_hooks hooks;
     hooks.ud = cx;
-    hooks.ext_flag = has_vision ? (uint8_t)(KV_EXT_TOOL_MAP | KV_EXT_VISION)
-                                : KV_EXT_TOOL_MAP;
+    hooks.ext_flag = (uint8_t)(KV_EXT_TOKFP |
+                                (has_vision ? (uint8_t)(KV_EXT_TOOL_MAP | KV_EXT_VISION)
+                                            : KV_EXT_TOOL_MAP));
     hooks.serialized_size = kv_cache_trailer_size_cb;
     hooks.write = kv_cache_trailer_write_cb;
     hooks.load = kv_cache_trailer_load_cb;
@@ -19697,7 +19730,8 @@ static void test_normalize_image_text_and_trailer_roundtrip(void) {
     wcx.record_count_in = 2;
     uint64_t est = 0, written = 0;
     TEST_ASSERT(kv_cache_trailer_size_cb(&wcx, "", &est));
-    TEST_ASSERT(est == KV_VISION_HEADER + 2 * KV_VISION_RECORD);
+    TEST_ASSERT(est == KV_TOKFP_BYTES + KV_VISION_HEADER +
+                          2 * KV_VISION_RECORD);
     FILE *fp = tmpfile();
     TEST_ASSERT(fp != NULL);
     TEST_ASSERT(kv_cache_trailer_write_cb(&wcx, fp, "", &written));

@@ -35,6 +35,9 @@
  * an image-conditioned payload.  Set together with EXT_TOOL_MAP because the
  * server owns the composite trailer section chain. */
 #define DS4_KVSTORE_EXT_VISION            (1u << 4)
+/* Auxiliary (never a key-kind) bit: the trailer begins with a tokenizer
+ * fingerprint section the loader can reject on before touching the payload. */
+#define DS4_KVSTORE_EXT_TOKFP             (1u << 5)
 
 typedef enum {
     DS4_KVSTORE_REASON_UNKNOWN   = 0,
