@@ -6,7 +6,7 @@ set -euo pipefail
 
 SERVER_CMD="./ds4-server"
 PID_FILE="./ds4-server.pid"
-CTX=512000
+CTX=768000
 PORT=8001
 # Auth-gated reverse proxy in front of ds4-server. Keep the server on loopback;
 # clients hit the proxy's LAN address. Requires DS4_API_KEY (refuses to start without).
