@@ -11267,9 +11267,16 @@ static int kv_cache_try_load_vision(server *s, server_slot *slot,
             if (!p) break;
             markers++;
         }
-        if (n_above == 0 || markers != n_above) {
-            ok = 0;  /* Nothing to rebuild, or span/marker disagreement. */
+        if (n_above == 0) {
+            /* Every image is under the frontier: the loader's text-only
+             * suffix is already safe and was adopted verbatim before this
+             * rebuild path existed - keep that behavior. */
+        } else if (markers != n_above) {
+            ok = 0;  /* Span/marker disagreement: fall back to cold. */
         } else {
+            int *span_snapshot = xmalloc(sizeof(*span_snapshot) * req->image_count);
+            for (size_t k = 0; k < req->image_count; k++)
+                span_snapshot[k] = (int)req->images[k].token_start;
             ds4_tokens rebuilt = {0};
             tokens_copy_prefix(&rebuilt, lt, loaded);
             const char *cur = suf;
@@ -11300,8 +11307,14 @@ static int kv_cache_try_load_vision(server *s, server_slot *slot,
                 ds4_tokens_free(effective_prompt);
                 *effective_prompt = rebuilt;
             } else {
+                /* A mid-rebuild failure falls back to the cold path, which
+                 * tokenizes the request's own prompt - restore the original
+                 * span positions the partial rewrite invalidated. */
+                for (size_t k = 0; k < req->image_count; k++)
+                    req->images[k].token_start = (uint64_t)span_snapshot[k];
                 ds4_tokens_free(&rebuilt);
             }
+            free(span_snapshot);
         }
     } else if (ok) {
         /* Replace the text-derived effective prompt with the request's own
