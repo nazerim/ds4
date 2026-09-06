@@ -11234,11 +11234,74 @@ static int kv_cache_try_load_vision(server *s, server_slot *slot,
         req_prompt_matches = req->prompt.len >= loaded &&
             !memcmp(lt->v, req->prompt.v, (size_t)loaded * sizeof(int));
     if (ok && !req_prompt_matches) {
-        for (size_t k = 0; k < req->image_count && ok; k++) {
+        /* The request's own token vector diverges from the snapshot below
+         * the frontier (a BPE two-variant boundary), but every image under
+         * the frontier was attested byte-exact above, so the snapshot is
+         * still valid state.  A text-only suffix rebuild cannot carry new
+         * images, but we can rebuild the suffix the same way request
+         * tokenization builds a whole prompt: chunk-tokenize the
+         * normalized text from the checkpoint's own byte boundary and
+         * splice each vision placeholder block at its canonical marker,
+         * re-deriving token_start for above-frontier images in effective
+         * prompt space.  Every span is then independently validated by
+         * ds4_session_sync_multimodal against the real placeholder
+         * tokens, so a misderivation fails closed at sync, never silently. */
+        size_t n_above = 0;
+        for (size_t k = 0; k < req->image_count; k++) {
             const ds4_vision_span *sp = &req->images[k];
             if ((uint64_t)sp->token_start + sp->embedding.token_count >
                 (uint64_t)loaded)
-                ok = 0;
+                n_above++;
+        }
+        static const char canon_marker[] =
+            "\x1e" "DS4_IMAGE_" "000000000000000000000000";
+        const size_t canon_len = sizeof(canon_marker) - 1;
+        const char *suf = norm + lr.text_bytes;
+        size_t slen = norm_len > lr.text_bytes ? norm_len - lr.text_bytes : 0;
+        size_t markers = 0;
+        for (const char *p = suf;
+             p && (size_t)(p - suf) < slen && p + canon_len <= suf + slen;
+             p = memmem(p + 1, slen - (size_t)(p + 1 - suf),
+                        canon_marker, canon_len)) {
+            p = memmem(p, slen - (size_t)(p - suf), canon_marker, canon_len);
+            if (!p) break;
+            markers++;
+        }
+        if (n_above == 0 || markers != n_above) {
+            ok = 0;  /* Nothing to rebuild, or span/marker disagreement. */
+        } else {
+            ds4_tokens rebuilt = {0};
+            tokens_copy_prefix(&rebuilt, lt, loaded);
+            const char *cur = suf;
+            size_t consumed = 0;
+            for (size_t k = 0; k < req->image_count && ok; k++) {
+                ds4_vision_span *sp = &req->images[k];
+                if ((uint64_t)sp->token_start + sp->embedding.token_count <=
+                    (uint64_t)loaded)
+                    continue;  /* under the frontier: positions already exact */
+                char *m = memmem(cur, slen - consumed, canon_marker, canon_len);
+                if (!m) { ok = 0; break; }
+                char *chunk = xmalloc((size_t)(m - cur) + 1);
+                memcpy(chunk, cur, (size_t)(m - cur));
+                chunk[m - cur] = '\0';
+                ds4_tokenize_rendered_chat(s->engine, chunk, &rebuilt);
+                free(chunk);
+                if (!ds4_prompt_append_vision(s->engine, &rebuilt, sp,
+                                              &sp->embedding, NULL, 0)) {
+                    ok = 0; break;
+                }
+                consumed = (size_t)(m + canon_len - suf);
+                cur = m + canon_len;
+            }
+            if (ok) {
+                char *tail = xstrndup(cur, slen - consumed);
+                ds4_tokenize_rendered_chat(s->engine, tail, &rebuilt);
+                free(tail);
+                ds4_tokens_free(effective_prompt);
+                *effective_prompt = rebuilt;
+            } else {
+                ds4_tokens_free(&rebuilt);
+            }
         }
     } else if (ok) {
         /* Replace the text-derived effective prompt with the request's own
