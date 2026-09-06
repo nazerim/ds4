@@ -171,3 +171,82 @@ restored without persisting embeddings if the request can attest them.
   which is engine work beyond this scope.
 - Tests: trailer roundtrip, normalize, wildcard, record caps, plus live
   handover/restart scenarios (recipes in this ADR's commits).
+
+## ADR 2026-09-06: Checkpoint self-healing tiers (fingerprint stamp + reload-loop guard)
+
+### Context: three poisoning incidents, one taxonomy
+Long pi agent sessions (200-450k tokens, multimodal, tool loops) exhibited
+repeated `live kv cache miss ... reason=token-mismatch` at *fixed* token
+positions (65465 on Sep 5 = 29 turns of 38k re-prefill; 453568 and 275968
+loops on Sep 5-6). Forensic method: TRACE_PATH=./log/ds4.trace first-mismatch
+token windows + decoding token-id runs to byte strings from the GGUF vocab.
+
+Root taxonomy (all three are "same bytes, different token ids" - but from
+different causes):
+1. **Harness history mutation** - pi's superpowers bootstrap injected into
+   messages[1] in-memory only, toggling with the superpowers.ts
+   `session_start/session_compact/agent_end` state machine; each flip
+   rewrites the first user message (events 15:18/15:53 Sep 4). Client-side;
+   fix brief written (~/Projects/PiScratch/PI-SUPERPOWERS-BOOTSTRAP-CACHE-FIX.md:
+   persist-on-inject / append-only history). Cost: one bounded re-prefill
+   per flip once client fixed.
+2. **Tokenizer-generation skew** - checkpoint tokens from an engine whose
+   JoyAI pre-tokenizer rules differ from the running one (observed at floor
+   boundary 65465; exact mixing build unobservable after forensic purge).
+   Merge tables identical across our ggufs; upstream merge window did NOT
+   touch tokenizer code - provenance predates observables.
+3. **Sampled-tail contradiction** - a checkpoint whose tail covers
+   model-sampled tokens (thinking/DSML) whose bytes re-tokenize differently
+   on replay (first=448617 case; 275968/453568 loops). This is legitimate
+   by design (the preserved-thinking bridge KEEPS sampled tokens; live is
+   authoritative) - the bug is only that such a file, restored via its
+   text key forever, can never be progressed past via memory tiers.
+
+### Decisions
+- **Fingerprint stamp (f1ff74a, upstream #983):** engine computes
+  `ds4_engine_tokenizer_fingerprint()` = hash(n_vocab + every token len/bytes
+  in id order + merge-rank slots content + behavioral probe set run through
+  the real tokenizer). PROBE SET IS APPEND-ONLY. Covers data AND code change
+  with no human version constant. Stored as TOKFP section (first trailer
+  section, ext bit 1<<5 auxiliary) - pre-checked in kvstore loader by a
+  16-byte seek BEFORE payload; mismatch -> reject, session untouched,
+  fallback chain walks to next candidate/cold, which rewrites fresh.
+  Unstamped legacy files trusted (status quo). CRITICAL LESSON (found by
+  @JordiPosthumus static review): first version hashed the raw ds4_str
+  ARRAY (pointers!) - same-binary macOS restarts reproduce allocator layout,
+  so the pointer bug PASSED live tests by luck. Hash content, never struct
+  bytes; regression = two process launches must give identical fp.
+- **Reload-loop guard (9d955ec, fork; PR pending evidence):** per-slot
+  (disk_reload_path, disk_reload_frontier); second consecutive disk restore
+  of the SAME file at the SAME depth = tail provably unreachable ->
+  server-side unlink under kv_mu + retry load once (same mechanism the
+  prefill-failed abort-discard proved in production twice; automated).
+  Memory-tier continuation success clears the tracker. Detection cannot be
+  unit-tested; needs a natural loop event or days of clean running.
+- **Equivalence guard (bc1be25) was reverted by design**: load-time
+  "stored tokens == whole-text re-tokenization" false-positives on ALL
+  legitimate bridge-lineage files (sampled boundaries differ by design).
+  Do not reintroduce; the two shipped discriminators (engine identity,
+  behavioral loop) are the sound versions.
+- Tier order (ds4_server.c ~13030-13200): memory-token exact -> multimodal
+  exact-extension (#927) -> thinking-visible RAM bridge (text-match, keeps
+  live tokens, prompt_for_sync=effective_prompt) -> memory-text (live tokens
+  decoded to text, byte-prefix match) -> disk-vision (token-validated exact
+  prefix + identity trailer) -> disk-text (text-prefix + [now] fp precheck +
+  largest-first retry skip-list). `key=thinking-visible` disk hits = the
+  trust-by-text path that re-imported stale variants; the guard + stamp
+  cover it.
+- Tool-map `DS4_TOOL_MEMORY_MAX_BYTES` 512MiB pruning degrades memory-text
+  tier on write-heavy sessions (missing_ids=69) -> disk-tier demotion. Not
+  fixed (documented; raise budget or persist map into turn-store trailers if
+  it ever hurts).
+- Case-insensitive APFS: `MAINTENANCE.md` == `maintenance.md` (inode 13649699
+  linode repo). pi's `rm -f maintenance.md` cleanup deleted its own rewrite
+  3x; the "stall" at 275958 was a 3338-token heredoc-regeneration turn. No
+  engine involvement - model-logic loop, advisory given to pi.
+
+### Review-practice knowledge (Jordi's standard, adopted)
+Evidence must be rerun on the SUBMITTED head/config; lossy policy changes
+are opt-in and separate PRs; scope: mechanism vs policy; static review
+catches what lucky live tests hide; authorship preserved on adopted fixes
+(git cherry-pick -C).
