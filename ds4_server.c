@@ -9319,6 +9319,8 @@ struct server_slot {
      * unsaved state of THAT SAME conversation; a different conversation's
      * live state may be discarded exactly as the text path discards it. */
     int durable_frontier_tokens;
+    char disk_reload_path[128];       /* last disk-restored file (repeat-loop guard) */
+    int disk_reload_frontier;
     uint64_t durable_conv;
     int continued_last_store_tokens;
     /* Pending divergence anchor (miss common-prefix point): once this slot's
@@ -10989,6 +10991,32 @@ static void kv_cache_slot_restore_suppressed(server_slot *slot,
         slot->continued_last_store_tokens == suppressed_tokens) {
         slot->continued_last_store_tokens = old_tokens;
     }
+}
+
+/* Reload-loop guard.  A checkpoint whose tail is unreachable for the live
+ * prompt (e.g. it stored a sampled-tokenization region that fresh replays
+ * re-tokenize differently) restores fine but re-misses on every following
+ * turn, reloading the exact same file to the exact same frontier: the
+ * session can never progress past the file through the memory tiers.  That
+ * signature - two consecutive disk restores of the same file at the same
+ * depth for this slot - means the tail is provably dead weight.  Discard
+ * the file (the manual "abort the turn to trigger prefill-failed discard"
+ * recovery, automated) and let the caller fall through to the next
+ * candidate or a cold rebuild, which rewrites fresh state under the key. */
+static bool kv_cache_reload_repeat(server *s, server_slot *slot,
+                                   const char *path, int frontier) {
+    if (!slot || !path || !slot->disk_reload_path[0]) return false;
+    if (slot->disk_reload_frontier != frontier ||
+        strcmp(slot->disk_reload_path, path) != 0) return false;
+    server_log(DS4_LOG_KVCACHE,
+               "ds4-server: kv cache discarded reason=frontier-contradicted file=%s",
+               path);
+    pthread_mutex_lock(&s->kv_mu);
+    unlink(path);
+    pthread_mutex_unlock(&s->kv_mu);
+    slot->disk_reload_path[0] = '\0';
+    slot->disk_reload_frontier = 0;
+    return true;
 }
 
 static void kv_cache_discard_failed_disk_entry(server *s, server_slot *slot,
@@ -13128,11 +13156,24 @@ static void generate_job_inner(server *s, server_slot *slot, job *j) {
         const bool newer_unsaved = req_conv == slot->durable_conv &&
                                    old_pos > slot->durable_frontier_tokens;
         if (!newer_unsaved) {
-            disk_cached = kv_cache_try_load_vision(s, slot, &j->req,
-                                                   &effective_prompt,
-                                                   &disk_cache_path,
-                                                   &disk_cache_ext_flags);
+            for (int kv_reload_try = 0; kv_reload_try < 2; kv_reload_try++) {
+                disk_cached = kv_cache_try_load_vision(s, slot, &j->req,
+                                                       &effective_prompt,
+                                                       &disk_cache_path,
+                                                       &disk_cache_ext_flags);
+                if (disk_cached > 0 && kv_reload_try == 0 &&
+                    kv_cache_reload_repeat(s, slot, disk_cache_path, disk_cached)) {
+                    free(disk_cache_path);
+                    disk_cache_path = NULL;
+                    disk_cached = 0;
+                    continue;
+                }
+                break;
+            }
             if (disk_cached > 0) {
+                snprintf(slot->disk_reload_path, sizeof(slot->disk_reload_path),
+                         "%s", disk_cache_path ? disk_cache_path : "");
+                slot->disk_reload_frontier = disk_cached;
                 cached = disk_cached;
                 cache_source = "disk-vision";
                 prompt_for_sync = &effective_prompt;
@@ -13146,6 +13187,10 @@ static void generate_job_inner(server *s, server_slot *slot, job *j) {
         }
     }
     if (cached == 0) slot->continued_last_store_tokens = 0;
+    if (cached > 0 && cache_source && cache_source[0] != 'd') {
+        slot->disk_reload_path[0] = '\0';
+        slot->disk_reload_frontier = 0;
+    }
     if (!multimodal && s->kv.enabled && cached == 0 &&
         old_pos >= s->kv.opt.min_tokens) {
         /* Loading a disk snapshot replaces the live Metal session.  Persist the
@@ -13160,10 +13205,23 @@ static void generate_job_inner(server *s, server_slot *slot, job *j) {
                                protect, protect ? strlen(protect) : 0);
     }
     if (!multimodal && cached == 0) {
-        disk_cached = kv_cache_try_load(s, slot, &j->req, &effective_prompt,
-                                        &disk_cache_path,
-                                        &disk_cache_ext_flags);
+        for (int kv_reload_try = 0; kv_reload_try < 2; kv_reload_try++) {
+            disk_cached = kv_cache_try_load(s, slot, &j->req, &effective_prompt,
+                                            &disk_cache_path,
+                                            &disk_cache_ext_flags);
+            if (disk_cached > 0 && kv_reload_try == 0 &&
+                kv_cache_reload_repeat(s, slot, disk_cache_path, disk_cached)) {
+                free(disk_cache_path);
+                disk_cache_path = NULL;
+                disk_cached = 0;
+                continue;
+            }
+            break;
+        }
         if (disk_cached > 0) {
+            snprintf(slot->disk_reload_path, sizeof(slot->disk_reload_path),
+                     "%s", disk_cache_path ? disk_cache_path : "");
+            slot->disk_reload_frontier = disk_cached;
             cached = disk_cached;
             cache_source = "disk-text";
             prompt_for_sync = &effective_prompt;
