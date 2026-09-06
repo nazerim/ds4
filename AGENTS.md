@@ -27,6 +27,9 @@ inference engine in C with Metal, CUDA, and ROCm backends. See `AGENT.md`
 
 - KV cache v2 rewrite: `PLAN-KV-REWRITE.md`, `PLAN-KV-LINEAGE.md`,
   `.codebase-memory/adr.md`
+- Checkpoint self-healing + session handoff: `.codebase-memory/adr.md`
+  (ADR 2026-09-06) and `.codebase-memory/TODO-20260906.md` (PR states,
+  pending #984 port, open questions, proven diagnostics).
 - Vision cache (thinking bridge, encoder cache, multimodal disk KV):
   `.codebase-memory/adr.md` (Sep 3 ADRs); server script serves Vision-Exp
   by default (`./ds4-server.sh start`, TRACE_PATH=./log/ds4.trace for cache
