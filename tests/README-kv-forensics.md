@@ -1,8 +1,11 @@
 # KV forensics & session tooling (Sep 2026 checkpoint work)
 
-Scripts born while diagnosing the production reload loops (65465 / 453568 /
-275968 incidents). They lived in /tmp; /tmp got wiped entirely (Sep 6, along
-with the old Others/*.gguf files) — which is why they live here now.
+Scripts born diagnosing production reload loops (pinned common=118557/
+273833/451784; the 275958-file stall). They lived in /tmp; /tmp got wiped
+entirely Sep 6 ~11:00 — which is why they live here now. Caution learned the
+hard way: an earlier session summary cited a "TQ/ESOTERICKARMA gguf" the DB
+proves never existed — numbers survived compaction garbled; re-verify against
+log/ds4.log.* rotations before quoting forensic positions.
 
 | script | what it's for |
 |---|---|
@@ -12,8 +15,8 @@ with the old Others/*.gguf files) — which is why they live here now.
 | `killer_watch.sh` | capture ps/log tail the moment the running server PID exits (unresolved external-SIGTERM events Sep 4-6). Run detached; logs to /tmp/killer-watch.log (recreate there if it matters). |
 
 ## Interpretation cheat-sheet (from the incidents)
-- Two tokenizations of identical bytes at the same position = pre-tokenizer
-  boundary/offset effect (e.g. `'`+`.*` vs `'.`+`*` at 65465), NOT corruption.
+- Two tokenizations of identical bytes at the same position = BPE
+  boundary/offset effect (the trace's live vs prompt text), NOT corruption.
 - Loop = same `common=` position on every turn + `disk` hit of the SAME file
   at the SAME frontier. Since 9d955ec this self-heals: log line
   `kv cache discarded reason=frontier-contradicted` then recovery.

@@ -10,10 +10,8 @@
 # tokenizations of identical bytes = BPE variant/offset effect, not text
 # corruption).
 #
-# NOTE: token ids are gguf-specific - the production model moved off the old
-# TQ/ESOTERICKARMA gguf (Sep 6) and the vocab maps differ (id 11316 =
-# ' mailbox' there, ' smooth' in the current file). For text<->id work on a
-# specific gguf use tests/gguf_tokenizer.py dump/tokenize.
+# NOTE: token ids are gguf-specific - always dump against the exact file the
+# writing server loaded (tests/gguf_tokenizer.py dump/tokenize).
 set -e
 REPO=/Users/naz/Projects/ds4
 POS=$1

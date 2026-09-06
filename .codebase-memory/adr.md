@@ -177,9 +177,13 @@ restored without persisting embeddings if the request can attest them.
 ### Context: three poisoning incidents, one taxonomy
 Long pi agent sessions (200-450k tokens, multimodal, tool loops) exhibited
 repeated `live kv cache miss ... reason=token-mismatch` at *fixed* token
-positions (65465 on Sep 5 = 29 turns of 38k re-prefill; 453568 and 275968
-loops on Sep 5-6). Forensic method: TRACE_PATH=./log/ds4.trace first-mismatch
-token windows + decoding token-id runs to byte strings from the GGUF vocab.
+positions (retained log evidence: common=118557 x43, 273833 x18, 451784 x7,
+325177 x40; the Sep 6 ~10:26 stall was the 275958 frontier file reloaded
+across turns until a manual abort discarded it, reason=prefill-failed).
+Forensic method: log/ds4.trace first_mismatch_token + token_window lines
+(the trace already decodes both sides); gguf id work via
+tests/gguf_tokenizer.py - ids are gguf-specific, always dump against the
+exact file the server loaded.
 
 Root taxonomy (all three are "same bytes, different token ids" - but from
 different causes):
@@ -190,14 +194,16 @@ different causes):
    fix brief written (~/Projects/PiScratch/PI-SUPERPOWERS-BOOTSTRAP-CACHE-FIX.md:
    persist-on-inject / append-only history). Cost: one bounded re-prefill
    per flip once client fixed.
-2. **Tokenizer-generation skew** - checkpoint tokens from an engine whose
-   JoyAI pre-tokenizer rules differ from the running one (observed at floor
-   boundary 65465; exact mixing build unobservable after forensic purge).
-   Merge tables identical across our ggufs; upstream merge window did NOT
-   touch tokenizer code - provenance predates observables.
+2. **Tokenizer-generation skew** - checkpoint tokens from an engine or
+   model file whose tokenizer differs from the running one (the Sep 6
+   08:48:52 fingerprint-reject burst is the proven instance; earlier mixed
+   provenance unobservable after the forensic purge - and NOTE an earlier
+   "TQ/ESOTERICKARMA gguf switch" story was CONFABULATED from garbled
+   compaction summaries; the DB shows no such path ever existed).
 3. **Sampled-tail contradiction** - a checkpoint whose tail covers
    model-sampled tokens (thinking/DSML) whose bytes re-tokenize differently
-   on replay (first=448617 case; 275968/453568 loops). This is legitimate
+   on replay (the pinned-common loops above; the live 325177 x40 storm was
+   the benign sibling: per-turn prompt-extension misses WITH progress). This is legitimate
    by design (the preserved-thinking bridge KEEPS sampled tokens; live is
    authoritative) - the bug is only that such a file, restored via its
    text key forever, can never be progressed past via memory tiers.
