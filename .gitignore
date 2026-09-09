@@ -46,3 +46,9 @@ __pycache__/
 *.o.tmp
 *.pid
 log/
+
+# build/run artifacts (never track)
+*.o.tmp
+tests/kv_policy_harness
+tests/test_prompt_prefix
+tests/test_spec_rejection
