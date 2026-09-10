@@ -41,7 +41,7 @@ KV_RETIRE_GRACE="${KV_RETIRE_GRACE:-3600}"
 KV_MAX_DIVERGENCE_ANCHORS="${KV_MAX_DIVERGENCE_ANCHORS:-8}"
 LOG_DIR="./log"
 LOG_FILE="$LOG_DIR/ds4.log"
-TOKENS=384000
+TOKENS="${TOKENS:-384000}"   # default completion cap when a request omits max_tokens (not a context limit)
 # Two DISTINCT speculative-decoding pathways, not interchangeable:
 #  - DSpark  (--dspark): block drafter; REQUIRES the 0731 support GGUF and 0731
 #    main models only (checkpoint-specific). Non-greedy uses opportunistic
