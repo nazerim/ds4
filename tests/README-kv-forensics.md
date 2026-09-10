@@ -12,7 +12,7 @@ log/ds4.log.* rotations before quoting forensic positions.
 | `gguf_tokenizer.py` | read tokenizer metadata from any GGUF (no deps): `dump LO HI` = id->token, `tokenize TEXT` = naive joyai BPE ids. Caveat: ids are per-gguf — TQ-era and current gguf have different maps. |
 | `kv_forensics.sh POS` | miss lines from log/ds4.log + the decoded `token_window` from log/ds4.trace at first-mismatch position POS (`==` agree, `!=` = drift boundary). |
 | `tokenizer_fp_probe.c` | print `ds4_engine_tokenizer_fingerprint()` for a gguf. Build line in the file header. Same-binary two runs MUST match (pointer-hash bug regression); different ggufs MUST differ. inspect_only is NOT enough (tokenizer uninit — probe refuses with vocab<=0). Full load: stop the server first. |
-| `killer_watch.sh` | capture ps/log tail the moment the running server PID exits (unresolved external-SIGTERM events Sep 4-6). Run detached; logs to /tmp/killer-watch.log (recreate there if it matters). |
+| `soak_watch.sh` | detached watchdog: hourly soak-health summary + instant ALERTs (guard fires, fingerprint rejects, budget pressure, Metal OOM) and death forensics with planned/sudden classification (the unresolved external-SIGTERM events Sep 4-6). Writes log/soak-watch.log (repo, not /tmp). `nohup tests/soak_watch.sh &!` after each planned restart; SI/SHB envs for fast test cycles. Supersedes killer_watch.sh. |
 
 ## Interpretation cheat-sheet (from the incidents)
 - Two tokenizations of identical bytes at the same position = BPE
