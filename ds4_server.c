@@ -11266,9 +11266,16 @@ static int kv_cache_try_load_vision(server *s, server_slot *slot,
     const ds4_tokens *lt = NULL;
     if (ok) {
         lt = ds4_session_tokens(slot->session);
+        bool any_below = false;
+        for (size_t k = 0; k < req->image_count; k++) {
+            const uint64_t end = (uint64_t)req->images[k].token_start +
+                                 req->images[k].embedding.token_count;
+            if (end <= (uint64_t)loaded) { any_below = true; break; }
+        }
         ok = lt && lt->len == loaded &&
-             (lr.ext_flags & KV_EXT_VISION) &&
-             tctx.vision_section_present && !tctx.vision_section_corrupt;
+             (!any_below ||
+              ((lr.ext_flags & KV_EXT_VISION) &&
+               tctx.vision_section_present && !tctx.vision_section_corrupt));
     }
     if (ok) {
         for (size_t i = 0; i < tctx.record_count_out; i++) {
@@ -12828,9 +12835,11 @@ static void canonicalize_tool_checkpoint(server *s, server_slot *slot,
          * a very long conversation from token zero. */
         char *path = NULL;
         ds4_tokens effective = {0};
-        int loaded = kv_cache_try_load_text(s, slot,
-                                            rendered.ptr ? rendered.ptr : "",
-                                            &effective, &path, NULL, false);
+        int loaded = j->req.image_count == 0
+            ? kv_cache_try_load_text(s, slot,
+                                     rendered.ptr ? rendered.ptr : "",
+                                     &effective, &path, NULL, false)
+            : 0;   /* plain-text suffix sync cannot carry image placeholders */
         if (loaded == 0) {
             pthread_mutex_lock(&s->inference_mu);
             ds4_session_invalidate(slot->session);
