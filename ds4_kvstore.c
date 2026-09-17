@@ -457,6 +457,12 @@ void ds4_kvstore_fill_header(uint8_t h[DS4_KVSTORE_FIXED_HEADER],
     kv_le_put64(h + 40, payload_bytes);
 }
 
+/* routed-expert quantizations whose checkpoints the store keys on */
+bool ds4_kvstore_quant_bits_supported(int quant_bits) {
+    return quant_bits == 2 || quant_bits == 4 || quant_bits == 5 ||
+           quant_bits == 6 || quant_bits == 8;
+}
+
 /* v2 header: the base 48 bytes (identical to v1) plus 24 extra bytes carrying
  * the conversation lineage, weight fingerprint, bucket, and halving level. */
 void ds4_kvstore_fill_header_v2(
@@ -524,7 +530,7 @@ bool ds4_kvstore_read_header(FILE *fp, ds4_kvstore_entry *e,
     if (fread(tb, 1, sizeof(tb), fp) != sizeof(tb)) return false;
     *text_bytes = ds4_kvstore_le_get32(tb);
     e->text_bytes = *text_bytes;
-    return e->tokens != 0 && (e->quant_bits == 2 || e->quant_bits == 4);
+    return e->tokens != 0 && ds4_kvstore_quant_bits_supported(e->quant_bits);
 }
 
 bool ds4_kvstore_read_entry_file(const char *path, const char sha[41],
@@ -1832,7 +1838,7 @@ bool ds4_kvstore_store_live_prefix_text(ds4_kvstore *kc,
     ds4_kvstore_tokens_copy_prefix(&store_tokens, tokens, store_len);
 
     const int quant_bits = ds4_engine_routed_quant_bits(engine);
-    if (quant_bits != 2 && quant_bits != 4) {
+    if (!ds4_kvstore_quant_bits_supported(quant_bits)) {
         ds4_tokens_free(&store_tokens);
         return false;
     }
@@ -2154,6 +2160,7 @@ static int kv_cache_find_text_prefix_skip(ds4_kvstore *kc, const char *prompt_te
     }
     return best;
 }
+
 
 int ds4_kvstore_find_text_prefix(ds4_kvstore *kc, const char *prompt_text,
                                  int model_id, int quant_bits, int ctx_size) {
