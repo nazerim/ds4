@@ -6,7 +6,9 @@ set -euo pipefail
 
 SERVER_CMD="./ds4-server"
 PID_FILE="./ds4-server.pid"
-CTX="${CTX:-1048576}"   # model trains at 1M (deepseek4.context_length); env-overridable
+# model-aware ctx default (1M for DeepSeek, 262k for Qwen3.8) resolved in
+# start_server; env CTX overrides both.
+CTX="${CTX:-}"
 PORT=8001
 # Auth-gated reverse proxy in front of ds4-server. Keep the server on loopback;
 # clients hit the proxy's LAN address. Requires DS4_API_KEY (refuses to start without).
@@ -41,7 +43,7 @@ KV_RETIRE_GRACE="${KV_RETIRE_GRACE:-3600}"
 KV_MAX_DIVERGENCE_ANCHORS="${KV_MAX_DIVERGENCE_ANCHORS:-8}"
 LOG_DIR="./log"
 LOG_FILE="$LOG_DIR/ds4.log"
-TOKENS="${TOKENS:-384000}"   # default completion cap when a request omits max_tokens (not a context limit)
+TOKENS="${TOKENS:-}"   # default completion cap when a request omits max_tokens (not a context limit); model-aware default resolved in start_server
 # Two DISTINCT speculative-decoding pathways, not interchangeable:
 #  - DSpark  (--dspark): block drafter; REQUIRES the 0731 support GGUF and 0731
 #    main models only (checkpoint-specific). Non-greedy uses opportunistic
@@ -56,6 +58,19 @@ MTP_MODEL="gguf/DeepSeek-V4-Flash-MTP-Q4K-Q8_0-F32.gguf"
 # checkpoint and is served WITH vision.  start-0731 and other text-only models
 # never receive --vision (the encoder does not match their checkpoint).
 VISION_ENCODER="gguf/DeepSeek-V4-Flash-Vision-Encoder.gguf"
+# Qwen3.8 Flash Next (qwen4exp2): start-qwen / restart-qwen.  Q4_K on a 128 GB
+# M5 Max with 262144 ctx (oMLX-proven); built-in MTP needs no second file; the
+# vision tower is a separate mmproj.  Own pid/log/KV dir so switching models
+# never re-purposes DeepSeek disk checkpoints (the engine's fingerprint gate
+# rejects them anyway, but separate dirs keep budgets honest).
+QWEN_MODEL="${QWEN_MODEL:-gguf/Qwen3.8-Flash-Next-Q4.gguf}"
+QWEN_VISION="${QWEN_VISION:-gguf/mmproj-Qwen3.8-Flash-Next-Q8_0.gguf}"
+QWEN_CTX="${QWEN_CTX:-262144}"
+QWEN_TOKENS="${QWEN_TOKENS:-16384}"
+# Batched MTP across concurrent sessions (upstream server flag); 0 = off.
+QWEN_BATCH_SESSION="${QWEN_BATCH_SESSION:-8}"
+QWEN_PID_FILE="./ds4-server-qwen.pid"
+QWEN_KV_DIR="${QWEN_KV_DIR:-/tmp/ds4-kv-qwen}"
 # Cache-miss trace: set TRACE_PATH to a file path (e.g. ./log/ds4.trace) to make
 # the server write the exact cache-decision + first-mismatch token window for
 # every request. Used for debugging KV divergence (see DS4FORK.md KVCACHE —
@@ -72,9 +87,10 @@ export DS4_VISION_KEEP_IMAGES
 # Alternative model map: short name -> full GGUF path
 # Add entries here for each model variant. Use `start-<name>` / `restart-<name>`.
 # Uses parallel indexed arrays (bash 3.2 compatible — macOS default).
-MODEL_KEYS=("0731")
+MODEL_KEYS=("0731" "qwen")
 MODEL_PATHS=(
     "gguf/DeepSeek-V4-Flash-Layers37-42Q4KExperts-OtherExpertLayersIQ2XXSGateUp-Q2KDown-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-fixed-0731.gguf"
+    "gguf/Qwen3.8-Flash-Next-Q4.gguf"
 )
 
 # Alternative DSpark (draft) model map: short name -> full GGUF path.
@@ -165,6 +181,26 @@ start_server() {
   local spec_mode="${2:-}"
   local spec_model_path="${3:-}"
 
+  # Model-aware runtime resolution: pid/log/kv/ctx defaults per engine family.
+  local resolved_link
+  resolved_link=$(readlink "ds4flash.gguf" 2>/dev/null || echo "")
+  case "${model_path:-$resolved_link}" in
+    *Qwen3.8*|*qwen3.8*)
+      IS_QWEN=1
+      CTX="${CTX:-$QWEN_CTX}"
+      TOKENS="${TOKENS:-$QWEN_TOKENS}"
+      PID_FILE="$QWEN_PID_FILE"
+      KV_DIR="$QWEN_KV_DIR"
+      LOG_FILE="$LOG_DIR/ds4-qwen.log"
+      if [ -n "$TRACE_PATH" ]; then TRACE_PATH="$LOG_DIR/ds4-qwen.trace"; fi
+      ;;
+    *)
+      IS_QWEN=0
+      CTX="${CTX:-1048576}"
+      TOKENS="${TOKENS:-384000}"
+      ;;
+  esac
+
   if [ -f "$PID_FILE" ]; then
     local pid
     pid=$(cat "$PID_FILE")
@@ -219,7 +255,18 @@ start_server() {
   # (image support would silently vanish).
   DEFAULT_MODEL_RESOLVED=$(readlink "ds4flash.gguf" 2>/dev/null || echo "ds4flash.gguf")
   VISION_ARGS=()
-  if [ -z "$model_path" ]; then
+  if [ "${IS_QWEN:-0}" = "1" ]; then
+    if [ ! -f "$QWEN_VISION" ]; then
+      echo "Error: Qwen vision encoder not found: $QWEN_VISION"
+      echo "       Run: ./download_model.sh qwen38-vision"
+      return 1
+    fi
+    VISION_ARGS+=(--vision "$QWEN_VISION")
+    if [ "$QWEN_BATCH_SESSION" != "0" ]; then
+      VISION_ARGS+=(--batched-session "$QWEN_BATCH_SESSION")
+    fi
+    echo "Qwen3.8: vision encoder $QWEN_VISION, batched-session $QWEN_BATCH_SESSION"
+  elif [ -z "$model_path" ]; then
     case "$DEFAULT_MODEL_RESOLVED" in
       *Vision*)
         if [ ! -f "$VISION_ENCODER" ]; then
@@ -303,7 +350,9 @@ start_server() {
 }
 
 stop_server() {
-  if [ ! -f "$PID_FILE" ]; then
+  if [ ! -f "$PID_FILE" ] && [ -f "$QWEN_PID_FILE" ]; then
+    PID_FILE="$QWEN_PID_FILE"
+  elif [ ! -f "$PID_FILE" ]; then
     echo "No PID file found. Is ds4-server running?"
     return 0
   fi
@@ -340,6 +389,14 @@ stop_server() {
 }
 
 status_server() {
+  if [ -f "$QWEN_PID_FILE" ] && [ "$QWEN_PID_FILE" != "$PID_FILE" ]; then
+    local qpid
+    qpid=$(cat "$QWEN_PID_FILE")
+    if kill -0 "$qpid" 2>/dev/null; then
+      echo "ds4-server (qwen) is running (PID: $qpid)"
+      return 0
+    fi
+  fi
   if [ -f "$PID_FILE" ]; then
     local pid
     pid=$(cat "$PID_FILE")
@@ -512,6 +569,7 @@ case "${1:-}" in
     echo "  start-mtp           - Start with LEGACY one-stage MTP speculation (--mtp-draft, no --dspark)"
     echo "  start-dspark        - Start with DSpark block speculation (--mtp ... --dspark)"
     echo "  start-<model>       - Start ds4-server with an alternative model"
+  echo "  start-qwen          - Qwen3.8 Flash Next Q4_K + vision + batched MTP (ctx 262k; QWEN_* env-overridable)"
     echo "  start-<model>-mtp   - Alternative model + legacy MTP drafter"
     echo "  start-<model>-dspark - Alternative model + DSpark support"
     echo "  stop                - Stop ds4-server"
