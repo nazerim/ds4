@@ -266,6 +266,14 @@ start_server() {
       VISION_ARGS+=(--batched-session "$QWEN_BATCH_SESSION")
     fi
     echo "Qwen3.8: vision encoder $QWEN_VISION, batched-session $QWEN_BATCH_SESSION"
+  elif [[ "${model_path:-}" == *Vision-Exp* ]]; then
+    # Explicit Vision-Exp path (e.g. while ds4flash.gguf points at Qwen3.8).
+    if [ ! -f "$VISION_ENCODER" ]; then
+      echo "Error: Vision-Exp model but encoder not found: $VISION_ENCODER"
+      return 1
+    fi
+    VISION_ARGS+=(--vision "$VISION_ENCODER")
+    echo "Vision encoder attached: $VISION_ENCODER"
   elif [ -z "$model_path" ]; then
     case "$DEFAULT_MODEL_RESOLVED" in
       *Vision*)
