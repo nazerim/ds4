@@ -9,7 +9,7 @@ PID_FILE="./ds4-server.pid"
 # model-aware ctx default (1M for DeepSeek, 262k for Qwen3.8) resolved in
 # start_server; env CTX overrides both.
 CTX="${CTX:-}"
-PORT=8001
+PORT="${PORT:-}"   # per-model default resolved in start_server (DeepSeek 8001, Qwen 8002)
 # Auth-gated reverse proxy in front of ds4-server. Keep the server on loopback;
 # clients hit the proxy's LAN address. Requires DS4_API_KEY (refuses to start without).
 PROXY_CMD="./auth_proxy.py"
@@ -66,9 +66,14 @@ VISION_ENCODER="gguf/DeepSeek-V4-Flash-Vision-Encoder.gguf"
 QWEN_MODEL="${QWEN_MODEL:-gguf/Qwen3.8-Flash-Next-Q4.gguf}"
 QWEN_VISION="${QWEN_VISION:-gguf/mmproj-Qwen3.8-Flash-Next-Q8_0.gguf}"
 QWEN_CTX="${QWEN_CTX:-262144}"
-QWEN_TOKENS="${QWEN_TOKENS:-16384}"
+QWEN_TOKENS="${QWEN_TOKENS:-65536}"
 # Batched MTP across concurrent sessions (upstream server flag); 0 = off.
+# Qwen3.8 on Metal needs BOTH --batched-session and --mtp to speculate in
+# batches (docs/SERVER.md); QWEN_MTP=0 drops --mtp (plain batched target
+# decoding).
 QWEN_BATCH_SESSION="${QWEN_BATCH_SESSION:-8}"
+QWEN_MTP="${QWEN_MTP:-1}"
+QWEN_PORT="${QWEN_PORT:-8002}"
 QWEN_PID_FILE="./ds4-server-qwen.pid"
 QWEN_KV_DIR="${QWEN_KV_DIR:-/tmp/ds4-kv-qwen}"
 # Cache-miss trace: set TRACE_PATH to a file path (e.g. ./log/ds4.trace) to make
@@ -189,6 +194,7 @@ start_server() {
       IS_QWEN=1
       CTX="${CTX:-$QWEN_CTX}"
       TOKENS="${TOKENS:-$QWEN_TOKENS}"
+      PORT="${PORT:-$QWEN_PORT}"
       PID_FILE="$QWEN_PID_FILE"
       KV_DIR="$QWEN_KV_DIR"
       LOG_FILE="$LOG_DIR/ds4-qwen.log"
@@ -198,8 +204,21 @@ start_server() {
       IS_QWEN=0
       CTX="${CTX:-1048576}"
       TOKENS="${TOKENS:-384000}"
+      PORT="${PORT:-8001}"
       ;;
   esac
+  local OTHER_PID_FILE
+  if [ "${IS_QWEN}" = "1" ]; then OTHER_PID_FILE="./ds4-server.pid"; else OTHER_PID_FILE="$QWEN_PID_FILE"; fi
+  if [ -f "$OTHER_PID_FILE" ]; then
+    other_pid=$(cat "$OTHER_PID_FILE")
+    if kill -0 "$other_pid" 2>/dev/null; then
+      echo "Error: the other model is loaded (PID $other_pid, $OTHER_PID_FILE)."
+      echo "       One engine at a time - use restart[-qwen] to stop it and switch,"
+      echo "       or: $0 stop"
+      return 1
+    fi
+    rm -f "$OTHER_PID_FILE"
+  fi
 
   if [ -f "$PID_FILE" ]; then
     local pid
@@ -265,7 +284,10 @@ start_server() {
     if [ "$QWEN_BATCH_SESSION" != "0" ]; then
       VISION_ARGS+=(--batched-session "$QWEN_BATCH_SESSION")
     fi
-    echo "Qwen3.8: vision encoder $QWEN_VISION, batched-session $QWEN_BATCH_SESSION"
+    if [ "$QWEN_MTP" != "0" ]; then
+      VISION_ARGS+=(--mtp)
+    fi
+    echo "Qwen3.8: vision encoder $QWEN_VISION, batched-session $QWEN_BATCH_SESSION, mtp $QWEN_MTP"
   elif [[ "${model_path:-}" == *Vision-Exp* ]]; then
     # Explicit Vision-Exp path (e.g. while ds4flash.gguf points at Qwen3.8).
     if [ ! -f "$VISION_ENCODER" ]; then
@@ -358,15 +380,26 @@ start_server() {
 }
 
 stop_server() {
-  if [ ! -f "$PID_FILE" ] && [ -f "$QWEN_PID_FILE" ]; then
-    PID_FILE="$QWEN_PID_FILE"
-  elif [ ! -f "$PID_FILE" ]; then
+  local pf
+  local found=0
+  for pf in "./ds4-server.pid" "$QWEN_PID_FILE"; do
+    [ "$pf" = "$PID_FILE" ] || FOUND_EXTRA="$FOUND_EXTRA $pf"
+  done
+  if [ ! -f "$PID_FILE" ] && [ ! -f "$QWEN_PID_FILE" ]; then
     echo "No PID file found. Is ds4-server running?"
     return 0
   fi
+  stop_one_pidfile "$PID_FILE"
+  for pf in $FOUND_EXTRA; do stop_one_pidfile "$pf"; done
+  return 0
+}
 
+FOUND_EXTRA=""
+stop_one_pidfile() {
+  local pf="$1"
+  [ -f "$pf" ] || return 0
   local pid
-  pid=$(cat "$PID_FILE")
+  pid=$(cat "$pf")
   if kill -0 "$pid" 2>/dev/null; then
     echo "Stopping ds4-server (PID: $pid)..."
     kill "$pid"
@@ -383,15 +416,15 @@ stop_server() {
 
     # Force kill if still running
     if kill -0 "$pid" 2>/dev/null; then
-      echo "Warning: Force killing ds4-server (PID: $pid) — KV cache may be corrupted"
+      echo "Warning: Force killing ds4-server (PID: $pid) - KV cache may be corrupted"
       kill -9 "$pid" 2>/dev/null || true
     fi
 
-    rm -f "$PID_FILE"
+    rm -f "$pf"
     echo "ds4-server stopped"
   else
     echo "Process $pid not running. Cleaning up PID file."
-    rm -f "$PID_FILE"
+    rm -f "$pf"
   fi
   return 0
 }
