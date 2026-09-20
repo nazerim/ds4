@@ -14,11 +14,11 @@ PORT="${PORT:-}"   # per-model default resolved in start_server (DeepSeek 8001, 
 # clients hit the proxy's LAN address. Requires DS4_API_KEY (refuses to start without).
 PROXY_CMD="./auth_proxy.py"
 PROXY_PID_FILE="./auth_proxy.pid"
-PROXY_PORT=8002
+PROXY_PORT="${PROXY_PORT:-8100}"   # LAN-facing proxy port (8001=DeepSeek, 8002=Qwen stay loopback)
 PROXY_HOST="${PROXY_HOST:-0.0.0.0}"
 # Bind address. Default 127.0.0.1 (loopback). Override with HOST env, e.g.
 # HOST=0.0.0.0 or HOST=192.168.1.20 to expose the server on the LAN.
-HOST="${HOST:-127.0.0.1}"
+HOST="${HOST:-127.0.0.1}"   # loopback by design; LAN clients go through auth_proxy (start-proxy)
 KV_DIR="/tmp/ds4-kv"
 # KV disk budget in MiB. Default 131072 (128 GiB): a single ultra-long conversation
 # (328k+ tokens, e.g. ctx=512000) holds a ~50-70 GiB continued-anchor ladder, and
@@ -455,9 +455,20 @@ status_server() {
 }
 
 start_proxy() {
+  # Convenience: DS4_API_KEY may live in a 0600 file instead of the caller's
+  # env (never committed); the env var still carries it to the process.
+  if [ -z "${DS4_API_KEY:-}" ] && [ -f "${DS4_API_KEY_FILE:-$HOME/.config/ds4/desktop.key}" ]; then
+    DS4_API_KEY=$(cat "${DS4_API_KEY_FILE:-$HOME/.config/ds4/desktop.key}")
+    export DS4_API_KEY
+  fi
   if [ -z "${DS4_API_KEY:-}" ]; then
-    echo "Error: DS4_API_KEY not set — refusing to start an unauthenticated proxy."
+    echo "Error: DS4_API_KEY not set (and no key file) — refusing to start an unauthenticated proxy."
     return 1
+  fi
+  # Upstream follows whichever engine is actually loaded (pid files).
+  local upstream_port=8001 upname="DeepSeek"
+  if [ -f "$QWEN_PID_FILE" ] && kill -0 "$(cat "$QWEN_PID_FILE")" 2>/dev/null; then
+    upstream_port="$QWEN_PORT"; upname="Qwen3.8"
   fi
   if [ -f "$PROXY_PID_FILE" ]; then
     local pid
@@ -469,8 +480,10 @@ start_proxy() {
       rm -f "$PROXY_PID_FILE"
     fi
   fi
-  echo "Starting auth_proxy on ${PROXY_HOST}:${PROXY_PORT} -> 127.0.0.1:${PORT} (auth required)..."
-  python3 "$PROXY_CMD" > "$LOG_DIR/auth_proxy.log" 2>&1 &
+  echo "Starting auth_proxy on ${PROXY_HOST}:${PROXY_PORT} -> 127.0.0.1:${upstream_port} (${upname}, auth required)..."
+  BIND_HOST="$PROXY_HOST" BIND_PORT="$PROXY_PORT" \
+    UPSTREAM_HOST=127.0.0.1 UPSTREAM_PORT="$upstream_port" \
+    python3 "$PROXY_CMD" > "$LOG_DIR/auth_proxy.log" 2>&1 &
   local pid=$!
   echo "$pid" > "${PROXY_PID_FILE}.tmp" && mv "${PROXY_PID_FILE}.tmp" "$PROXY_PID_FILE"
   sleep 1
@@ -628,7 +641,10 @@ case "${1:-}" in
     echo ""
     echo "Auth proxy: keep ds4-server on loopback; remote clients hit the proxy."
     echo "  PROXY_HOST        - Proxy bind address (default: 0.0.0.0)"
-    echo "  PROXY_PORT        - Proxy port (default: 8002)"
+    echo "  PROXY_PORT        - Proxy port (default: 8100)"
+    echo "                        NOTE: upstream (8001 DeepSeek / 8002 Qwen) is"
+    echo "                        detected at proxy start - run restart-proxy"
+    echo "                        after switching engines."
     echo "  DS4_API_KEY       - Bearer token clients must present (required to start proxy)"
     echo ""
     echo "Available models (default: ds4flash.gguf = Vision-Exp, served with --vision $VISION_ENCODER):"
