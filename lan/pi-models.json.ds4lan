@@ -1,0 +1,63 @@
+{
+  "providers": {
+    "ds4-lan": {
+      "baseUrl": "http://nazerims-mbp:8100/v1",
+      "api": "openai-completions",
+      "apiKey": "PASTE-desktop.key",
+      "compat": {
+        "thinkingFormat": "deepseek",
+        "supportsReasoningEffort": true
+      },
+      "models": [
+        {
+          "id": "qwen3.8-flash-next",
+          "name": "Qwen3.8 Flash Next Q4 + vision (MBP :8002)",
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "contextWindow": 262144,
+          "maxTokens": 65536,
+          "samplingParams": {
+            "temperature": 1.0,
+            "top_p": 0.95
+          },
+          "thinkingLevelMap": {
+            "off": "none",
+            "minimal": "low",
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "high",
+            "max": "high"
+          }
+        },
+        {
+          "id": "deepseek-v4-flash",
+          "name": "DeepSeek V4 Flash Vision-Exp (MBP :8001)",
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "contextWindow": 1048576,
+          "maxTokens": 384000,
+          "samplingParams": {
+            "temperature": 1.0,
+            "top_p": 0.95
+          },
+          "thinkingLevelMap": {
+            "off": "none",
+            "minimal": "low",
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": "max"
+          }
+        }
+      ]
+    }
+  }
+}

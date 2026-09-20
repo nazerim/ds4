@@ -1,0 +1,106 @@
+{
+  "provider": {
+    "ds4-lan": {
+      "name": "ds4.c on Nazerim's MBP (LAN proxy :8100)",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "http://nazerims-mbp:8100/v1",
+        "apiKey": "PASTE-desktop.key"
+      },
+      "models": {
+        "qwen3.8-flash-next": {
+          "name": "Qwen3.8 Flash Next Q4 + vision (MBP)",
+          "reasoning": true,
+          "modalities": [
+            "text",
+            "image"
+          ],
+          "limit": {
+            "context": 262144,
+            "output": 65536
+          },
+          "options": {
+            "thinking": {
+              "type": "enabled",
+              "budget": "medium"
+            }
+          },
+          "variants": {
+            "none": {
+              "reasoningEffort": "none"
+            },
+            "low": {
+              "reasoningEffort": "low",
+              "reasoningSummary": "auto",
+              "textVerbosity": "low"
+            },
+            "medium": {
+              "reasoningEffort": "medium",
+              "reasoningSummary": "auto",
+              "textVerbosity": "low"
+            },
+            "high": {
+              "reasoningEffort": "high",
+              "reasoningSummary": "auto",
+              "textVerbosity": "low"
+            },
+            "xhigh": {
+              "reasoningEffort": "high",
+              "reasoningSummary": "auto",
+              "textVerbosity": "low"
+            },
+            "max": {
+              "reasoningEffort": "high",
+              "reasoningSummary": "auto",
+              "textVerbosity": "low"
+            }
+          }
+        },
+        "deepseek-v4-flash": {
+          "name": "DeepSeek V4 Flash Vision-Exp (MBP)",
+          "reasoning": true,
+          "modalities": [
+            "text",
+            "image"
+          ],
+          "limit": {
+            "context": 1048576,
+            "output": 384000
+          },
+          "variants": {
+            "none": {
+              "reasoningEffort": "none"
+            },
+            "low": {
+              "reasoningEffort": "low",
+              "reasoningSummary": "auto",
+              "textVerbosity": "low"
+            },
+            "medium": {
+              "reasoningEffort": "medium",
+              "reasoningSummary": "auto",
+              "textVerbosity": "low"
+            },
+            "high": {
+              "reasoningEffort": "high",
+              "reasoningSummary": "auto",
+              "textVerbosity": "low"
+            },
+            "xhigh": {
+              "reasoningEffort": "xhigh",
+              "reasoningSummary": "auto",
+              "textVerbosity": "low"
+            },
+            "max": {
+              "reasoningEffort": "max",
+              "reasoningSummary": "auto",
+              "textVerbosity": "low",
+              "temperature": 1.0,
+              "top_p": 0.95
+            }
+          }
+        }
+      }
+    }
+  }
+}
