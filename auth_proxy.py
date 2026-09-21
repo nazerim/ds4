@@ -35,6 +35,8 @@ _HOP = {"connection", "keep-alive", "proxy-connection", "transfer-encoding",
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    # SSE latency: never let Nagle hold a small event packet back.
+    disable_nagle_algorithm = True
 
     def _authorized(self) -> bool:
         auth = self.headers.get("Authorization", "")
@@ -71,8 +73,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(chunk)
             self.wfile.flush()
         else:
+            # Chunked/SSE: read1() returns as soon as any bytes are available,
+            # so events are forwarded one at a time.  read(n) would block until
+            # n bytes accumulate (or EOF), which made live streams arrive in
+            # ~64 KiB blocks.
+            read_stream = getattr(resp, "read1", None) or resp.read
             while True:
-                chunk = resp.read(65536)
+                chunk = read_stream(65536)
                 if not chunk:
                     break
                 self.wfile.write(f"{len(chunk):X}\r\n".encode("ascii"))
