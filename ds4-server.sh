@@ -92,9 +92,10 @@ export DS4_VISION_KEEP_IMAGES
 # Alternative model map: short name -> full GGUF path
 # Add entries here for each model variant. Use `start-<name>` / `restart-<name>`.
 # Uses parallel indexed arrays (bash 3.2 compatible — macOS default).
-MODEL_KEYS=("0731" "qwen")
+MODEL_KEYS=("0731" "vision" "qwen")
 MODEL_PATHS=(
     "gguf/DeepSeek-V4-Flash-Layers37-42Q4KExperts-OtherExpertLayersIQ2XXSGateUp-Q2KDown-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-fixed-0731.gguf"
+    "gguf/DeepSeek-V4-Flash-Vision-Exp-Layers37-42Q4KExperts-OtherExpertLayersIQ2XXSGateUp-Q2KDown-AProjQ8-SExpQ8-OutQ8.gguf"
     "gguf/Qwen3.8-Flash-Next-Q4.gguf"
 )
 
@@ -455,9 +456,10 @@ status_server() {
 }
 
 start_proxy() {
-  # Convenience: DS4_API_KEY may live in a 0600 file instead of the caller's
-  # env (never committed); the env var still carries it to the process.
-  if [ -z "${DS4_API_KEY:-}" ] && [ -f "${DS4_API_KEY_FILE:-$HOME/.config/ds4/desktop.key}" ]; then
+  # Key source: the 0600 key file is CANONICAL when present - a stale exported
+  # DS4_API_KEY in a long-lived shell silently overriding the real desktop key
+  # has bitten twice. Env var is the fallback (no file). Never committed.
+  if [ -f "${DS4_API_KEY_FILE:-$HOME/.config/ds4/desktop.key}" ]; then
     DS4_API_KEY=$(cat "${DS4_API_KEY_FILE:-$HOME/.config/ds4/desktop.key}")
     export DS4_API_KEY
   fi
