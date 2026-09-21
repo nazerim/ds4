@@ -14,4 +14,6 @@ jq -s '.[0].providers += .[1].providers' ~/.pi/agent/models.json lan/pi-models.j
 jq -s '.[0].modelThinkingLevels += .[1].modelThinkingLevels' ~/.pi/agent/settings.json lan/pi-settings.json.ds4lan > /tmp/s && mv /tmp/s ~/.pi/agent/settings.json
 jq -s '.[0].provider += .[1].provider' ~/.config/opencode/opencode.json lan/opencode.json.ds4lan > /tmp/o && mv /tmp/o ~/.config/opencode/opencode.json
 ```
-After switching engines on the MBP, run `./ds4-server.sh restart-proxy` there.
+A live auth_proxy auto-follows engine switches on the MBP
+(`start`/`restart` = DeepSeek :8001, `start-qwen`/`restart-qwen` = Qwen :8002);
+manual `restart-proxy` only needed if the follow-restart printed a warning.
