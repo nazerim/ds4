@@ -378,6 +378,17 @@ start_server() {
     rm -f "$PID_FILE"
     return 1
   fi
+
+  # A live auth_proxy follows the engine: restart it only when the upstream
+  # port actually changed (engine switch), so same-engine restarts are not
+  # interrupted by a proxy blip.
+  if [ -f "$PROXY_PID_FILE" ] && kill -0 "$(cat "$PROXY_PID_FILE")" 2>/dev/null; then
+    prev_upstream=$(cat "$PROXY_PID_FILE.upstream" 2>/dev/null || echo "?")
+    if [ "$prev_upstream" != "$PORT" ]; then
+      echo "auth_proxy live: upstream $prev_upstream -> $PORT, restarting it"
+      restart_proxy
+    fi
+  fi
 }
 
 stop_server() {
@@ -486,15 +497,22 @@ start_proxy() {
   BIND_HOST="$PROXY_HOST" BIND_PORT="$PROXY_PORT" \
     UPSTREAM_HOST=127.0.0.1 UPSTREAM_PORT="$upstream_port" \
     python3 "$PROXY_CMD" > "$LOG_DIR/auth_proxy.log" 2>&1 &
+  echo "$upstream_port" > "$PROXY_PID_FILE.upstream"
   local pid=$!
   echo "$pid" > "${PROXY_PID_FILE}.tmp" && mv "${PROXY_PID_FILE}.tmp" "$PROXY_PID_FILE"
   sleep 1
   if ! kill -0 "$pid" 2>/dev/null; then
     echo "Error: auth_proxy failed to start (PID: $pid)"
+    tail -2 "$LOG_DIR/auth_proxy.log" 2>/dev/null || true
     rm -f "$PROXY_PID_FILE"
     return 1
   fi
   echo "auth_proxy started (PID: $pid)"
+}
+
+restart_proxy() {
+  stop_proxy
+  start_proxy
 }
 
 stop_proxy() {
@@ -511,7 +529,7 @@ stop_proxy() {
     if kill -0 "$pid" 2>/dev/null; then
       kill -9 "$pid" 2>/dev/null || true
     fi
-    rm -f "$PROXY_PID_FILE"
+    rm -f "$PROXY_PID_FILE" "$PROXY_PID_FILE.upstream"
     echo "auth_proxy stopped"
   else
     rm -f "$PROXY_PID_FILE"
