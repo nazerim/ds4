@@ -45,12 +45,12 @@
               "textVerbosity": "low"
             },
             "xhigh": {
-              "reasoningEffort": "high",
+              "reasoningEffort": "max",
               "reasoningSummary": "auto",
               "textVerbosity": "low"
             },
             "max": {
-              "reasoningEffort": "high",
+              "reasoningEffort": "max",
               "reasoningSummary": "auto",
               "textVerbosity": "low"
             }
