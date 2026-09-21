@@ -17,7 +17,7 @@
             "text",
             "image"
           ],
-          "contextWindow": 262144,
+          "contextWindow": 524288,
           "maxTokens": 65536,
           "samplingParams": {
             "temperature": 1.0,

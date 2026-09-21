@@ -16,7 +16,7 @@
             "image"
           ],
           "limit": {
-            "context": 262144,
+            "context": 524288,
             "output": 65536
           },
           "options": {

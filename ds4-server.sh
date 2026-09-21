@@ -65,13 +65,23 @@ VISION_ENCODER="gguf/DeepSeek-V4-Flash-Vision-Encoder.gguf"
 # rejects them anyway, but separate dirs keep budgets honest).
 QWEN_MODEL="${QWEN_MODEL:-gguf/Qwen3.8-Flash-Next-Q4.gguf}"
 QWEN_VISION="${QWEN_VISION:-gguf/mmproj-Qwen3.8-Flash-Next-Q8_0.gguf}"
-QWEN_CTX="${QWEN_CTX:-262144}"
+# YaRN: native context is 262144; QWEN_CTX=524288 pairs with
+# DS4_QWEN4_YARN_FACTOR=2 below (static YaRN, HF recipe, mscale ~1.07 -
+# the model card's own beyond-262k extension, at a slight quality cost on
+# short prompts).  Set QWEN_CTX=262144 + QWEN_YARN=0 for native-only.
+QWEN_CTX="${QWEN_CTX:-524288}"
+QWEN_YARN="${QWEN_YARN:-2}"
 QWEN_TOKENS="${QWEN_TOKENS:-65536}"
 # Batched MTP across concurrent sessions (upstream server flag); 0 = off.
 # Qwen3.8 on Metal needs BOTH --batched-session and --mtp to speculate in
 # batches (docs/SERVER.md); QWEN_MTP=0 drops --mtp (plain batched target
 # decoding).
-QWEN_BATCH_SESSION="${QWEN_BATCH_SESSION:-8}"
+# Concurrency 1 is the intended 512k mode; 2 is the guardrail (8 resident
+# 512k sessions request 255 GiB of buffers against a ~122 GiB Metal wired
+# ceiling).  At 262k ctx, 8 fits fine - override via env either way.
+if [ -z "${QWEN_BATCH_SESSION:-}" ]; then
+  if [ "${QWEN_CTX}" -gt 262144 ] 2>/dev/null; then QWEN_BATCH_SESSION=2; else QWEN_BATCH_SESSION=8; fi
+fi
 QWEN_MTP="${QWEN_MTP:-1}"
 QWEN_PORT="${QWEN_PORT:-8002}"
 QWEN_PID_FILE="./ds4-server-qwen.pid"
@@ -206,6 +216,9 @@ start_server() {
     *Qwen3.8*|*qwen3.8*)
       IS_QWEN=1
       CTX="${CTX:-$QWEN_CTX}"
+      if [ "$QWEN_YARN" != "0" ] && [ "$CTX" -gt 262144 ]; then
+        export DS4_QWEN4_YARN_FACTOR="$QWEN_YARN"
+      fi
       TOKENS="${TOKENS:-$QWEN_TOKENS}"
       PORT="${PORT:-$QWEN_PORT}"
       PID_FILE="$QWEN_PID_FILE"
