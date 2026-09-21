@@ -90,3 +90,5 @@ __pycache__/
 # fork ops artifacts (never tracked - local runtime)
 *.pid
 log/
+*.pid.port
+*.pid.upstream

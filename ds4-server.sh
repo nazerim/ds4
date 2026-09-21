@@ -96,7 +96,7 @@ MODEL_KEYS=("0731" "vision" "qwen")
 MODEL_PATHS=(
     "gguf/DeepSeek-V4-Flash-Layers37-42Q4KExperts-OtherExpertLayersIQ2XXSGateUp-Q2KDown-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-fixed-0731.gguf"
     "gguf/DeepSeek-V4-Flash-Vision-Exp-Layers37-42Q4KExperts-OtherExpertLayersIQ2XXSGateUp-Q2KDown-AProjQ8-SExpQ8-OutQ8.gguf"
-    "gguf/Qwen3.8-Flash-Next-Q4.gguf"
+    "$QWEN_MODEL"
 )
 
 # Alternative DSpark (draft) model map: short name -> full GGUF path.
@@ -109,6 +109,16 @@ DSPARK_PATHS=(
 # Per-model legacy MTP drafter map (start-<model>-mtp).
 MTP_KEYS=()
 MTP_PATHS=()
+
+resolve_default_link() {
+  # Fully expand the ds4flash.gguf symlink chain (readlink resolves one hop).
+  local t="ds4flash.gguf" next
+  while [ -L "$t" ]; do
+    next=$(readlink "$t")
+    case "$next" in /*) t="$next" ;; *) t="$(dirname "$t")/$next" ;; esac
+  done
+  printf '%s\n' "$t"
+}
 
 lookup_model() {
     local key="$1"
@@ -164,16 +174,18 @@ if [ "${DEBUG:-0}" = "1" ]; then
 fi
 
 rotate_logs() {
+  local base
+  base=$(basename "$LOG_FILE")
   if [ -f "$LOG_FILE" ]; then
     local ts
     ts=$(date +%Y%m%d-%H%M%S)
-    cp "$LOG_FILE" "$LOG_DIR/ds4.log.$ts"
-    echo "Rotated previous log to $LOG_DIR/ds4.log.$ts"
+    cp "$LOG_FILE" "$LOG_DIR/$base.$ts"
+    echo "Rotated previous log to $LOG_DIR/$base.$ts"
   fi
 
-  # Keep only the last MAX_LOG_ROTATIONS rotated logs
+  # Keep only the last MAX_LOG_ROTATIONS rotated logs (per log family)
   local old_logs
-  old_logs=$(ls -1t "$LOG_DIR"/ds4.log.* 2>/dev/null || true)
+  old_logs=$(ls -1t "$LOG_DIR/$base".* 2>/dev/null || true)
   if [ -n "$old_logs" ]; then
     echo "$old_logs" | tail -n +$((MAX_LOG_ROTATIONS + 1)) | while IFS= read -r f; do
       rm -f "$f"
@@ -189,7 +201,7 @@ start_server() {
 
   # Model-aware runtime resolution: pid/log/kv/ctx defaults per engine family.
   local resolved_link
-  resolved_link=$(readlink "ds4flash.gguf" 2>/dev/null || echo "")
+  resolved_link=$(resolve_default_link)
   case "${model_path:-$resolved_link}" in
     *Qwen3.8*|*qwen3.8*)
       IS_QWEN=1
@@ -199,7 +211,10 @@ start_server() {
       PID_FILE="$QWEN_PID_FILE"
       KV_DIR="$QWEN_KV_DIR"
       LOG_FILE="$LOG_DIR/ds4-qwen.log"
-      if [ -n "$TRACE_PATH" ]; then TRACE_PATH="$LOG_DIR/ds4-qwen.trace"; fi
+      if [ -n "$TRACE_PATH" ] && [ "$TRACE_PATH" != "$LOG_DIR/ds4-qwen.trace" ]; then
+        echo "Note: TRACE_PATH overridden for the qwen runtime: $TRACE_PATH -> $LOG_DIR/ds4-qwen.trace"
+      fi
+      TRACE_PATH="$LOG_DIR/ds4-qwen.trace"
       ;;
     *)
       IS_QWEN=0
@@ -211,6 +226,7 @@ start_server() {
   local OTHER_PID_FILE
   if [ "${IS_QWEN}" = "1" ]; then OTHER_PID_FILE="./ds4-server.pid"; else OTHER_PID_FILE="$QWEN_PID_FILE"; fi
   if [ -f "$OTHER_PID_FILE" ]; then
+    local other_pid
     other_pid=$(cat "$OTHER_PID_FILE")
     if kill -0 "$other_pid" 2>/dev/null; then
       echo "Error: the other model is loaded (PID $other_pid, $OTHER_PID_FILE)."
@@ -326,6 +342,16 @@ start_server() {
     MODEL_ARGS+=(--model "$model_path")
   fi
 
+  # Checkpoint-specific drafters: the default DSpark support GGUF is 0731-only.
+  if [ "$spec_mode" = "dspark" ] && [ "$spec_used" = "$DSPARK_MODEL" ]; then
+    case "${model_path:-$(resolve_default_link)}" in
+      *Vision-Exp*|*Qwen3.8*|*qwen3.8*)
+        echo "Error: DSpark default support GGUF is checkpoint-specific (0731)."
+        echo "       This model needs its own drafter (Qwen3.8: built-in MTP, no DSpark)."
+        return 1 ;;
+    esac
+  fi
+
   # Build speculative-decoding arguments (pathway-specific; --mtp is shared)
   MTP_ARGS=()
   if [ "$spec_mode" = "mtp" ]; then
@@ -349,8 +375,16 @@ start_server() {
     TRACE_ARGS+=(--trace "$TRACE_PATH")
   fi
 
+  # Detach into a new session: an engine must outlive whatever terminal or
+  # automation (timeout cleanup, ssh session loss) happened to start it.
+  # Without setsid the server inherits the caller's process group and a
+  # killed parent sends it SIGTERM ("mystery shutdown requested" deaths).
+  local SETSID=()
+  if command -v perl >/dev/null 2>&1; then
+    SETSID=(perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' --)
+  fi
   # Use ${arr[@]+"${arr[@]}"} to safely expand empty arrays on old bash
-  $SERVER_CMD \
+  ${SETSID[@]+"${SETSID[@]}"} $SERVER_CMD \
     ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"} \
     --ctx "$CTX" \
     --tokens "$TOKENS" \
@@ -369,6 +403,7 @@ start_server() {
   local pid=$!
   # Atomic PID file write
   echo "$pid" > "${PID_FILE}.tmp" && mv "${PID_FILE}.tmp" "$PID_FILE"
+  echo "$PORT" > "${PID_FILE}.port"
   echo "ds4-server started (PID: $pid)"
 
   # Verify the process actually started
@@ -386,14 +421,16 @@ start_server() {
     prev_upstream=$(cat "$PROXY_PID_FILE.upstream" 2>/dev/null || echo "?")
     if [ "$prev_upstream" != "$PORT" ]; then
       echo "auth_proxy live: upstream $prev_upstream -> $PORT, restarting it"
-      restart_proxy
+      if ! restart_proxy; then
+        echo "Warning: auth_proxy follow-restart FAILED - LAN path is down; run '$0 restart-proxy' manually"
+      fi
     fi
   fi
 }
 
 stop_server() {
   local pf
-  local found=0
+  FOUND_EXTRA=""
   for pf in "./ds4-server.pid" "$QWEN_PID_FILE"; do
     [ "$pf" = "$PID_FILE" ] || FOUND_EXTRA="$FOUND_EXTRA $pf"
   done
@@ -432,11 +469,11 @@ stop_one_pidfile() {
       kill -9 "$pid" 2>/dev/null || true
     fi
 
-    rm -f "$pf"
+    rm -f "$pf" "$pf.port"
     echo "ds4-server stopped"
   else
     echo "Process $pid not running. Cleaning up PID file."
-    rm -f "$pf"
+    rm -f "$pf" "$pf.port"
   fi
   return 0
 }
@@ -467,21 +504,44 @@ status_server() {
 }
 
 start_proxy() {
+  local SETSID=()
+  if command -v perl >/dev/null 2>&1; then
+    SETSID=(perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' --)
+  fi
   # Key source: the 0600 key file is CANONICAL when present - a stale exported
   # DS4_API_KEY in a long-lived shell silently overriding the real desktop key
   # has bitten twice. Env var is the fallback (no file). Never committed.
   if [ -f "${DS4_API_KEY_FILE:-$HOME/.config/ds4/desktop.key}" ]; then
     DS4_API_KEY=$(cat "${DS4_API_KEY_FILE:-$HOME/.config/ds4/desktop.key}")
     export DS4_API_KEY
+    _kf_perms=$(stat -f %Lp "${DS4_API_KEY_FILE:-$HOME/.config/ds4/desktop.key}")
+    if [ $((8#$_kf_perms & 8#77)) -ne 0 ]; then
+      echo "Warning: key file is group/world-readable ($_kf_perms) - chmod 600 it"
+    fi
   fi
   if [ -z "${DS4_API_KEY:-}" ]; then
     echo "Error: DS4_API_KEY not set (and no key file) — refusing to start an unauthenticated proxy."
     return 1
   fi
-  # Upstream follows whichever engine is actually loaded (pid files).
-  local upstream_port=8001 upname="DeepSeek"
-  if [ -f "$QWEN_PID_FILE" ] && kill -0 "$(cat "$QWEN_PID_FILE")" 2>/dev/null; then
-    upstream_port="$QWEN_PORT"; upname="Qwen3.8"
+  # Upstream follows whichever engine is actually loaded, at the port the
+  # engine was ACTUALLY started on (per-pid .port file; env-default fallback).
+  local upstream_port="" upname="none" efile ep
+  for efile in "./ds4-server.pid" "$QWEN_PID_FILE"; do
+    if [ -f "$efile" ] && kill -0 "$(cat "$efile")" 2>/dev/null; then
+      ep=$(cat "$efile.port" 2>/dev/null || echo "")
+      if [ -z "$ep" ]; then
+        case "$efile" in
+          *qwen*) ep="$QWEN_PORT" ;;
+          *) ep=8001 ;;
+        esac
+      fi
+      upstream_port="$ep"
+      case "$efile" in *qwen*) upname="Qwen3.8" ;; *) upname="DeepSeek" ;; esac
+    fi
+  done
+  if [ -z "$upstream_port" ]; then
+    echo "Warning: no engine is loaded; auth_proxy will refuse upstream until one starts (assuming 8001)"
+    upstream_port=8001; upname="DeepSeek (not live)"
   fi
   if [ -f "$PROXY_PID_FILE" ]; then
     local pid
@@ -496,17 +556,17 @@ start_proxy() {
   echo "Starting auth_proxy on ${PROXY_HOST}:${PROXY_PORT} -> 127.0.0.1:${upstream_port} (${upname}, auth required)..."
   BIND_HOST="$PROXY_HOST" BIND_PORT="$PROXY_PORT" \
     UPSTREAM_HOST=127.0.0.1 UPSTREAM_PORT="$upstream_port" \
-    python3 "$PROXY_CMD" > "$LOG_DIR/auth_proxy.log" 2>&1 &
-  echo "$upstream_port" > "$PROXY_PID_FILE.upstream"
+    ${SETSID[@]+"${SETSID[@]}"} python3 "$PROXY_CMD" > "$LOG_DIR/auth_proxy.log" 2>&1 &
   local pid=$!
   echo "$pid" > "${PROXY_PID_FILE}.tmp" && mv "${PROXY_PID_FILE}.tmp" "$PROXY_PID_FILE"
   sleep 1
   if ! kill -0 "$pid" 2>/dev/null; then
     echo "Error: auth_proxy failed to start (PID: $pid)"
     tail -2 "$LOG_DIR/auth_proxy.log" 2>/dev/null || true
-    rm -f "$PROXY_PID_FILE"
+    rm -f "$PROXY_PID_FILE" "$PROXY_PID_FILE.upstream"
     return 1
   fi
+  echo "$upstream_port" > "$PROXY_PID_FILE.upstream"
   echo "auth_proxy started (PID: $pid)"
 }
 
@@ -532,7 +592,7 @@ stop_proxy() {
     rm -f "$PROXY_PID_FILE" "$PROXY_PID_FILE.upstream"
     echo "auth_proxy stopped"
   else
-    rm -f "$PROXY_PID_FILE"
+    rm -f "$PROXY_PID_FILE" "$PROXY_PID_FILE.upstream"
   fi
   return 0
 }
@@ -554,6 +614,30 @@ status_proxy() {
   fi
 }
 
+# Fail loudly BEFORE stopping a running engine: a bad path or missing encoder
+# must not leave the box with no engine and a stale proxy upstream.
+preflight_engine() {
+  local mp="$1" target
+  if [ -n "$mp" ]; then target="$mp"; else target=$(resolve_default_link); fi
+  if [ ! -f "$target" ]; then
+    echo "Error: model file not found: $target"
+    return 1
+  fi
+  case "$target" in
+    *Qwen3.8*|*qwen3.8*)
+      if [ ! -f "$QWEN_VISION" ]; then
+        echo "Error: Qwen vision encoder not found: $QWEN_VISION (run ./download_model.sh qwen38-vision)"
+        return 1
+      fi ;;
+    *Vision-Exp*)
+      if [ ! -f "$VISION_ENCODER" ]; then
+        echo "Error: DeepSeek vision encoder not found: $VISION_ENCODER"
+        return 1
+      fi ;;
+  esac
+  return 0
+}
+
 case "${1:-}" in
   start)
     start_server "" "" ""
@@ -568,13 +652,13 @@ case "${1:-}" in
     stop_server
     ;;
   restart)
-    stop_server; start_server "" "" ""
+    if preflight_engine ""; then stop_server; start_server "" "" ""; fi
     ;;
   restart-mtp)
-    stop_server; start_server "" mtp ""
+    if preflight_engine ""; then stop_server; start_server "" mtp ""; fi
     ;;
   restart-dspark)
-    stop_server; start_server "" dspark ""
+    if preflight_engine ""; then stop_server; start_server "" dspark ""; fi
     ;;
   status)
     status_server
@@ -629,6 +713,7 @@ case "${1:-}" in
     fi
 
     if [ "$do_restart" = 1 ]; then
+      preflight_engine "$model_path" || exit 1
       stop_server; start_server "$model_path" "$spec_mode" "$spec_model_path"
     else
       start_server "$model_path" "$spec_mode" "$spec_model_path"
@@ -692,7 +777,7 @@ case "${1:-}" in
     echo "                        LAN IP like 192.168.1.20 to expose the server"
     echo "                        on the network for remote clients."
     echo "  PROXY_HOST          - Proxy bind address (default: 0.0.0.0)"
-    echo "  PROXY_PORT          - Proxy port (default: 8002)"
+    echo "  PROXY_PORT          - Proxy port (default: 8100)"
     echo "  DS4_API_KEY         - Bearer token for the auth proxy (required to start)"
     echo "  TRACE_PATH          - Write cache-decision trace to this file (e.g."
     echo "                        TRACE_PATH=./log/ds4.trace). Empty = off."
