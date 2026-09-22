@@ -381,6 +381,14 @@ start_server() {
     MTP_ARGS+=(--dspark-confidence "$DSPARK_CONFIDENCE")
   fi
 
+  # Optional extra server flags (space-separated), e.g.
+  #   SERVER_EXTRA_ARGS="--mtp-timing" ./ds4-server.sh restart-qwen
+  EXTRA_ARGS=()
+  if [ -n "${SERVER_EXTRA_ARGS:-}" ]; then
+    # shellcheck disable=SC2206
+    EXTRA_ARGS=(${SERVER_EXTRA_ARGS})
+  fi
+
   # Build trace argument
   TRACE_ARGS=()
   if [ -n "$TRACE_PATH" ]; then
@@ -411,6 +419,7 @@ start_server() {
     ${MTP_ARGS[@]+"${MTP_ARGS[@]}"} \
     ${VISION_ARGS[@]+"${VISION_ARGS[@]}"} \
     ${TRACE_ARGS[@]+"${TRACE_ARGS[@]}"} \
+    ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} \
     > "$LOG_FILE" 2>&1 &
 
   local pid=$!
