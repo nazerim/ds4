@@ -3811,6 +3811,11 @@ static bool request_tokenize_multimodal_prompt(ds4_engine *e, server *s,
         memcpy(r->image_markers[i], inputs[i]->marker, sizeof(r->image_markers[i]));
         cursor = marker + strlen(inputs[i]->marker);
         canonicalize_image_marker(marker);
+        /* prompt_text now carries the canonicalized marker, so the stored
+         * marker must be canonicalized too: visible_prompt_key() (and every
+         * other image_markers consumer) does strstr() against prompt_text and
+         * otherwise misses on every image request, killing live reuse. */
+        canonicalize_image_marker(r->image_markers[i]);
     }
     if (ok) ds4_tokenize_rendered_chat(e, cursor, &r->prompt);
 
@@ -13729,7 +13734,13 @@ static char *build_qwen_tool_turn_visible_text(const request *r,
                                                const char *content,
                                                const tool_calls *calls) {
     if (!r || !calls || calls->len == 0) return NULL;
-    if (r->kind != REQ_CHAT || r->image_count != 0) return NULL;
+    /* Image turns are allowed: the remembered key is normalized through
+     * visible_prompt_key(), which masks request-local image markers to \036, so
+     * the next turn stays byte-comparable; the probe validates the image prefix
+     * separately (ds4_session_vision_fingerprint_prefix_matches +
+     * visible_image_prefix_matches).  Gating on image_count!=0 here made every
+     * post-vision tool turn fail to reuse and fall back to a cold prefill. */
+    if (r->kind != REQ_CHAT) return NULL;
     if (r->api == API_RESPONSES || r->api == API_ANTHROPIC) return NULL;
     if (r->model_syntax != SERVER_MODEL_SYNTAX_QWEN) return NULL;
     if (!r->prompt_text || !r->prompt_text[0]) return NULL;
@@ -19631,10 +19642,39 @@ static void test_qwen_tool_visible_checkpoint_boundary(void) {
                 &r, "length", false, assistant.content, &assistant.calls) == NULL);
             TEST_ASSERT(build_qwen_tool_turn_visible_text(
                 &r, "tool_calls", true, assistant.content, &assistant.calls) == NULL);
-            r.image_count = 1;
-            TEST_ASSERT(build_qwen_tool_turn_visible_text(
-                &r, "tool_calls", false, assistant.content, &assistant.calls) == NULL);
-            r.image_count = 0;
+            {
+                /* Regression: an image in the conversation must NOT disable the
+                 * visible checkpoint (it used to return NULL, so every
+                 * post-vision tool turn fell back to a cold prefill).  Assert
+                 * the built key is non-NULL and that visible_prompt_key()
+                 * normalizes the image marker, keeping the next turn
+                 * byte-comparable. */
+                static const char marker[] = "\x1e" "IMG_NONCE_TEST";
+                char img_prompt[256];
+                snprintf(img_prompt, sizeof(img_prompt),
+                         "<|im_start|>user\nlook %s here<|im_end|>\n"
+                         "<|im_start|>assistant\n", marker);
+                char *saved_prompt = r.prompt_text;
+                char (*saved_markers)[SERVER_IMAGE_MARKER_BYTES] = r.image_markers;
+                char (*mk)[SERVER_IMAGE_MARKER_BYTES] = xmalloc(sizeof(*mk));
+                snprintf((char *)mk, SERVER_IMAGE_MARKER_BYTES, "%s", marker);
+                r.prompt_text = img_prompt;
+                r.image_markers = mk;
+                r.image_count = 1;
+                char *visible_img = build_qwen_tool_turn_visible_text(
+                    &r, "tool_calls", false, assistant.content, &assistant.calls);
+                TEST_ASSERT(visible_img != NULL);
+                visible_image_key vk = {0};
+                char *norm = visible_img
+                    ? visible_prompt_key(&r, visible_img, &vk) : NULL;
+                TEST_ASSERT(norm != NULL && vk.count == 1);
+                free(norm);
+                free(visible_img);
+                free(mk);
+                r.prompt_text = saved_prompt;
+                r.image_markers = saved_markers;
+                r.image_count = 0;
+            }
             r.api = API_RESPONSES;
             TEST_ASSERT(build_qwen_tool_turn_visible_text(
                 &r, "tool_calls", false, assistant.content, &assistant.calls) == NULL);
