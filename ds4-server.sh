@@ -85,7 +85,7 @@ fi
 QWEN_MTP="${QWEN_MTP:-1}"
 QWEN_PORT="${QWEN_PORT:-8002}"
 QWEN_PID_FILE="./ds4-server-qwen.pid"
-QWEN_KV_DIR="${QWEN_KV_DIR:-/tmp/ds4-kv-qwen}"
+QWEN_KV_DIR="${QWEN_KV_DIR:-/Volumes/FireCuda520/ds4-kv-qwen}"
 # Cache-miss trace: set TRACE_PATH to a file path (e.g. ./log/ds4.trace) to make
 # the server write the exact cache-decision + first-mismatch token window for
 # every request. Used for debugging KV divergence (see DS4FORK.md KVCACHE —
@@ -223,6 +223,7 @@ start_server() {
       PORT="${PORT:-$QWEN_PORT}"
       PID_FILE="$QWEN_PID_FILE"
       KV_DIR="$QWEN_KV_DIR"
+      KV_SIZE="${QWEN_KV_SIZE:-262144}"   # qwen ladder store lives on the external blade
       LOG_FILE="$LOG_DIR/ds4-qwen.log"
       if [ -n "$TRACE_PATH" ] && [ "$TRACE_PATH" != "$LOG_DIR/ds4-qwen.trace" ]; then
         echo "Note: TRACE_PATH overridden for the qwen runtime: $TRACE_PATH -> $LOG_DIR/ds4-qwen.trace"
