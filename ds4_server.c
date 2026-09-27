@@ -11714,16 +11714,49 @@ static bool kv_cache_store_live_prefix_text(server *s, server_slot *slot,
     kv_vision_record recs[KV_VISION_MAX_RECORDS];
     const char *store_text = cache_text_override;
     if (has_vision) {
-        /* Image-conditioned payloads reach disk only as a frontier snapshot
-         * (store_len == session length) carrying a verified identity trailer
-         * and a fingerprint-normalized key text.  Partial-frontier anchors
-         * cannot attest which rows depend on which image and stay rejected.
+        /* Image-conditioned payloads reach disk in two attested shapes:
+         *
+         * 1. Frontier snapshot (store_len >= base_tokens): the full normalized
+         *    transcript key with every image record below the frontier.
+         * 2. Partial-frontier anchor (a prefill rung below the request's
+         *    prompt): keyed by the NORMALIZED transcript prefix - spliced
+         *    from base_text bytes (which embed the identity-bearing image
+         *    markers) for every complete segment, plus a rendered tail for
+         *    the truncated text run after the last below-frontier image.
+         *    The raw token render is NOT usable as a key: vision placeholder
+         *    tokens render as literal <|image_pad|> strings that carry no
+         *    image identity and can never match a normalized lookup.  The
+         *    trailer attests exactly the images that END below store_len; an
+         *    image span crossing the frontier invalidates the anchor (rows
+         *    past its start are image-dependent but its embedding is not
+         *    fully consumed).  The multimodal loader revalidates every
+         *    record against the request's fingerprints, and text-only
+         *    requests can never prefix-match a marker-bearing key, so a
+         *    partial anchor is only ever served to a conversation that
+         *    byte-exactly replays the same images.
          */
         const slot_vision_store *vs = &slot->vision_store;
         bool okv = vs->valid && store_len == tokens->len &&
-                   vs->base_tokens <= store_len &&
                    vs->rec_count <= KV_VISION_MAX_RECORDS;
-        if (okv) {
+        size_t rec_count = 0;
+        const bool partial = okv && store_len < vs->base_tokens;
+        if (okv && partial) {
+            if (cache_text_override) okv = false;  /* keyed snapshots need the full base */
+            for (size_t i = 0; okv && i < vs->rec_count; i++) {
+                const uint64_t start = (uint64_t)vs->recs[i].token_start;
+                const uint64_t end = start + vs->recs[i].token_count;
+                if (vs->recs[i].token_count == 0) {
+                    okv = false;
+                } else if (end <= (uint64_t)store_len) {
+                    recs[rec_count++] = vs->recs[i];
+                } else if (start < (uint64_t)store_len) {
+                    okv = false;  /* a span crossing the frontier is unusable */
+                }
+            }
+        } else if (okv && vs->base_tokens > store_len) {
+            okv = false;
+        }
+        if (okv && !partial) {
             for (size_t i = 0; i < vs->rec_count; i++) {
                 const uint64_t end = (uint64_t)vs->recs[i].token_start +
                                      vs->recs[i].token_count;
@@ -11734,8 +11767,9 @@ static bool kv_cache_store_live_prefix_text(server *s, server_slot *slot,
                 }
                 recs[i] = vs->recs[i];
             }
+            rec_count = vs->rec_count;
         }
-        if (okv) {
+        if (okv && !partial) {
             ds4_tokens tail = {0};
             tail.v = tokens->v + vs->base_tokens;
             tail.len = store_len - vs->base_tokens;
@@ -11757,6 +11791,92 @@ static bool kv_cache_store_live_prefix_text(server *s, server_slot *slot,
              * protocol paths). */
             cache_text_ext = 0;
             cache_text_key = NULL;
+        }
+        if (okv && partial) {
+            /* Trailer attests the below-frontier image subset (rec_count may
+             * be 0 when every image starts at or above the anchor: the rows
+             * below carry no image conditioning). */
+            tctx.records_in = recs;
+            tctx.record_count_in = rec_count;
+            /* Splice the normalized-domain key: copy base_text bytes through
+             * each below-frontier marker (identity-bearing), then render the
+             * truncated text run after the last consumed image. */
+            size_t cap = vs->base_len + (size_t)store_len * 6 + 64;
+            char *key = xmalloc(cap);
+            size_t klen = 0, bpos = 0;
+            int tok_cursor = 0;
+            static const char MKPFX[] = "\x1e" "DS4_IMAGE_";
+            for (size_t i = 0; okv && i < rec_count; i++) {
+                if (recs[i].token_count == 0 ||
+                    (uint64_t)recs[i].token_start < (uint64_t)tok_cursor) {
+                    okv = false;  /* records must be ordered and disjoint */
+                    break;
+                }
+                const char *mk = memmem(vs->base_text + bpos,
+                                        vs->base_len - bpos,
+                                        MKPFX, sizeof(MKPFX) - 1);
+                if (!mk) { okv = false; break; }
+                const char *mk_end = memchr(mk, '\x1f',
+                                            (size_t)(vs->base_text + vs->base_len - mk));
+                if (!mk_end) { okv = false; break; }
+                mk_end += 1;
+                size_t seg = (size_t)(mk_end - (vs->base_text + bpos));
+                if (klen + seg >= cap) { okv = false; break; }
+                memcpy(key + klen, vs->base_text + bpos, seg);
+                klen += seg;
+                bpos += seg;
+                tok_cursor = (int)(recs[i].token_start + recs[i].token_count);
+            }
+            if (okv && store_len < tok_cursor) okv = false;
+            if (okv && store_len > tok_cursor) {
+                /* Skip structural placeholder tokens (e.g. the vision_end
+                 * that follows a record's pad span): a token whose render
+                 * does not continue base_text carries no normalized bytes. */
+                for (int skips = 0; okv && skips < 2 && tok_cursor < store_len;
+                     skips++) {
+                    ds4_tokens one = {0};
+                    one.v = tokens->v + tok_cursor;
+                    one.len = 1;
+                    size_t one_len = 0;
+                    char *one_text = render_tokens_text(s->engine, &one,
+                                                        &one_len);
+                    bool continues = one_text && one_len > 0 &&
+                        vs->base_len - bpos >= one_len &&
+                        memcmp(vs->base_text + bpos, one_text, one_len) == 0;
+                    free(one_text);
+                    if (continues) break;
+                    tok_cursor++;
+                }
+            }
+            if (okv && store_len > tok_cursor) {
+                ds4_tokens run = {0};
+                run.v = tokens->v + tok_cursor;
+                run.len = store_len - tok_cursor;
+                size_t run_len = 0;
+                char *run_text = render_tokens_text(s->engine, &run, &run_len);
+                /* Self-verify: the rendered tail must byte-equal the base_text
+                 * continuation, so the spliced key is an exact normalized
+                 * prefix (any re-tokenization drift fails the store closed
+                 * instead of writing an unreachable key). */
+                if (!run_text) okv = false;
+                else if (run_len == 0 || vs->base_len - bpos < run_len ||
+                         memcmp(vs->base_text + bpos, run_text, run_len) != 0)
+                    okv = false;
+                else if (klen + run_len >= cap) okv = false;
+                else { memcpy(key + klen, run_text, run_len); klen += run_len; }
+                free(run_text);
+            }
+            if (okv) {
+                key[klen] = '\0';
+                vision_text = key;  /* shares the frontier path's cleanup */
+                store_text = vision_text;
+                /* Normalized prefix: no hidden-reasoning / responses-visible
+                 * key class may ride on it (same rule as the frontier key). */
+                cache_text_ext = 0;
+                cache_text_key = NULL;
+            } else {
+                free(key);
+            }
         }
         if (!okv) {
             pthread_mutex_unlock(&s->inference_mu);
@@ -11948,6 +12068,11 @@ static void kv_cache_maybe_store_continued(server *s, server_slot *slot) {
     kv_disk_cache *kc = &s->kv;
     const ds4_tokens *tokens = ds4_session_tokens(slot->session);
     if (!tokens) return;
+    if (getenv("DS4_KV_DEBUG") && ds4_session_has_vision_state(slot->session))
+        server_log(DS4_LOG_KVCACHE,
+                   "ds4-server: DBG maybe_store vision len=%d pos=%d last=%d",
+                   tokens->len, ds4_session_pos(slot->session),
+                   slot->continued_last_store_tokens);
     const int target = kv_cache_slot_continued_target(s, slot, tokens->len);
     if (target == 0) {
         /* No continued-store boundary here, but a divergence anchor may be

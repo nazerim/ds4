@@ -2110,7 +2110,11 @@ bool ds4_kvstore_store_live_prefix_text(ds4_kvstore *kc,
     char parent_sha_hex[41] = {0};
     uint32_t delta_from = 0;
     int parent_idx = -1;
-    if (kv_delta_enabled() && strcmp(reason, "continued") == 0 && !text_override &&
+    /* text_override stores (normalized-vision rungs, visible transcripts) may
+     * chain too: the text-prefix scan is only a fast filter - the payload
+     * token-span re-read below is the ground truth and fails closed. */
+    if (kv_delta_enabled() &&
+        (strcmp(reason, "continued") == 0 || strcmp(reason, "turn") == 0) &&
         store_tokens.len >= 4 && (store_tokens.len % 4) == 0 &&
         ds4_session_supports_delta(session)) {
         /* The entry index is (re)built by directory scans; a store never
@@ -2392,7 +2396,8 @@ bool ds4_kvstore_maybe_store_continued(ds4_kvstore *kc,
 
 static int kv_cache_find_text_prefix_skip(ds4_kvstore *kc, const char *prompt_text,
                                           int model_id, int quant_bits, int ctx_size,
-                                          const int *skip, int skip_len) {
+                                          const int *skip, int skip_len,
+                                          bool want_vision) {
     if (!prompt_text) return -1;
     const size_t prompt_bytes = strlen(prompt_text);
     int best = -1;
@@ -2409,6 +2414,9 @@ static int kv_cache_find_text_prefix_skip(ds4_kvstore *kc, const char *prompt_te
         if (e->payload_bytes == 0) continue;
         if ((int)e->tokens < kc->opt.min_tokens) continue;
         if (e->model_id != (uint8_t)model_id) continue;
+        /* Vision-attested files carry image-conditioned rows; only a lookup
+         * that will revalidate the identity trailer may match them. */
+        if (!want_vision && (e->ext_flags & DS4_KVSTORE_EXT_VISION)) continue;
         if (e->model_fp && e->model_fp != kc->model_fp) continue;
         if ((uint32_t)ctx_size < e->ctx_size) continue;
         if (kc->reject_different_quant && e->quant_bits != (uint8_t)quant_bits) continue;
@@ -2429,7 +2437,7 @@ int ds4_kvstore_find_text_prefix(ds4_kvstore *kc, const char *prompt_text,
                                  int model_id, int quant_bits, int ctx_size) {
     kv_cache_refresh(kc);
     return kv_cache_find_text_prefix_skip(kc, prompt_text, model_id, quant_bits,
-                                          ctx_size, NULL, 0);
+                                          ctx_size, NULL, 0, true);
 }
 
 /* Decommissioned: the stale layer overrode keep-set protection (evicting
@@ -2781,9 +2789,11 @@ int ds4_kvstore_try_load_text(ds4_kvstore *kc,
     int skip_len = 0;
     int loaded = 0;
     for (;;) {
+        const bool want_vision = hooks &&
+            (hooks->ext_flag & DS4_KVSTORE_EXT_VISION) != 0;
         const int idx = kv_cache_find_text_prefix_skip(kc, prompt_text, model_id,
                                                        quant_bits, ctx_size,
-                                                       skip, skip_len);
+                                                       skip, skip_len, want_vision);
         if (idx < 0) break;
         bool retryable = false;
         loaded = kv_cache_try_load_one(kc, engine, session, prompt_text,
