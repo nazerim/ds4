@@ -11481,6 +11481,12 @@ static int kv_tool_map_load_body(server *s, FILE *fp, uint32_t count,
 /* Returns the number of entries loaded; a negative value means the trailer is
  * corrupt (as opposed to absent), so the caller can log the degradation.
  * Kept for the legacy single-section shape. */
+#ifdef DS4_SERVER_TEST
+/* Reads one tool-map section whose header sits at the current position and
+ * returns the entry count.  Production restores through
+ * kv_trailer_restore_tool_map(), which walks the trailer sections in whatever
+ * order the writer emitted them; this narrower reader is kept for tests that
+ * build a bare tool-map section. */
 static int kv_tool_map_load_from_pos(server *s, FILE *fp, const stop_list *wanted) {
     if (!s || s->disable_exact_dsml_tool_replay || !fp) return 0;
     uint8_t h[KV_TOOL_MAP_HEADER];
@@ -11490,6 +11496,42 @@ static int kv_tool_map_load_from_pos(server *s, FILE *fp, const stop_list *wante
     if (h[0] != KV_TOOL_MAP_MAGIC0 || h[1] != KV_TOOL_MAP_MAGIC1 ||
         h[2] != KV_TOOL_MAP_MAGIC2 || h[3] != KV_TOOL_MAP_VERSION) return -1;
     return kv_tool_map_load_body(s, fp, le_get32(h + 4), wanted);
+}
+#endif
+
+/* Walk the trailer from the current position and install every tool-map entry
+ * whose id is wanted.  The writer emits a tokenizer-fingerprint section ahead
+ * of the tool map and a vision section after it, so the tool map is not at a
+ * fixed offset from the payload: reading it as the first section matched the
+ * fingerprint magic instead and restored nothing.  Section order is not
+ * assumed here either, and unknown sections stop the walk. */
+static int kv_trailer_restore_tool_map(server *s, FILE *fp,
+                                       const stop_list *wanted) {
+    for (;;) {
+        uint8_t h[8];
+        size_t n = fread(h, 1, sizeof(h), fp);
+        if (n == 0 && feof(fp)) return 0;
+        if (n != sizeof(h)) return -1;
+        if (h[0] == KV_TOKFP_MAGIC0 && h[1] == KV_TOKFP_MAGIC1 &&
+            h[2] == KV_TOKFP_MAGIC2 && h[3] == KV_TOKFP_VERSION) {
+            if (fseek(fp, (long)le_get32(h + 4), SEEK_CUR) != 0) return -1;
+            continue;
+        }
+        if (h[0] == KV_TOOL_MAP_MAGIC0 && h[1] == KV_TOOL_MAP_MAGIC1 &&
+            h[2] == KV_TOOL_MAP_MAGIC2 && h[3] == KV_TOOL_MAP_VERSION) {
+            if (kv_tool_map_load_body(s, fp, le_get32(h + 4), wanted) < 0) return -1;
+            continue;
+        }
+        if (h[0] == KV_VISION_MAGIC0 && h[1] == KV_VISION_MAGIC1 &&
+            h[2] == KV_VISION_MAGIC2 && h[3] == KV_VISION_VERSION) {
+            uint32_t count = le_get32(h + 4);
+            if (count > KV_VISION_MAX_RECORDS) return -1;
+            if (fseek(fp, (long)count * (long)KV_VISION_RECORD, SEEK_CUR) != 0)
+                return -1;
+            continue;
+        }
+        return -1;
+    }
 }
 
 #ifdef DS4_SERVER_TEST
@@ -11543,7 +11585,7 @@ static void kv_cache_restore_tool_memory_for_messages(server *s, const chat_msgs
             skip <= (uint64_t)INT64_MAX &&
             fseeko(fp, (off_t)skip, SEEK_CUR) == 0)
         {
-            kv_tool_map_load_from_pos(s, fp, &wanted);
+            kv_trailer_restore_tool_map(s, fp, &wanted);
         }
         fclose(fp);
     }
@@ -23753,6 +23795,95 @@ static void test_kv_tool_map_restores_before_prompt_render(void) {
     rmdir(dir);
 }
 
+/* The attach-time bootstrap must read the trailer the way the writer lays it
+ * out.  kv_cache_trailer_write_cb emits a tokenizer-fingerprint section ahead
+ * of the tool map (and a vision section after it), so the tool map is not at a
+ * fixed offset from the payload; reading it as the first section silently
+ * restored nothing, which is the second half of the tool_replay disk=0 field
+ * finding.  The file here is built with the production writer hooks so the
+ * test cannot drift away from the real layout again. */
+static void test_kv_tool_map_bootstrap_reads_real_trailer_layout(void) {
+    char tmpl[] = "/tmp/ds4-kv-tool-map-layout.XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    TEST_ASSERT(dir != NULL);
+    if (!dir) return;
+
+    const char *sha = "4444444444444444444444444444444444444444";
+    char name[44];
+    snprintf(name, sizeof(name), "%.40s.kv", sha);
+    char *path = path_join(dir, name);
+    const char *dsml = "\n\n<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call>";
+
+    server src = {0};
+    pthread_mutex_init(&src.tool_mu, NULL);
+    tool_memory_put(&src, "call_layout", dsml);
+
+    buf text = {0};
+    buf_puts(&text, "visible transcript prefix\n");
+    buf_puts(&text, dsml);
+
+    kv_trailer_ctx tctx = {0};
+    tctx.s = &src;
+    ds4_kvstore_trailer_hooks hooks = kv_cache_tool_map_hooks(&tctx, false);
+    uint64_t trailer_bytes = 0;
+    TEST_ASSERT(hooks.serialized_size(hooks.ud, text.ptr, &trailer_bytes));
+    TEST_ASSERT(trailer_bytes > KV_TOKFP_BYTES);
+
+    FILE *fp = fopen(path, "wb");
+    TEST_ASSERT(fp != NULL);
+    if (fp) {
+        uint8_t h[KV_CACHE_FIXED_HEADER];
+        kv_fill_header(h, 2, KV_REASON_CONTINUED, hooks.ext_flag, 512, 0, 32768,
+                       100, 100, 0);
+        uint8_t tl[4];
+        le_put32(tl, (uint32_t)text.len);
+        TEST_ASSERT(fwrite(h, 1, sizeof(h), fp) == sizeof(h));
+        TEST_ASSERT(fwrite(tl, 1, sizeof(tl), fp) == sizeof(tl));
+        TEST_ASSERT(fwrite(text.ptr, 1, text.len, fp) == text.len);
+        uint64_t written = 0;
+        TEST_ASSERT(hooks.write(hooks.ud, fp, text.ptr, &written));
+        TEST_ASSERT(written == trailer_bytes);
+        TEST_ASSERT(fclose(fp) == 0);
+    }
+
+    /* Post-restart state: no RAM tool memory at all. */
+    server dst = {0};
+    pthread_mutex_init(&dst.tool_mu, NULL);
+    dst.kv.enabled = true;
+    dst.kv.dir = xstrdup(dir);
+    dst.kv.opt = kv_cache_default_options();
+
+    chat_msgs msgs = {0};
+    chat_msg a = {0};
+    a.role = xstrdup("assistant");
+    tool_call tc = {0};
+    tc.id = xstrdup("call_layout");
+    tc.name = xstrdup("get_weather");
+    tc.arguments = xstrdup("{\"city\":\"canonical\"}");
+    tool_calls_push(&a.calls, tc);
+    chat_msgs_push(&msgs, a);
+
+    kv_cache_restore_tool_memory_for_messages(&dst, &msgs);
+    tool_replay_stats stats = {0};
+    tool_memory_attach_to_messages(&dst, &msgs, &stats);
+    TEST_ASSERT(stats.disk == 1);
+    TEST_ASSERT(stats.canonical == 0);
+    TEST_ASSERT(msgs.v[0].calls.raw_tool_text != NULL);
+    if (msgs.v[0].calls.raw_tool_text)
+        TEST_ASSERT(!strcmp(msgs.v[0].calls.raw_tool_text, dsml));
+
+    chat_msgs_free(&msgs);
+    buf_free(&text);
+    kv_cache_close(&dst.kv);
+    tool_memory_free(&src.tool_mem);
+    tool_memory_free(&dst.tool_mem);
+    pthread_mutex_destroy(&src.tool_mu);
+    pthread_mutex_destroy(&dst.tool_mu);
+    unlink(path);
+    free(path);
+    rmdir(dir);
+}
+
 static void test_kv_cache_retention_keeps_small_anchor(void) {
     /* One lineage (a byte-prefix chain of texts) with small-dense + tail +
      * frontier anchors and two redundant middle anchors.  Under budget
@@ -26450,6 +26581,7 @@ static void ds4_server_unit_tests_run(void) {
     test_kv_tool_map_filters_by_dsml_text();
     test_kv_tool_map_persists_qwen_syntax_blocks();
     test_kv_tool_map_restores_before_prompt_render();
+    test_kv_tool_map_bootstrap_reads_real_trailer_layout();
     test_thinking_checkpoint_canonical_matches_future_prompt();
     test_prompt_text_drop_oldest_images();
     test_normalize_image_text_and_trailer_roundtrip();
