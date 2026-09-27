@@ -581,6 +581,43 @@ static void test_kv_delta_parity(void) {
     test_qwen_prefill_scores_equal(s_A, s_B);
     test_qwen_prefill_scores_equal(s_B, s_ref);
 
+    /* Regression (caught in the field 2026-09-27): a non-row-aligned frontier
+     * must still store and load as a FULL checkpoint - the delta alignment
+     * assert must not gate odd-length turn/evict/cold stores. */
+    const int odd = 2050;
+    ds4_tokens t_odd = prompt; t_odd.len = odd;
+    TEST_ASSERT(ds4_session_sync(s_live, &t_odd, err, sizeof(err)) == 0);
+    TEST_ASSERT(ds4_kvstore_store_live_prefix(&kcA, engine, s_live,
+                ds4_session_tokens(s_live), odd, "cold", &hooks, err, sizeof(err)));
+    size_t olen = 0;
+    char *otext = ds4_kvstore_render_tokens_text(engine, &t_odd, &olen);
+    TEST_ASSERT(otext && olen > 0);
+    char shaO[41];
+    ds4_kvstore_sha1_bytes_hex(otext, olen, shaO);
+    char pathO[512];
+    snprintf(pathO, sizeof(pathO), "%s/%.40s.kv", dirA, shaO);
+    struct stat stO;
+    TEST_ASSERT(stat(pathO, &stO) == 0);
+    ds4_kvstore_entry eO = {0};
+    uint32_t tob = 0;
+    FILE *fo = fopen(pathO, "rb");
+    TEST_ASSERT(fo != NULL);
+    if (fo) { TEST_ASSERT(ds4_kvstore_read_header(fo, &eO, &tob)); fclose(fo); }
+    TEST_ASSERT(eO.hdr_version != 3 && eO.tokens == (uint32_t)odd);
+    {
+        ds4_session *s_D = NULL;
+        TEST_ASSERT(ds4_session_create(&s_D, engine, 8192) == 0);
+        ds4_tokens effO = {0};
+        ds4_kvstore_load_result resO = {0};
+        TEST_ASSERT(ds4_kvstore_try_load_text(&kcA, engine, s_C, otext,
+                    &effO, &resO, NULL, false) == odd);
+        ds4_kvstore_load_result_free(&resO);
+        TEST_ASSERT(ds4_session_sync(s_D, &t_odd, err, sizeof(err)) == 0);
+        test_qwen_prefill_scores_equal(s_C, s_D);
+        ds4_session_free(s_D);
+    }
+    free(otext);
+
     /* Broken chain: deleting the root orphans the delta.  Load must return
      * 0 (no shorter anchor left) and drop the orphan file. */
     TEST_ASSERT(unlink(rootB) == 0);

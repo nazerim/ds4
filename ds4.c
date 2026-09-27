@@ -62809,7 +62809,12 @@ static int qwen4_session_save_payload_span(ds4_session *s, FILE *fp,
         payload_set_err(err, errlen, "Qwen3.8 graph position does not match the checkpoint");
         return 1;
     }
-    if (rows_from > rows || (rows_from % 4u) != 0u || (rows % 4u) != 0u) {
+    /* Row-group alignment only applies to a sliced (delta) write; a full
+     * snapshot's block-key region truncates toward zero exactly as before.
+     * Gating on rows itself silently skipped every odd-length full store
+     * (turn/evict/cold at unaligned frontiers) - caught in the field. */
+    if (rows_from > 0 &&
+        (rows_from > rows || (rows_from % 4u) != 0u || (rows % 4u) != 0u)) {
         payload_set_err(err, errlen, "Qwen3.8 delta span must align to row groups of 4");
         return 1;
     }
@@ -62914,7 +62919,8 @@ static int qwen4_session_load_payload_span(ds4_session *s, FILE *fp, const uint3
         payload_set_err(err, errlen, "KV checkpoint is longer than this session's context");
         return 1;
     }
-    if (rows_from > rows || (rows_from % 4u) != 0u || (rows % 4u) != 0u) {
+    if (rows_from > 0 &&
+        (rows_from > rows || (rows_from % 4u) != 0u || (rows % 4u) != 0u)) {
         payload_set_err(err, errlen, "KV delta span is not row-aligned or exceeds the checkpoint");
         return 1;
     }
