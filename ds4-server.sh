@@ -223,7 +223,7 @@ start_server() {
       PORT="${PORT:-$QWEN_PORT}"
       PID_FILE="$QWEN_PID_FILE"
       KV_DIR="$QWEN_KV_DIR"
-      KV_SIZE="${QWEN_KV_SIZE:-262144}"   # qwen ladder store lives on the external blade
+      KV_SIZE="${QWEN_KV_SIZE:-524288}"   # qwen ladder store lives on the external blade
       LOG_FILE="$LOG_DIR/ds4-qwen.log"
       if [ -n "$TRACE_PATH" ] && [ "$TRACE_PATH" != "$LOG_DIR/ds4-qwen.trace" ]; then
         echo "Note: TRACE_PATH overridden for the qwen runtime: $TRACE_PATH -> $LOG_DIR/ds4-qwen.trace"
