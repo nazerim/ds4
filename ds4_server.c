@@ -23648,6 +23648,111 @@ static void test_kv_tool_map_filters_by_dsml_text(void) {
  * blocks folded into one span, and trailing ascii whitespace after the last
  * closer included.  Extra newlines in the surrounding render context must not
  * change which stored span is matched. */
+/* Input-render policy pin (TODO-20260928-BACKTICK.md).  Message content is
+ * rendered VERBATIM: append_trimmed_text only trims whitespace and no
+ * sanitizer exists, so a structural string inside content survives into the
+ * prompt text, where ds4.c tokenize_rendered_chat_vocab maps it to the same
+ * structural token id the renderer uses for real structure.  The model
+ * therefore cannot distinguish quoted protocol syntax from real protocol
+ * syntax -- the documented input-side gap.  These assertions pin today's
+ * behaviour so that neutralizing it (Option B in that document) is a
+ * deliberate, visible change rather than silent drift, and so the gap cannot
+ * widen unnoticed. */
+static size_t count_substr(const char *hay, const char *needle) {
+    size_t n = 0;
+    if (!hay || !needle || !needle[0]) return 0;
+    for (const char *p = strstr(hay, needle); p; p = strstr(p + 1, needle)) n++;
+    return n;
+}
+
+static void test_content_structural_syntax_renders_verbatim(void) {
+    const char *role_end = "<|im_end|>";
+    const char *tool_open = "<tool_call>";
+    const char *think_close = "</think>";
+
+    chat_msgs msgs = {0};
+    chat_msg u = {0};
+    u.role = xstrdup("user");
+    buf c = {0};
+    buf_puts(&c, "quoting protocol syntax: ");
+    buf_puts(&c, role_end);
+    buf_puts(&c, " then ");
+    buf_puts(&c, tool_open);
+    buf_puts(&c, " then ");
+    buf_puts(&c, think_close);
+    buf_puts(&c, " -- all of that is inert text.");
+    u.content = buf_take(&c);
+    chat_msgs_push(&msgs, u);
+
+    /* Baseline: the same conversation with inert content, so the assertions
+     * measure what the injected text CONTRIBUTES instead of hardcoding how
+     * many structural markers this renderer emits for a bare user turn. */
+    chat_msgs base_msgs = {0};
+    chat_msg bu = {0};
+    bu.role = xstrdup("user");
+    bu.content = xstrdup("quoting protocol syntax: INERT -- all inert text.");
+    chat_msgs_push(&base_msgs, bu);
+    char *base = render_chat_prompt_text_for_syntax(SERVER_MODEL_SYNTAX_QWEN,
+                                                    &base_msgs, NULL, NULL,
+                                                    DS4_THINK_NONE);
+    char *out = render_chat_prompt_text_for_syntax(SERVER_MODEL_SYNTAX_QWEN,
+                                                  &msgs, NULL, NULL,
+                                                  DS4_THINK_NONE);
+    TEST_ASSERT(out != NULL);
+    TEST_ASSERT(base != NULL);
+    if (out && base) {
+        /* The content's own copies survive byte for byte. */
+        TEST_ASSERT(strstr(out, role_end) != NULL);
+        TEST_ASSERT(strstr(out, tool_open) != NULL);
+        TEST_ASSERT(strstr(out, think_close) != NULL);
+        /* Each injected marker adds exactly one verbatim copy on top of
+         * whatever the renderer emits structurally. */
+        TEST_ASSERT(count_substr(out, role_end) == count_substr(base, role_end) + 1);
+        TEST_ASSERT(count_substr(out, tool_open) == count_substr(base, tool_open) + 1);
+        TEST_ASSERT(count_substr(out, think_close) ==
+                    count_substr(base, think_close) + 1);
+        /* And the injected role-end sits inside the user turn, i.e. before
+         * the renderer's own turn terminator: that ordering is what makes it
+         * an injection rather than harmless trailing text. */
+        const char *first_end = strstr(out, role_end);
+        TEST_ASSERT(first_end != NULL);
+        TEST_ASSERT(strstr(first_end + strlen(role_end), role_end) != NULL);
+    }
+
+    free(base);
+    free(out);
+    chat_msgs_free(&base_msgs);
+    chat_msgs_free(&msgs);
+}
+
+/* Tool-argument bodies, by contrast, ARE escaped on render: a value that
+ * quotes the closing wrapper cannot terminate the wrapper early.  Pinned here
+ * next to the content case so the asymmetry stays explicit. */
+static void test_argument_body_quotes_are_escaped_but_content_is_not(void) {
+    buf b = {0};
+    const char *closer = "</parameter>";
+    append_glm_tag_body_text(&b, closer, closer);
+    TEST_ASSERT(b.ptr != NULL);
+    /* The escaped form must not contain the raw closer. */
+    TEST_ASSERT(b.ptr && strstr(b.ptr, closer) == NULL);
+    TEST_ASSERT(b.len > strlen(closer));
+    buf_free(&b);
+
+    /* Same bytes through the content path stay raw. */
+    chat_msgs msgs = {0};
+    chat_msg u = {0};
+    u.role = xstrdup("user");
+    u.content = xstrdup(closer);
+    chat_msgs_push(&msgs, u);
+    char *out = render_chat_prompt_text_for_syntax(SERVER_MODEL_SYNTAX_QWEN,
+                                                  &msgs, NULL, NULL,
+                                                  DS4_THINK_NONE);
+    TEST_ASSERT(out != NULL);
+    TEST_ASSERT(out && strstr(out, closer) != NULL);
+    free(out);
+    chat_msgs_free(&msgs);
+}
+
 static void test_kv_tool_map_persists_qwen_syntax_blocks(void) {
     const char *single = "\n\n<tool_call>\n<function=bash>\n<parameter=command>\npwd\n</parameter>\n</function>\n</tool_call>";
     const char *run = "\n\n<tool_call>\n<function=bash>\n<parameter=command>\nfirst\n</parameter>\n</function>\n</tool_call>" "\n" "<tool_call>\n<function=bash>\n<parameter=command>\nsecond\n</parameter>\n</function>\n</tool_call>";
@@ -26579,6 +26684,8 @@ static void ds4_server_unit_tests_run(void) {
     test_tool_body_escape_round_trip();
     test_tool_memory_max_ids_prunes_oldest();
     test_kv_tool_map_filters_by_dsml_text();
+    test_content_structural_syntax_renders_verbatim();
+    test_argument_body_quotes_are_escaped_but_content_is_not();
     test_kv_tool_map_persists_qwen_syntax_blocks();
     test_kv_tool_map_restores_before_prompt_render();
     test_kv_tool_map_bootstrap_reads_real_trailer_layout();

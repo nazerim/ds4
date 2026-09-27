@@ -97,3 +97,90 @@ commands and the probe script shape in git history / log archives):
 - Verdict on the 19:52 unterminated-tool-call class: flake vs triggered;
   if triggered, fix + regression test.
 - No cache-key churn without an explicit migration note.
+
+## AUDIT RESULTS 2026-09-28 ~03:00 (overnight autonomous pass)
+
+### Policy inventory: what already exists
+1. Tool-argument bodies ARE escaped in both directions.  On render,
+   append_dsml_parameter_text and append_glm_tag_body_text entity-escape any
+   byte that would open the closing wrapper (plus ampersands); on parse,
+   ds4_tool_text_unescape reverses it.  Covered by
+   test_tool_body_escape_round_trip and test_tool_control_text_inside_arguments.
+2. Output scanning for control markers skips wrapper regions:
+   find_tool_structural_text ("tool arguments are literal data, including
+   protocol-looking text").  Used for the thinking closer and the tool
+   envelope closers across all three parser families (deepseek/ds41, glm,
+   qwen).
+3. INPUT rendering has NO policy.  Message content is appended verbatim --
+   append_trimmed_text only trims leading/trailing whitespace, and no
+   sanitizer symbol exists anywhere in ds4_server.c.  On the encode side,
+   ds4.c tokenize_rendered_chat_vocab walks the entire rendered text and maps
+   27 structural strings to real structural token ids through
+   special_token_at (ds4.c ~43575), with no context awareness.  Those ids are
+   vocab lookups of the same strings the renderer emits for real structure.
+
+So the asymmetry is the finding: argument values are carefully escaped both
+ways, message content is not escaped at all.
+
+### Confirmed live (evidence, not inference)
+Probe against the running engine (8 tiny requests, content carrying one
+structural marker each versus an inert same-length control; script shape:
+rendered-prompt sections of log/ds4-qwen.trace inspected by count only).
+Result: the injected markers appear in the rendered prompt alongside the
+renderer's own -- a system+user request renders two role-end markers, and the
+injected case shows three.  Content-borne structure therefore reaches the
+token stream as real structure.
+prompt_tokens deltas were 0 or -1.  That is NOT weak evidence against the
+finding; it confirms the sharper form of it: because the structural ids are
+vocab lookups of the same strings, BPE and structural mapping yield the same
+id, so content-borne structure is token-IDENTICAL to real structure and
+indistinguishable to the model.
+
+### Cache-key assessment (corrects the concern in the handoff above)
+Keys are the sha1 of the rendered TEXT, so two distinct conversations cannot
+collide onto one key, and the mapping being a deterministic text-to-token
+function leaves cache consistency intact.  This is therefore NOT a KV
+correctness bug and fixing it needs no KV format change.  The real exposure is
+injection, not collision.
+
+### Verdict on the 19:52 unterminated-tool-call event
+Mechanism is now specific and plausible: content quoting a tool envelope
+opener injects a real structural opener into the model's view of the prompt;
+the model can then continue inside what it believes is a tool call, and the
+decode tracker can reach the stop token with an unclosed envelope, which is
+exactly the logged error.  NOT PROVEN for that single event (1 of 149 tool
+turns, content not preserved).  A repro is now cheap to build: one request
+whose user content quotes an envelope opener, a long generation, then watch
+the DSML flags and finish reason in the trace.
+
+### Options (decision needed; gated by the no-churn rule above)
+- Option A - output-side hardening, ZERO cache-key impact.  Make an envelope
+  opener that is never closed by end-of-generation degrade to inert text
+  instead of erroring the turn, and extend the quoted-markup inertness that
+  find_tool_structural_text already provides for argument wrappers to
+  free text and thinking.  Recommended first move.
+- Option B - input-side neutralization.  Escape structural strings inside
+  message CONTENT at render time using the entity scheme already applied to
+  argument bodies, so the tokenizer can never see them as structure.  This
+  changes rendered text, so every lineage whose content contains such strings
+  becomes unreachable: with ~378 GiB on the blade and live pi/opencode
+  sessions, that is a one-time full rebuild per affected conversation.  If
+  pursued, implement behind an env flag defaulting to today's behaviour and
+  flip it only alongside a planned purge.
+- Option C - document and accept.  Content-borne structure stays
+  indistinguishable; rely on Option A for robustness.
+
+### Next concrete steps
+1. Model-free tests pinning CURRENT input behaviour (content containing each
+   structural string renders verbatim), so an accidental change is caught and
+   the gap stays documented rather than folklore.
+2. Build the unterminated-tool-call repro, then implement Option A with that
+   repro as the failing test.
+3. Take Option B versus C to the user; B is a policy decision about injection
+   risk versus a cache rebuild, not an engineering question.
+
+Note on harness-side spillover: while running this pass, quoted tool markup in
+assistant prose broke the opencode session twice (parsed as live tool calls)
+and a stray code-fence character terminated a turn.  That is the client-side
+face of the same problem class and is tracked separately in PiScratch;
+nothing here changes ds4 behaviour for it.
