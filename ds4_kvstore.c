@@ -1770,8 +1770,13 @@ static int kv_store_pick_parent(ds4_kvstore *kc, ds4_engine *engine,
                                 const ds4_tokens *tokens,
                                 int model_id, int quant_bits,
                                 char out_sha[41], uint32_t *out_from) {
-    int skip[8];
+    /* One skip mark per index: every pass either returns a parent or marks
+     * the picked candidate permanently, so the loop is bounded by kc->len.
+     * A fixed cap here once livelocked a slot worker re-verifying the same
+     * unskippable candidate forever (2026-09-27). */
+    int *skip = NULL;
     int skip_len = 0;
+    if (kc->len > 0) skip = kv_xmalloc((size_t)kc->len * sizeof(int));
     for (;;) {
         int best = -1;
         uint32_t best_tokens = 0;
@@ -1790,8 +1795,8 @@ static int kv_store_pick_parent(ds4_kvstore *kc, ds4_engine *engine,
             best = i;
             best_tokens = (uint32_t)o->tokens;
         }
-        if (best < 0) return -1;
-        if (skip_len < (int)(sizeof(skip) / sizeof(skip[0]))) skip[skip_len++] = best;
+        if (best < 0) { free(skip); return -1; }
+        skip[skip_len++] = best;
 
         const ds4_kvstore_entry *o = &kc->entry[best];
         bool ok = false;
@@ -1821,6 +1826,7 @@ static int kv_store_pick_parent(ds4_kvstore *kc, ds4_engine *engine,
             fclose(fp);
         }
         if (ok) {
+            free(skip);
             memcpy(out_sha, o->sha, 41);
             *out_from = (uint32_t)o->tokens;
             return best;
