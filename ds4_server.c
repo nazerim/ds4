@@ -11185,24 +11185,56 @@ static char *path_join(const char *dir, const char *name) {
 
 
 
-static const char *find_next_dsml_tool_block(const char *p, const char **end_out) {
-    struct block_form {
-        const char *start;
-        const char *end;
-    } forms[] = {
-        {"\n\n" DS41_TOOL_CALLS_START, DS41_TOOL_CALLS_END},
-        {DS41_TOOL_CALLS_START, DS41_TOOL_CALLS_END},
-        {"\n\n" DS4_TOOL_CALLS_START, DS4_TOOL_CALLS_END},
-        {DS4_TOOL_CALLS_START, DS4_TOOL_CALLS_END},
-        {"\n\n" DS4_TOOL_CALLS_START_SHORT, DS4_TOOL_CALLS_END_SHORT},
-        {DS4_TOOL_CALLS_START_SHORT, DS4_TOOL_CALLS_END_SHORT},
-        {"\n\n<tool_calls>", "</tool_calls>"},
-        {"<tool_calls>", "</tool_calls>"},
-    };
+/* Qwen/GLM emit one envelope per call, so parse_qwen_generated_message_ex
+ * records a whole message of calls as a single raw span: a run of adjacent
+ * blocks whose separating and trailing whitespace is inside the span, and
+ * whose leading newline/space run was absorbed before the first opener.
+ * DeepSeek DSML instead wraps every call of a message in one plural envelope.
+ * Both shapes must be findable in the stored text, otherwise the tool-map
+ * trailer is written empty -- the field finding behind tool_replay disk=0 on
+ * every qwen store, which made each restart re-render every replayed tool
+ * call canonically and orphaned all pre-restart checkpoints past the first
+ * replayed call. */
+#define QWEN_TOOL_CALL_START "<tool_call>"
+#define QWEN_TOOL_CALL_END "</tool_call>"
 
+/* Bound on how many whitespace bytes either side of an envelope run are
+ * offered to the block index.  Real spans absorb at most a couple of
+ * newlines; the cap only exists to keep the probe count bounded. */
+#define KV_TOOL_MAP_WS_PROBE 8
+
+struct tool_block_form {
+    const char *start;
+    const char *end;
+    bool singular;
+};
+
+static const struct tool_block_form *tool_block_forms(size_t *n_out) {
+    static const struct tool_block_form forms[] = {
+        {"\n\n" DS41_TOOL_CALLS_START, DS41_TOOL_CALLS_END, false},
+        {DS41_TOOL_CALLS_START, DS41_TOOL_CALLS_END, false},
+        {"\n\n" DS4_TOOL_CALLS_START, DS4_TOOL_CALLS_END, false},
+        {DS4_TOOL_CALLS_START, DS4_TOOL_CALLS_END, false},
+        {"\n\n" DS4_TOOL_CALLS_START_SHORT, DS4_TOOL_CALLS_END_SHORT, false},
+        {DS4_TOOL_CALLS_START_SHORT, DS4_TOOL_CALLS_END_SHORT, false},
+        {"\n\n" QWEN_TOOL_CALL_START, QWEN_TOOL_CALL_END, true},
+        {QWEN_TOOL_CALL_START, QWEN_TOOL_CALL_END, true},
+        {"\n\n<tool_calls>", "</tool_calls>", false},
+        {"<tool_calls>", "</tool_calls>", false},
+    };
+    if (n_out) *n_out = sizeof(forms) / sizeof(forms[0]);
+    return forms;
+}
+
+/* Earliest tool-call envelope at or after p, across every supported syntax.
+ * The returned start is the form's own start, so a form carrying the "\n\n"
+ * separator returns a pointer two bytes before the opener tag. */
+static const char *find_next_tool_block(const char *p, const char **end_out) {
+    size_t n = 0;
+    const struct tool_block_form *forms = tool_block_forms(&n);
     const char *best = NULL;
     const char *best_end = NULL;
-    for (size_t i = 0; i < sizeof(forms) / sizeof(forms[0]); i++) {
+    for (size_t i = 0; i < n; i++) {
         const char *s = strstr(p, forms[i].start);
         if (!s || (best && s >= best)) continue;
         const char *e = strstr(s, forms[i].end);
@@ -11214,40 +11246,136 @@ static const char *find_next_dsml_tool_block(const char *p, const char **end_out
     return best;
 }
 
+/* Boundaries of the adjacent-block run that starts with the block ending at
+ * first_end, mirroring the parser loop: whitespace between blocks belongs to
+ * the span.  Every boundary is returned, not just the last one, because two
+ * remembered spans can end up back to back in the rendered text -- then the
+ * maximal run is longer than either key and only an interior boundary matches.
+ * Increasing order, capped at KV_TOOL_MAP_MAX_RUN. */
+#define KV_TOOL_MAP_MAX_RUN 16
+
+static int tool_block_run_ends(const char *first_end, const char **ends,
+                               int max_ends) {
+    size_t n = 0;
+    const struct tool_block_form *forms = tool_block_forms(&n);
+    const char *end = first_end;
+    int n_ends = 0;
+    if (max_ends < 1) return 0;
+    ends[n_ends++] = end;
+    while (n_ends < max_ends) {
+        const char *q = skip_ascii_ws(end);
+        bool another = false;
+        for (size_t i = 0; i < n && !another; i++) {
+            if (!forms[i].singular) continue;
+            if (strncmp(q, forms[i].start, strlen(forms[i].start)) == 0) another = true;
+        }
+        if (!another) break;
+        const char *e = strstr(q, QWEN_TOOL_CALL_END);
+        if (!e) break;
+        end = e + strlen(QWEN_TOOL_CALL_END);
+        ends[n_ends++] = end;
+    }
+    return n_ends;
+}
+
+/* Look a scanned span up in the block index, offering the shapes the parsers
+ * actually record: any prefix of the adjacent-block run, plus the whitespace
+ * fringe they absorb (a leading run of newlines/spaces before the first
+ * opener, trailing whitespace after the last closer).  The render context can
+ * carry more fringe than the original sample did, so every combination is
+ * probed in a fixed order -- longest run first, then increasing fringe -- so
+ * the size estimate and the writer always agree on the same match. */
+static tool_memory_block *tool_memory_find_span_locked(tool_memory *m,
+                                                       const char *opener,
+                                                       const char *block_end,
+                                                       const char **matched_end_out) {
+    const char *ends[KV_TOOL_MAP_MAX_RUN];
+    int n_ends = tool_block_run_ends(block_end, ends, KV_TOOL_MAP_MAX_RUN);
+
+    for (int ei = n_ends - 1; ei >= 0; ei--) {
+        const char *e = ends[ei];
+        for (int j = 0; j <= KV_TOOL_MAP_WS_PROBE; j++) {
+            const char *s = opener - j;
+            /* s[0] is the byte this iteration adds to the front of the span. */
+            if (j > 0 && (s[0] != '\n' && s[0] != ' ')) break;
+            for (int k = 0; k <= KV_TOOL_MAP_WS_PROBE; k++) {
+                const char *t = e + k;
+                if (k > 0 && !isspace((unsigned char)t[-1])) break;
+                tool_memory_block *b =
+                    tool_memory_find_block_locked(m, s, (size_t)(t - s));
+                if (b) {
+                    if (matched_end_out) *matched_end_out = t;
+                    return b;
+                }
+            }
+        }
+    }
+    if (matched_end_out) *matched_end_out = block_end;
+    return NULL;
+}
+
+typedef bool (*kv_tool_map_visit_fn)(tool_memory_block *b, void *ud);
+
+/* One scan shared by the size estimate and the writer, so the measured byte
+ * count and the bytes actually written can never drift apart.  Each distinct
+ * remembered block found in text is visited once, in text order. */
+static bool kv_tool_map_scan_locked(server *s, const char *text,
+                                    kv_tool_map_visit_fn visit, void *ud) {
+    uint64_t scan = ++s->tool_mem.scan_clock;
+    const char *p = text;
+    for (;;) {
+        const char *block_end = NULL;
+        const char *opener = find_next_tool_block(p, &block_end);
+        if (!opener || !block_end) break;
+        const char *matched_end = block_end;
+        tool_memory_block *b = tool_memory_find_span_locked(
+            &s->tool_mem, opener, block_end, &matched_end);
+        if (b && b->seen != scan) {
+            b->seen = scan;
+            if (!visit(b, ud)) return false;
+        }
+        p = matched_end > block_end ? matched_end : block_end;
+        if (p <= text) break;
+    }
+    return true;
+}
+
+
+struct kv_tool_map_measure {
+    uint32_t count;
+    uint64_t bytes;
+    bool overflow;
+};
+
+static bool kv_tool_map_measure_visit(tool_memory_block *b, void *ud) {
+    struct kv_tool_map_measure *m = ud;
+    for (tool_memory_entry *e = b->entries; e; e = e->block_next) {
+        size_t id_len = strlen(e->id);
+        size_t dsml_len = b->len;
+        if (id_len > UINT32_MAX || dsml_len > UINT32_MAX) continue;
+        if (m->count == UINT32_MAX ||
+            UINT64_MAX - m->bytes < 8u ||
+            UINT64_MAX - m->bytes - 8u < (uint64_t)id_len ||
+            UINT64_MAX - m->bytes - 8u - (uint64_t)id_len < (uint64_t)dsml_len) {
+            m->overflow = true;
+            return false;
+        }
+        m->count++;
+        m->bytes += 8u + (uint64_t)id_len + (uint64_t)dsml_len;
+    }
+    return true;
+}
 
 static bool kv_tool_map_measure_locked(server *s, const char *text,
                                        uint32_t *count_out,
                                        uint64_t *bytes_out) {
-    uint32_t count = 0;
-    uint64_t bytes = KV_TOOL_MAP_HEADER;
-    uint64_t scan = ++s->tool_mem.scan_clock;
-    const char *p = text;
-    for (;;) {
-        const char *end = NULL;
-        const char *start = find_next_dsml_tool_block(p, &end);
-        if (!start || !end) break;
-        tool_memory_block *b =
-            tool_memory_find_block_locked(&s->tool_mem, start, (size_t)(end - start));
-        if (b && b->seen != scan) {
-            b->seen = scan;
-            for (tool_memory_entry *e = b->entries; e; e = e->block_next) {
-                size_t id_len = strlen(e->id);
-                size_t dsml_len = b->len;
-                if (id_len > UINT32_MAX || dsml_len > UINT32_MAX) continue;
-                if (count == UINT32_MAX) return false;
-                if (UINT64_MAX - bytes < 8u ||
-                    UINT64_MAX - bytes - 8u < (uint64_t)id_len ||
-                    UINT64_MAX - bytes - 8u - (uint64_t)id_len < (uint64_t)dsml_len)
-                    return false;
-                count++;
-                bytes += 8u + (uint64_t)id_len + (uint64_t)dsml_len;
-            }
-        }
-        p = end;
-    }
-    if (count == 0) bytes = 0;
-    if (count_out) *count_out = count;
-    if (bytes_out) *bytes_out = bytes;
+    struct kv_tool_map_measure m = {0, KV_TOOL_MAP_HEADER, false};
+    if (!kv_tool_map_scan_locked(s, text, kv_tool_map_measure_visit, &m))
+        return false;
+    if (m.overflow) return false;
+    if (m.count == 0) m.bytes = 0;
+    if (count_out) *count_out = m.count;
+    if (bytes_out) *bytes_out = m.bytes;
     return true;
 }
 
@@ -11262,6 +11390,27 @@ static bool kv_tool_map_serialized_size(server *s, const char *text,
     return ok;
 }
 
+struct kv_tool_map_writer {
+    FILE *fp;
+    bool ok;
+};
+
+static bool kv_tool_map_write_visit(tool_memory_block *b, void *ud) {
+    struct kv_tool_map_writer *w = ud;
+    for (tool_memory_entry *e = b->entries; e && w->ok; e = e->block_next) {
+        size_t id_len = strlen(e->id);
+        size_t dsml_len = b->len;
+        if (id_len > UINT32_MAX || dsml_len > UINT32_MAX) continue;
+        uint8_t lens[8];
+        le_put32(lens, (uint32_t)id_len);
+        le_put32(lens + 4, (uint32_t)dsml_len);
+        w->ok = fwrite(lens, 1, sizeof(lens), w->fp) == sizeof(lens) &&
+                fwrite(e->id, 1, id_len, w->fp) == id_len &&
+                fwrite(b->dsml, 1, dsml_len, w->fp) == dsml_len;
+    }
+    return w->ok;
+}
+
 static bool kv_tool_map_write(server *s, FILE *fp, const char *text,
                               uint64_t *written_bytes) {
     if (written_bytes) *written_bytes = 0;
@@ -11271,13 +11420,9 @@ static bool kv_tool_map_write(server *s, FILE *fp, const char *text,
     uint32_t count = 0;
     uint64_t bytes = 0;
     bool ok = kv_tool_map_measure_locked(s, text, &count, &bytes);
-    if (!ok) {
+    if (!ok || count == 0) {
         pthread_mutex_unlock(&s->tool_mu);
-        return false;
-    }
-    if (count == 0) {
-        pthread_mutex_unlock(&s->tool_mu);
-        return true;
+        return ok;
     }
 
     uint8_t h[KV_TOOL_MAP_HEADER];
@@ -11288,30 +11433,9 @@ static bool kv_tool_map_write(server *s, FILE *fp, const char *text,
     le_put32(h + 4, count);
     ok = fwrite(h, 1, sizeof(h), fp) == sizeof(h);
 
-    uint64_t scan = ++s->tool_mem.scan_clock;
-    const char *p = text;
-    for (;;) {
-        const char *end = NULL;
-        const char *start = find_next_dsml_tool_block(p, &end);
-        if (!start || !end || !ok) break;
-        tool_memory_block *b =
-            tool_memory_find_block_locked(&s->tool_mem, start, (size_t)(end - start));
-        if (b && b->seen != scan) {
-            b->seen = scan;
-            for (tool_memory_entry *e = b->entries; ok && e; e = e->block_next) {
-                size_t id_len = strlen(e->id);
-                size_t dsml_len = b->len;
-                if (id_len > UINT32_MAX || dsml_len > UINT32_MAX) continue;
-                uint8_t lens[8];
-                le_put32(lens, (uint32_t)id_len);
-                le_put32(lens + 4, (uint32_t)dsml_len);
-                ok = fwrite(lens, 1, sizeof(lens), fp) == sizeof(lens) &&
-                     fwrite(e->id, 1, id_len, fp) == id_len &&
-                     fwrite(b->dsml, 1, dsml_len, fp) == dsml_len;
-            }
-        }
-        p = end;
-    }
+    struct kv_tool_map_writer w = {fp, ok};
+    if (ok)
+        ok = kv_tool_map_scan_locked(s, text, kv_tool_map_write_visit, &w) && w.ok;
     pthread_mutex_unlock(&s->tool_mu);
 
     if (ok && written_bytes) *written_bytes = bytes;
@@ -23468,6 +23592,92 @@ static void test_kv_tool_map_filters_by_dsml_text(void) {
     pthread_mutex_destroy(&dst.tool_mu);
 }
 
+/* Field finding 2026-09-28 (pi drift verdict fix #2): the tool-map trailer
+ * was written EMPTY for every qwen store, so tool_replay disk=0 forever and
+ * each restart flipped every replayed tool call back to canonical rendering,
+ * orphaning all pre-restart checkpoints past the first replayed call.  Root
+ * cause: the trailer scanner only knew the DeepSeek DSML envelopes, while the
+ * qwen/GLM renderers emit the singular per-call envelope.  The bootstrap load
+ * side (kv_cache_restore_tool_memory_for_messages) is id-keyed and already
+ * syntax-agnostic, so populating the trailer is what closes the loop.
+ *
+ * Span shapes exercised here mirror parse_qwen_generated_message_ex exactly:
+ * leading run of newlines/spaces absorbed before the first opener, adjacent
+ * blocks folded into one span, and trailing ascii whitespace after the last
+ * closer included.  Extra newlines in the surrounding render context must not
+ * change which stored span is matched. */
+static void test_kv_tool_map_persists_qwen_syntax_blocks(void) {
+    const char *single = "\n\n<tool_call>\n<function=bash>\n<parameter=command>\npwd\n</parameter>\n</function>\n</tool_call>";
+    const char *run = "\n\n<tool_call>\n<function=bash>\n<parameter=command>\nfirst\n</parameter>\n</function>\n</tool_call>" "\n" "<tool_call>\n<function=bash>\n<parameter=command>\nsecond\n</parameter>\n</function>\n</tool_call>";
+    const char *trailing = "\n\n<tool_call>\n<function=bash>\n<parameter=command>\nthird\n</parameter>\n</function>\n</tool_call>\n\n";
+    const char *unremembered = "\n\n<tool_call>\n<function=bash>\n<parameter=command>\nfourth\n</parameter>\n</function>\n</tool_call>";
+
+    server src = {0}, dst = {0};
+    pthread_mutex_init(&src.tool_mu, NULL);
+    pthread_mutex_init(&dst.tool_mu, NULL);
+    tool_memory_put(&src, "call_single", single);
+    tool_memory_put(&src, "call_run", run);
+    tool_memory_put(&src, "call_trailing", trailing);
+
+    /* Rendered store text: visible content plus the verbatim raw spans.  The
+     * first span sits after content that already ends in a newline, so the
+     * text carries three newlines where the span itself recorded two. */
+    buf text = {0};
+    buf_puts(&text, "assistant visible content\n");
+    buf_puts(&text, single);
+    buf_puts(&text, "\nmore content");
+    buf_puts(&text, run);
+    buf_puts(&text, trailing);
+    buf_puts(&text, unremembered);
+    buf_puts(&text, "tail");
+
+    uint64_t estimated = 0;
+    TEST_ASSERT(kv_tool_map_serialized_size(&src, text.ptr, &estimated));
+    TEST_ASSERT(estimated > KV_TOOL_MAP_HEADER);
+
+    FILE *fp = tmpfile();
+    TEST_ASSERT(fp != NULL);
+    uint64_t bytes = 0;
+    TEST_ASSERT(kv_tool_map_write(&src, fp, text.ptr, &bytes));
+    TEST_ASSERT(bytes == estimated);
+    TEST_ASSERT(bytes > KV_TOOL_MAP_HEADER);
+    rewind(fp);
+    TEST_ASSERT(kv_tool_map_load_from_pos(&dst, fp, NULL) == 3);
+
+    chat_msgs msgs = {0};
+    const char *ids[4] = {"call_single", "call_run", "call_trailing", "call_missing"};
+    for (int i = 0; i < 4; i++) {
+        chat_msg m = {0};
+        m.role = xstrdup("assistant");
+        tool_call tc = {0};
+        tc.id = xstrdup(ids[i]);
+        tc.name = xstrdup("bash");
+        tc.arguments = xstrdup("{\"command\":\"canonical\"}");
+        tool_calls_push(&m.calls, tc);
+        chat_msgs_push(&msgs, m);
+    }
+    tool_replay_stats stats = {0};
+    tool_memory_attach_to_messages(&dst, &msgs, &stats);
+    TEST_ASSERT(stats.disk == 3);
+    TEST_ASSERT(stats.canonical == 1);
+    TEST_ASSERT(stats.missing_ids == 1);
+    TEST_ASSERT(msgs.v[0].calls.raw_tool_text &&
+                !strcmp(msgs.v[0].calls.raw_tool_text, single));
+    TEST_ASSERT(msgs.v[1].calls.raw_tool_text &&
+                !strcmp(msgs.v[1].calls.raw_tool_text, run));
+    TEST_ASSERT(msgs.v[2].calls.raw_tool_text &&
+                !strcmp(msgs.v[2].calls.raw_tool_text, trailing));
+    TEST_ASSERT(msgs.v[3].calls.raw_tool_text == NULL);
+
+    chat_msgs_free(&msgs);
+    buf_free(&text);
+    if (fp) fclose(fp);
+    tool_memory_free(&src.tool_mem);
+    tool_memory_free(&dst.tool_mem);
+    pthread_mutex_destroy(&src.tool_mu);
+    pthread_mutex_destroy(&dst.tool_mu);
+}
+
 static void test_kv_tool_map_restores_before_prompt_render(void) {
     char tmpl[] = "/tmp/ds4-kv-tool-map-test.XXXXXX";
     char *dir = mkdtemp(tmpl);
@@ -26238,6 +26448,7 @@ static void ds4_server_unit_tests_run(void) {
     test_tool_body_escape_round_trip();
     test_tool_memory_max_ids_prunes_oldest();
     test_kv_tool_map_filters_by_dsml_text();
+    test_kv_tool_map_persists_qwen_syntax_blocks();
     test_kv_tool_map_restores_before_prompt_render();
     test_thinking_checkpoint_canonical_matches_future_prompt();
     test_prompt_text_drop_oldest_images();
