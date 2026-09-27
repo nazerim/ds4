@@ -62664,8 +62664,13 @@ void ds4_session_payload_file_free(ds4_session_payload_file *payload) {
     memset(payload, 0, sizeof(*payload));
 }
 
-int ds4_session_stage_payload(ds4_session *s, ds4_session_payload_file *out,
-                              char *err, size_t errlen) {
+#ifdef DS4_HAS_QWEN4_GPU
+static int qwen4_session_save_payload_span(ds4_session *s, FILE *fp,
+                                           uint32_t rows_from, char *err, size_t errlen);
+#endif
+
+static int ds4_session_stage_payload_impl(ds4_session *s, ds4_session_payload_file *out,
+                                          uint32_t rows_from, char *err, size_t errlen) {
     if (!out) {
         payload_set_err(err, errlen, "invalid session payload staging request");
         return 1;
@@ -62692,7 +62697,21 @@ int ds4_session_stage_payload(ds4_session *s, ds4_session_payload_file *out,
         return 1;
     }
 
-    int rc = ds4_session_save_payload(s, fp, err, errlen);
+    int rc;
+#ifdef DS4_HAS_QWEN4_GPU
+    if (rows_from > 0) {
+        if (s->distributed || (s->engine && s->engine->tp.active) ||
+            !ds4_session_is_qwen4(s)) {
+            payload_set_err(err, errlen, "delta payload staging requires a local Qwen3.8 checkpoint");
+            rc = 1;
+        } else {
+            rc = qwen4_session_save_payload_span(s, fp, rows_from, err, errlen);
+        }
+    } else
+#endif
+    {
+        rc = ds4_session_save_payload(s, fp, err, errlen);
+    }
     if (rc == 0 && fflush(fp) != 0) {
         payload_set_err(err, errlen, "failed to flush staged session payload");
         rc = 1;
@@ -62716,6 +62735,16 @@ int ds4_session_stage_payload(ds4_session *s, ds4_session_payload_file *out,
     out->path = ds4_strdup(tmpl);
     out->bytes = (uint64_t)pos;
     return 0;
+}
+
+int ds4_session_stage_payload(ds4_session *s, ds4_session_payload_file *out,
+                              char *err, size_t errlen) {
+    return ds4_session_stage_payload_impl(s, out, 0, err, errlen);
+}
+
+int ds4_session_stage_payload_span(ds4_session *s, ds4_session_payload_file *out,
+                                   uint32_t rows_from, char *err, size_t errlen) {
+    return ds4_session_stage_payload_impl(s, out, rows_from, err, errlen);
 }
 
 #ifdef DS4_HAS_QWEN4_GPU
@@ -62762,7 +62791,9 @@ static uint64_t qwen4_payload_tensor_bytes(uint32_t rows, uint32_t mtp_rows) {
     return bytes;
 }
 
-static int qwen4_session_save_payload(ds4_session *s, FILE *fp, char *err, size_t errlen) {
+static int qwen4_session_save_payload_span(ds4_session *s, FILE *fp,
+                                           uint32_t rows_from,
+                                           char *err, size_t errlen) {
     if (!s->qwen4_graph_ready || s->qwen4_rewound ||
         s->qwen4_graph.pos != (uint32_t)s->checkpoint.len) {
         payload_set_err(err, errlen, "Qwen3.8 snapshot requires sync or eval after rewind");
@@ -62776,6 +62807,10 @@ static int qwen4_session_save_payload(ds4_session *s, FILE *fp, char *err, size_
     const uint32_t rows = (uint32_t)s->checkpoint.len;
     if (g->pos != rows) {
         payload_set_err(err, errlen, "Qwen3.8 graph position does not match the checkpoint");
+        return 1;
+    }
+    if (rows_from > rows || (rows_from % 4u) != 0u || (rows % 4u) != 0u) {
+        payload_set_err(err, errlen, "Qwen3.8 delta span must align to row groups of 4");
         return 1;
     }
     uint32_t header[DS4_SESSION_PAYLOAD_U32_FIELDS] = {
@@ -62812,15 +62847,31 @@ static int qwen4_session_save_payload(ds4_session *s, FILE *fp, char *err, size_
                 rc = payload_write_tensor_span(fp, g->layer_lin_hist[il], 0, qwen4_payload_lin_hist_bytes(),
                                                buf, DS4_SESSION_IO_CHUNK, err, errlen);
             }
-        } else {
-            const uint32_t n = ds4_qwen4_layer_is_nextn(il) ? mtp_rows : rows;
-            rc = payload_write_tensor_span(fp, g->layer_k_cache[il], 0, qwen4_payload_kv_bytes(n),
+        } else if (ds4_qwen4_layer_is_nextn(il)) {
+            /* MTP history is small and tracked by its own row count; P1
+             * copies it whole so delta chaining only needs the main rows. */
+            rc = payload_write_tensor_span(fp, g->layer_k_cache[il], 0, qwen4_payload_kv_bytes(mtp_rows),
                                            buf, DS4_SESSION_IO_CHUNK, err, errlen);
-            if (rc == 0) rc = payload_write_tensor_span(fp, g->layer_v_cache[il], 0, qwen4_payload_kv_bytes(n),
+            if (rc == 0) rc = payload_write_tensor_span(fp, g->layer_v_cache[il], 0, qwen4_payload_kv_bytes(mtp_rows),
                                                         buf, DS4_SESSION_IO_CHUNK, err, errlen);
-            if (rc == 0) rc = payload_write_tensor_span(fp, g->layer_ik_cache[il], 0, qwen4_payload_ik_bytes(n),
+            if (rc == 0) rc = payload_write_tensor_span(fp, g->layer_ik_cache[il], 0, qwen4_payload_ik_bytes(mtp_rows),
                                                         buf, DS4_SESSION_IO_CHUNK, err, errlen);
-            if (rc == 0) rc = payload_write_tensor_span(fp, g->layer_block_key[il], 0, qwen4_payload_block_key_bytes(n),
+            if (rc == 0) rc = payload_write_tensor_span(fp, g->layer_block_key[il], 0, qwen4_payload_block_key_bytes(mtp_rows),
+                                                        buf, DS4_SESSION_IO_CHUNK, err, errlen);
+        } else {
+            const uint64_t k_off = qwen4_payload_kv_bytes(rows_from);
+            const uint64_t k_len = qwen4_payload_kv_bytes(rows) - k_off;
+            const uint64_t ik_off = qwen4_payload_ik_bytes(rows_from);
+            const uint64_t ik_len = qwen4_payload_ik_bytes(rows) - ik_off;
+            const uint64_t bk_off = qwen4_payload_block_key_bytes(rows_from);
+            const uint64_t bk_len = qwen4_payload_block_key_bytes(rows) - bk_off;
+            rc = payload_write_tensor_span(fp, g->layer_k_cache[il], k_off, k_len,
+                                           buf, DS4_SESSION_IO_CHUNK, err, errlen);
+            if (rc == 0) rc = payload_write_tensor_span(fp, g->layer_v_cache[il], k_off, k_len,
+                                                        buf, DS4_SESSION_IO_CHUNK, err, errlen);
+            if (rc == 0) rc = payload_write_tensor_span(fp, g->layer_ik_cache[il], ik_off, ik_len,
+                                                        buf, DS4_SESSION_IO_CHUNK, err, errlen);
+            if (rc == 0) rc = payload_write_tensor_span(fp, g->layer_block_key[il], bk_off, bk_len,
                                                         buf, DS4_SESSION_IO_CHUNK, err, errlen);
         }
     }
@@ -62833,15 +62884,21 @@ static int qwen4_session_save_payload(ds4_session *s, FILE *fp, char *err, size_
     }
     if (rc == 0) rc = payload_write_u32(fp, (uint32_t)g->mrope_delta, err, errlen);
     if (rc == 0) {
-        rc = payload_write_tensor_span(fp, g->pos3, 0, (uint64_t)rows * 16u,
+        rc = payload_write_tensor_span(fp, g->pos3, (uint64_t)rows_from * 16u,
+                                       (uint64_t)(rows - rows_from) * 16u,
                                        buf, DS4_SESSION_IO_CHUNK, err, errlen);
     }
     free(buf);
     return rc;
 }
 
-static int qwen4_session_load_payload(ds4_session *s, FILE *fp, const uint32_t *h, uint64_t *remaining,
-                                      char *err, size_t errlen) {
+static int qwen4_session_save_payload(ds4_session *s, FILE *fp, char *err, size_t errlen) {
+    return qwen4_session_save_payload_span(s, fp, 0, err, errlen);
+}
+
+static int qwen4_session_load_payload_span(ds4_session *s, FILE *fp, const uint32_t *h,
+                                           uint64_t *remaining, uint32_t rows_from,
+                                           char *err, size_t errlen) {
     if (!s->qwen4_graph_ready) {
         payload_set_err(err, errlen, "Qwen3.8 graph is not ready for restore");
         return 1;
@@ -62855,6 +62912,10 @@ static int qwen4_session_load_payload(ds4_session *s, FILE *fp, const uint32_t *
     }
     if (rows > g->ctx_cap || rows > (uint32_t)s->ctx_size) {
         payload_set_err(err, errlen, "KV checkpoint is longer than this session's context");
+        return 1;
+    }
+    if (rows_from > rows || (rows_from % 4u) != 0u || (rows % 4u) != 0u) {
+        payload_set_err(err, errlen, "KV delta span is not row-aligned or exceeds the checkpoint");
         return 1;
     }
     token_vec new_checkpoint = {0};
@@ -62902,15 +62963,29 @@ static int qwen4_session_load_payload(ds4_session *s, FILE *fp, const uint32_t *
                 rc = payload_read_tensor_span(fp, g->layer_lin_hist[il], 0, qwen4_payload_lin_hist_bytes(),
                                               buf, DS4_SESSION_IO_CHUNK, remaining, err, errlen);
             }
-        } else {
-            const uint32_t n = ds4_qwen4_layer_is_nextn(il) ? mtp_rows : rows;
-            rc = payload_read_tensor_span(fp, g->layer_k_cache[il], 0, qwen4_payload_kv_bytes(n),
+        } else if (ds4_qwen4_layer_is_nextn(il)) {
+            rc = payload_read_tensor_span(fp, g->layer_k_cache[il], 0, qwen4_payload_kv_bytes(mtp_rows),
                                           buf, DS4_SESSION_IO_CHUNK, remaining, err, errlen);
-            if (rc == 0) rc = payload_read_tensor_span(fp, g->layer_v_cache[il], 0, qwen4_payload_kv_bytes(n),
+            if (rc == 0) rc = payload_read_tensor_span(fp, g->layer_v_cache[il], 0, qwen4_payload_kv_bytes(mtp_rows),
                                                        buf, DS4_SESSION_IO_CHUNK, remaining, err, errlen);
-            if (rc == 0) rc = payload_read_tensor_span(fp, g->layer_ik_cache[il], 0, qwen4_payload_ik_bytes(n),
+            if (rc == 0) rc = payload_read_tensor_span(fp, g->layer_ik_cache[il], 0, qwen4_payload_ik_bytes(mtp_rows),
                                                        buf, DS4_SESSION_IO_CHUNK, remaining, err, errlen);
-            if (rc == 0) rc = payload_read_tensor_span(fp, g->layer_block_key[il], 0, qwen4_payload_block_key_bytes(n),
+            if (rc == 0) rc = payload_read_tensor_span(fp, g->layer_block_key[il], 0, qwen4_payload_block_key_bytes(mtp_rows),
+                                                       buf, DS4_SESSION_IO_CHUNK, remaining, err, errlen);
+        } else {
+            const uint64_t k_off = qwen4_payload_kv_bytes(rows_from);
+            const uint64_t k_len = qwen4_payload_kv_bytes(rows) - k_off;
+            const uint64_t ik_off = qwen4_payload_ik_bytes(rows_from);
+            const uint64_t ik_len = qwen4_payload_ik_bytes(rows) - ik_off;
+            const uint64_t bk_off = qwen4_payload_block_key_bytes(rows_from);
+            const uint64_t bk_len = qwen4_payload_block_key_bytes(rows) - bk_off;
+            rc = payload_read_tensor_span(fp, g->layer_k_cache[il], k_off, k_len,
+                                          buf, DS4_SESSION_IO_CHUNK, remaining, err, errlen);
+            if (rc == 0) rc = payload_read_tensor_span(fp, g->layer_v_cache[il], k_off, k_len,
+                                                       buf, DS4_SESSION_IO_CHUNK, remaining, err, errlen);
+            if (rc == 0) rc = payload_read_tensor_span(fp, g->layer_ik_cache[il], ik_off, ik_len,
+                                                       buf, DS4_SESSION_IO_CHUNK, remaining, err, errlen);
+            if (rc == 0) rc = payload_read_tensor_span(fp, g->layer_block_key[il], bk_off, bk_len,
                                                        buf, DS4_SESSION_IO_CHUNK, remaining, err, errlen);
         }
     }
@@ -62933,7 +63008,8 @@ static int qwen4_session_load_payload(ds4_session *s, FILE *fp, const uint32_t *
         if (rc == 0) g->mrope_delta = (int32_t)v;
     }
     if (rc == 0) {
-        rc = payload_read_tensor_span(fp, g->pos3, 0, (uint64_t)rows * 16u,
+        rc = payload_read_tensor_span(fp, g->pos3, (uint64_t)rows_from * 16u,
+                                      (uint64_t)(rows - rows_from) * 16u,
                                       buf, DS4_SESSION_IO_CHUNK, remaining, err, errlen);
     }
     free(buf);
@@ -63304,10 +63380,82 @@ int ds4_session_save_payload(ds4_session *s, FILE *fp, char *err, size_t errlen)
 #endif
 }
 
+/* Verify that the payload about to be read from fp (positioned at its start)
+ * begins with exactly the given token prefix. Used by the delta-store chain
+ * to prove a parent checkpoint's rows belong to this child's token history
+ * before splicing its row span under the child's. */
+int ds4_session_payload_token_span(FILE *fp, uint32_t n_tokens,
+                                   const int *tokens,
+                                   char *err, size_t errlen) {
+    if (!fp || !tokens || n_tokens == 0) {
+        payload_set_err(err, errlen, "invalid payload token span request");
+        return 1;
+    }
+    uint32_t h[DS4_SESSION_PAYLOAD_U32_FIELDS];
+    for (uint32_t i = 0; i < DS4_SESSION_PAYLOAD_U32_FIELDS; i++) {
+        if (fread(&h[i], 4, 1, fp) != 1) {
+            payload_set_err(err, errlen, "truncated payload header");
+            return 1;
+        }
+    }
+    if (h[0] != DS4_SESSION_PAYLOAD_MAGIC ||
+        h[1] != DS4_SESSION_PAYLOAD_VERSION) {
+        payload_set_err(err, errlen, "unsupported payload version in token span");
+        return 1;
+    }
+    if (h[7] < n_tokens) {
+        payload_set_err(err, errlen, "payload token history is shorter than the expected prefix");
+        return 1;
+    }
+    for (uint32_t i = 0; i < n_tokens; i++) {
+        uint32_t v;
+        if (fread(&v, 4, 1, fp) != 1) {
+            payload_set_err(err, errlen, "truncated payload token history");
+            return 1;
+        }
+        if (v != (uint32_t)tokens[i]) {
+            payload_set_err(err, errlen, "payload token prefix mismatch");
+            return 1;
+        }
+    }
+    return 0;
+}
+
+bool ds4_session_supports_delta(const ds4_session *s) {
+#ifdef DS4_HAS_QWEN4_GPU
+    return s && !s->distributed && s->checkpoint_valid &&
+           !(s->engine && s->engine->tp.active) &&
+           ds4_session_is_qwen4((ds4_session *)s);
+#else
+    (void)s;
+    return false;
+#endif
+}
+
 int ds4_session_load_payload(ds4_session *s, FILE *fp, uint64_t payload_bytes, char *err, size_t errlen) {
+    return ds4_session_load_payload_span(s, fp, payload_bytes, 0, err, errlen);
+}
+
+int ds4_session_load_payload_span(ds4_session *s, FILE *fp, uint64_t payload_bytes,
+                                  uint32_t rows_from, char *err, size_t errlen) {
     if (!s || !fp) {
         payload_set_err(err, errlen, "invalid session payload load");
         return 1;
+    }
+    if (rows_from > 0) {
+        if (s->engine && s->engine->tp.active) {
+            payload_set_err(err, errlen, "delta payload spans are not supported with tensor parallelism");
+            return 1;
+        }
+#ifndef DS4_HAS_QWEN4_GPU
+        payload_set_err(err, errlen, "delta payload spans require the Qwen3.8 graph backend");
+        return 1;
+#else
+        if (!ds4_session_is_qwen4(s)) {
+            payload_set_err(err, errlen, "delta payload spans are only supported by Qwen3.8 checkpoints");
+            return 1;
+        }
+#endif
     }
     if (s->distributed) {
         return ds4_dist_session_load_payload(s->distributed, s, fp, payload_bytes, err, errlen);
@@ -63356,7 +63504,7 @@ int ds4_session_load_payload(ds4_session *s, FILE *fp, uint64_t payload_bytes, c
         payload_set_err(err, errlen, "graph backend support is not compiled in");
         return 1;
 #else
-        return qwen4_session_load_payload(s, fp, h, &remaining, err, errlen);
+        return qwen4_session_load_payload_span(s, fp, h, &remaining, rows_from, err, errlen);
 #endif
     }
     if (ds4_session_is_glm(s)) {

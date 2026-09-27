@@ -674,6 +674,17 @@ int ds4_session_write_staged_payload(const ds4_session_payload_file *payload,
 void ds4_session_payload_file_free(ds4_session_payload_file *payload);
 int ds4_session_save_payload(ds4_session *s, FILE *fp, char *err, size_t errlen);
 int ds4_session_load_payload(ds4_session *s, FILE *fp, uint64_t payload_bytes, char *err, size_t errlen);
+/* Delta (chained) checkpoints: a node persists only rows [rows_from, len) of
+ * the main attention tensors; rows [0, rows_from) come from the parent node.
+ * Supported for local Qwen3.8 graph sessions only (P1). */
+bool ds4_session_supports_delta(const ds4_session *s);
+int ds4_session_stage_payload_span(ds4_session *s, ds4_session_payload_file *out,
+                                   uint32_t rows_from, char *err, size_t errlen);
+int ds4_session_load_payload_span(ds4_session *s, FILE *fp, uint64_t payload_bytes,
+                                  uint32_t rows_from, char *err, size_t errlen);
+int ds4_session_payload_token_span(FILE *fp, uint32_t n_tokens,
+                                   const int *tokens,
+                                   char *err, size_t errlen);
 int ds4_session_save_snapshot(ds4_session *s, ds4_session_snapshot *snap, char *err, size_t errlen);
 int ds4_session_load_snapshot(ds4_session *s, const ds4_session_snapshot *snap, char *err, size_t errlen);
 void ds4_session_snapshot_free(ds4_session_snapshot *snap);

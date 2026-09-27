@@ -11565,7 +11565,7 @@ static bool kv_cache_file_size_fits(const kv_disk_cache *kc,
                                     uint64_t *file_bytes_out,
                                     uint64_t *required_bytes_out) {
     return ds4_kvstore_file_size_fits(kc, text_bytes, payload_bytes,
-                                      tool_map_bytes, file_bytes_out,
+                                      tool_map_bytes, false, file_bytes_out,
                                       required_bytes_out);
 }
 #endif

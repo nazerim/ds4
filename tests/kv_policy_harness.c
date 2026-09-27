@@ -202,6 +202,100 @@ static void scenario_idle_retired(void) {
     rmdir(dir);
 }
 
+/* Scenario D: delta-chain GC.  A v3 node keeps only rows [delta_from,
+ * tokens); deleting its parent would silently corrupt the chain, so eviction
+ * must DEFER parents while children exist, and reclaim them once the children
+ * die. */
+static void stub_file_v3(const char *dir, const char *text,
+                         const char *parent_text, uint8_t reason,
+                         uint32_t tokens, uint32_t delta_from,
+                         uint64_t last_used, uint64_t payload_bytes) {
+    char psha[41];
+    ds4_kvstore_sha1_bytes_hex(parent_text, strlen(parent_text), psha);
+    char sha[41];
+    ds4_kvstore_sha1_bytes_hex(text, strlen(text), sha);
+    char name[64];
+    snprintf(name, sizeof(name), "%.40s.kv", sha);
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    FILE *fp = fopen(path, "wb");
+    if (!fp) { perror("stub_file_v3 fopen"); exit(1); }
+    uint8_t h[DS4_KVSTORE_FIXED_HEADER + DS4_KVSTORE_HEADER_V3_EXTRA];
+    uint32_t bucket = DS4_KVSTORE_DEFAULT_ANCHOR_STEP > 0
+        ? tokens / (uint32_t)DS4_KVSTORE_DEFAULT_ANCHOR_STEP : 0;
+    ds4_kvstore_fill_header_v3(h, 0, 2, reason, 0, tokens, 0, 32768,
+                               100, last_used, payload_bytes,
+                               7, 0, bucket, 0, false, psha, delta_from);
+    uint8_t tb[4];
+    ds4_kvstore_le_put32(tb, (uint32_t)strlen(text));
+    if (fwrite(h, 1, sizeof(h), fp) != sizeof(h) ||
+        fwrite(tb, 1, sizeof(tb), fp) != sizeof(tb) ||
+        fwrite(text, 1, strlen(text), fp) != strlen(text)) {
+        fprintf(stderr, "stub v3 write failed\n");
+        exit(1);
+    }
+    for (uint64_t i = 0; i < payload_bytes; i++) fputc(0, fp);
+    fclose(fp);
+}
+
+static void scenario_delta_parent_deferred(void) {
+    printf("== Scenario D: delta-parent eviction deferral ==\n");
+    char dir[] = "/tmp/kv-harness-d.XXXXXX";
+    if (!mkdtemp(dir)) { perror("mkdtemp"); exit(1); }
+
+    const uint64_t now = (uint64_t)time(NULL);
+    const char *x1 = "delta chain anchor text one (root)";
+    const char *x2 = "delta chain anchor text two (child of one)";
+    const char *x3 = "delta chain frontier text three (child of two)";
+
+    stub_file(dir, x1, 7, 1, 40960, now - 100000, 4000);
+    stub_file_v3(dir, x2, x1, 2, 81920, 40960, now - 100000, 4000);
+    stub_file_v3(dir, x3, x2, 2, 122880, 81920, now - 10, 4000);
+
+    ds4_kvstore kc = {0};
+    ds4_kvstore_options opt = ds4_kvstore_default_options();
+    opt.retire_grace_seconds = 0;
+    opt.min_anchors = 1;
+    if (!ds4_kvstore_open(&kc, dir, 1, false, 0, opt,
+                          "harness", log_cb, NULL)) {
+        fprintf(stderr, "open failed\n");
+        exit(1);
+    }
+    /* Total ~13k bytes; force pressure.  x1/x2 are the stale victims the pass
+     * must reach first (x3 is a fresh leaf) — both must be DEFERRED because
+     * they still have live children. */
+    kc.budget_bytes = 6000;
+    ds4_kvstore_eviction_context inc = {
+        .text = "incoming unrelated request text",
+        .text_len = 31,
+        .model_id = 0, .quant_bits = 2, .ctx_size = 32768,
+        .reject_different_quant = false,
+    };
+    ds4_kvstore_evict(&kc, NULL, 0, &inc);
+    CHECK(file_exists(dir, x1), "chain root deferred while a child chain is alive");
+    CHECK(file_exists(dir, x2), "chain middle deferred while the frontier child is alive");
+
+    /* Frontier x3 dies.  Rescan + evict: x2 (now childless) can go; x1 clears
+     * on the next pass once the scan sees x2 gone. */
+    unlink_text(dir, x3);
+    ds4_kvstore_close(&kc);
+    ds4_kvstore_open(&kc, dir, 1, false, 0, opt, "harness", log_cb, NULL);
+    kc.budget_bytes = 4000;
+    ds4_kvstore_evict(&kc, NULL, 0, &inc);
+    CHECK(!file_exists(dir, x2), "former middle evicted once it became a leaf");
+
+    ds4_kvstore_close(&kc);
+    ds4_kvstore_open(&kc, dir, 1, false, 0, opt, "harness", log_cb, NULL);
+    kc.budget_bytes = 3000;
+    ds4_kvstore_evict(&kc, NULL, 0, &inc);
+    CHECK(!file_exists(dir, x1), "root evicted after its children died");
+
+    ds4_kvstore_close(&kc);
+    const char *texts[] = {x1, x2, x3};
+    for (int i = 0; i < 3; i++) unlink_text(dir, texts[i]);
+    rmdir(dir);
+}
+
 /* ------------------------------------------------------------------ */
 /* Scenario C: divergence anchor decision logic end-to-end at the kvstore
  * level (target set -> grid-skip -> fired when the session reaches it).
@@ -240,6 +334,7 @@ static void scenario_divergence_logic(void) {
 int main(void) {
     scenario_switch_churn();
     scenario_idle_retired();
+    scenario_delta_parent_deferred();
     scenario_divergence_logic();
     if (g_failures) {
         fprintf(stderr, "kv_policy_harness: %d failure(s)\n", g_failures);

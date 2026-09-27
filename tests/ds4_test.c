@@ -1,6 +1,9 @@
 #define DS4_SERVER_TEST
 #define DS4_SERVER_TEST_NO_MAIN
 #include <inttypes.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include "../ds4_server.c"
 #ifndef DS4_NO_GPU
 #include "../ds4_gpu.h"
@@ -439,6 +442,168 @@ cleanup:
     ds4_session_free(live);
     ds4_tokens_free(&prompt);
     test_restore_env("DS4_QWEN4_PREFILL_CHUNK", saved_chunk);
+}
+
+/* ---- Delta chains (P1) --------------------------------------------------
+ * A continued store must chain from a verified anchor (delta node) and a
+ * chain-loaded session must be behaviorally identical to a full-checkpoint
+ * restore of the same frontier.  Orphaned deltas (broken chain) must
+ * self-destruct on load and degrade to the next candidate. */
+static void test_kv_log_cb(void *ud, ds4_kvstore_log_type type, const char *msg) {
+    (void)ud;
+    if (type == DS4_KVSTORE_LOG_WARNING) fprintf(stderr, "WARN: %s\n", msg);
+}
+
+static void test_kv_rmrf(const char *dir) {
+    DIR *d = opendir(dir);
+    if (!d) return;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+        char path[512];
+        snprintf(path, sizeof(path), "%s/%s", dir, de->d_name);
+        unlink(path);
+    }
+    closedir(d);
+    rmdir(dir);
+}
+
+static void test_kv_delta_parity(void) {
+    ds4_engine *engine = test_get_engine(false);
+    if (!engine || !ds4_engine_is_qwen4(engine)) {
+        puts("kv-delta: Qwen3.8 model (DS4_TEST_MODEL) required, skipped");
+        return;
+    }
+    /* Same-splitting determinism as the checkpoint test: one-shot prefills and
+     * staged (anchor + continued) prefills must produce byte-identical rows. */
+    char *saved_chunk = test_save_env("DS4_QWEN4_PREFILL_CHUNK");
+    setenv("DS4_QWEN4_PREFILL_CHUNK", "128", 1);
+    char dirA[] = "/tmp/ds4-kv-parity-A-XXXXXX";
+    char dirB[] = "/tmp/ds4-kv-parity-B-XXXXXX";
+    if (!mkdtemp(dirA) || !mkdtemp(dirB)) { TEST_ASSERT(0); return; }
+
+    static server fake;
+    fake.engine = engine;
+    kv_trailer_ctx tctx = {0};
+    tctx.s = &fake;
+    ds4_kvstore_trailer_hooks hooks = kv_cache_tool_map_hooks(&tctx, false);
+
+    ds4_kvstore_options opt = ds4_kvstore_default_options();
+    opt.min_tokens = 256;
+    ds4_kvstore kcA = {0}, kcB = {0};
+    TEST_ASSERT(ds4_kvstore_open(&kcA, dirA, 4096, false, 0, opt,
+                                 "parityA", test_kv_log_cb, NULL));
+    TEST_ASSERT(ds4_kvstore_open(&kcB, dirB, 4096, false, 0, opt,
+                                 "parityB", test_kv_log_cb, NULL));
+
+    buf text = {0};
+    for (int i = 0; i < 400; i++)
+        buf_puts(&text, "The harbor records the weather and shipping schedules. ");
+    ds4_tokens prompt = {0};
+    ds4_encode_chat_prompt(engine, NULL, text.ptr, DS4_THINK_NONE, &prompt);
+    buf_free(&text);
+    const int half = 1024, full = 2048;
+    TEST_ASSERT(prompt.len >= full + 128);
+
+    ds4_session *s_live = NULL, *s_ref = NULL, *s_A = NULL, *s_B = NULL, *s_C = NULL;
+    ds4_tokens t_half = prompt; t_half.len = half;
+    ds4_tokens t_full = prompt; t_full.len = full;
+    ds4_tokens effA = {0}, effB = {0}, effC = {0};
+    ds4_kvstore_load_result res = {0};
+    char err[192] = {0};
+    char pathA[512], pathB[512], rootB[512];
+    pathA[0] = pathB[0] = rootB[0] = '\0';
+    char *ftext = NULL, *htext = NULL;
+    bool ready = ds4_session_create(&s_live, engine, 8192) == 0 &&
+                 ds4_session_create(&s_ref, engine, 8192) == 0 &&
+                 ds4_session_create(&s_A, engine, 8192) == 0 &&
+                 ds4_session_create(&s_B, engine, 8192) == 0 &&
+                 ds4_session_create(&s_C, engine, 8192) == 0;
+    if (!ready) goto cleanup;
+
+    /* Root anchors at the half frontier in both directories. */
+    TEST_ASSERT(ds4_session_sync(s_live, &t_half, err, sizeof(err)) == 0);
+    TEST_ASSERT(ds4_kvstore_store_live_prefix(&kcA, engine, s_live,
+                ds4_session_tokens(s_live), half, "cold", &hooks, err, sizeof(err)));
+    TEST_ASSERT(ds4_kvstore_store_live_prefix(&kcB, engine, s_live,
+                ds4_session_tokens(s_live), half, "cold", &hooks, err, sizeof(err)));
+
+    /* Frontier 2048: A gets a full node (reason bypasses the delta gate),
+     * B gets a continued store, which must chain onto the 1024 anchor. */
+    TEST_ASSERT(ds4_session_sync(s_live, &t_full, err, sizeof(err)) == 0);
+    TEST_ASSERT(ds4_kvstore_store_live_prefix(&kcA, engine, s_live,
+                ds4_session_tokens(s_live), full, "evict", &hooks, err, sizeof(err)));
+    TEST_ASSERT(ds4_kvstore_store_live_prefix(&kcB, engine, s_live,
+                ds4_session_tokens(s_live), full, "continued", &hooks, err, sizeof(err)));
+
+    /* Verify B's frontier file is a v3 delta node over the 1024 anchor. */
+    size_t flen = 0, hlen = 0;
+    ftext = ds4_kvstore_render_tokens_text(engine, &t_full, &flen);
+    htext = ds4_kvstore_render_tokens_text(engine, &t_half, &hlen);
+    TEST_ASSERT(ftext && htext && flen > 0 && hlen > 0);
+    char shaF[41], shaH[41];
+    ds4_kvstore_sha1_bytes_hex(ftext, flen, shaF);
+    ds4_kvstore_sha1_bytes_hex(htext, hlen, shaH);
+    snprintf(pathA, sizeof(pathA), "%s/%.40s.kv", dirA, shaF);
+    snprintf(pathB, sizeof(pathB), "%s/%.40s.kv", dirB, shaF);
+    snprintf(rootB, sizeof(rootB), "%s/%.40s.kv", dirB, shaH);
+    struct stat stA = {0}, stB = {0};
+    TEST_ASSERT(stat(pathA, &stA) == 0 && stat(pathB, &stB) == 0);
+    ds4_kvstore_entry eB = {0};
+    uint32_t tb = 0;
+    FILE *fb = fopen(pathB, "rb");
+    TEST_ASSERT(fb != NULL);
+    if (fb) {
+        TEST_ASSERT(ds4_kvstore_read_header(fb, &eB, &tb));
+        fclose(fb);
+    }
+    TEST_ASSERT(eB.hdr_version == 3 && eB.delta_from == (uint32_t)half &&
+                eB.tokens == (uint32_t)full && eB.parent_sha[0] != '\0');
+    /* The delta must be smaller than the full twin (savings scale with the
+     * rows region; the fixed sections dominate at this tiny test frontier). */
+    TEST_ASSERT(stB.st_size < stA.st_size);
+
+    /* Chain restore vs full restore vs independent prefill: all identical. */
+    TEST_ASSERT(ds4_kvstore_try_load_text(&kcA, engine, s_A, ftext, &effA,
+                                          &res, NULL, false) == full);
+    ds4_kvstore_load_result_free(&res); res = (ds4_kvstore_load_result){0};
+    TEST_ASSERT(ds4_kvstore_try_load_text(&kcB, engine, s_B, ftext, &effB,
+                                          &res, NULL, false) == full);
+    ds4_kvstore_load_result_free(&res); res = (ds4_kvstore_load_result){0};
+    TEST_ASSERT(ds4_session_sync(s_ref, &t_full, err, sizeof(err)) == 0);
+    test_qwen_prefill_scores_equal(s_A, s_B);
+    test_qwen_prefill_scores_equal(s_B, s_ref);
+
+    /* Continue past the frontier: recurrent state and rows must still agree. */
+    TEST_ASSERT(ds4_session_sync(s_A, &prompt, err, sizeof(err)) == 0);
+    TEST_ASSERT(ds4_session_sync(s_B, &prompt, err, sizeof(err)) == 0);
+    TEST_ASSERT(ds4_session_sync(s_ref, &prompt, err, sizeof(err)) == 0);
+    test_qwen_prefill_scores_equal(s_A, s_B);
+    test_qwen_prefill_scores_equal(s_B, s_ref);
+
+    /* Broken chain: deleting the root orphans the delta.  Load must return
+     * 0 (no shorter anchor left) and drop the orphan file. */
+    TEST_ASSERT(unlink(rootB) == 0);
+    TEST_ASSERT(ds4_kvstore_try_load_text(&kcB, engine, s_C, ftext, &effC,
+                                          &res, NULL, false) == 0);
+    ds4_kvstore_load_result_free(&res);
+    struct stat gone;
+    TEST_ASSERT(stat(pathB, &gone) != 0);
+
+cleanup:
+    test_restore_env("DS4_QWEN4_PREFILL_CHUNK", saved_chunk);
+    free(ftext);
+    free(htext);
+    if (s_C) ds4_session_free(s_C);
+    if (s_B) ds4_session_free(s_B);
+    if (s_A) ds4_session_free(s_A);
+    if (s_ref) ds4_session_free(s_ref);
+    if (s_live) ds4_session_free(s_live);
+    ds4_tokens_free(&prompt);
+    ds4_kvstore_close(&kcA);
+    ds4_kvstore_close(&kcB);
+    test_kv_rmrf(dirA);
+    test_kv_rmrf(dirB);
 }
 
 static void test_qwen_restore_reused_session(void) {
@@ -7241,6 +7406,7 @@ typedef struct {
 static const ds4_test_entry test_entries[] = {
 #ifndef DS4_NO_GPU
     {"--qwen4-prefill-checkpoints", "qwen4-prefill-checkpoints", "Qwen chunk checkpoints restore matching logits and state", test_qwen_prefill_checkpoints},
+    {"--kv-delta", "kv-delta", "Qwen delta-chained continued stores match full checkpoints", test_kv_delta_parity},
     {"--qwen4-restore-reuse", "qwen4-restore-reuse", "Qwen restore discards old verifier state and rejects truncated payloads", test_qwen_restore_reused_session},
     {"--session-snapshot", "session-snapshot", "session snapshot and recurrent-state round trip", test_session_snapshot_roundtrip},
     {"--session-rewind", "session-rewind", "Qwen3.8 rewind by snapshot restore and by replay", test_session_rewind_replay},

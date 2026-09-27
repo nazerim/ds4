@@ -28,6 +28,7 @@
 #define KV_CACHE_MAGIC2 'C'
 #define KV_CACHE_VERSION 1u
 #define KV_CACHE_VERSION2 2u
+#define KV_CACHE_VERSION3 3u
 /* Header byte 20 carries the graph-payload ABI.  It is separate from the outer
  * file version because the KVC envelope can remain stable while the serialized
  * ds4_session internals become unsafe to restore across runtime changes. */
@@ -486,13 +487,57 @@ void ds4_kvstore_fill_header_v2(
     h[69] = stale ? 1u : 0u;
 }
 
+void ds4_kvstore_fill_header_v3(
+        uint8_t h[DS4_KVSTORE_FIXED_HEADER + DS4_KVSTORE_HEADER_V3_EXTRA],
+        uint8_t model_id, uint8_t quant_bits, uint8_t reason, uint8_t ext_flags,
+        uint32_t tokens, uint32_t hits, uint32_t ctx_size,
+        uint64_t created_at, uint64_t last_used, uint64_t payload_bytes,
+        uint64_t conv_id, uint64_t model_fp, uint32_t bucket, uint8_t level,
+        bool stale, const char parent_sha[41], uint32_t delta_from) {
+    uint8_t v2[DS4_KVSTORE_FIXED_HEADER + DS4_KVSTORE_HEADER_V2_EXTRA];
+    ds4_kvstore_fill_header_v2(v2, model_id, quant_bits, reason, ext_flags,
+                               tokens, hits, ctx_size, created_at, last_used,
+                               payload_bytes, conv_id, model_fp, bucket, level,
+                               stale);
+    memset(h, 0, DS4_KVSTORE_FIXED_HEADER + DS4_KVSTORE_HEADER_V3_EXTRA);
+    memcpy(h, v2, sizeof(v2));
+    h[3] = KV_CACHE_VERSION3;
+    memcpy(h + DS4_KVSTORE_FIXED_HEADER + DS4_KVSTORE_HEADER_V2_EXTRA,
+           parent_sha, 40);
+    ds4_kvstore_le_put32(
+        h + DS4_KVSTORE_FIXED_HEADER + DS4_KVSTORE_HEADER_V2_EXTRA + 40,
+        delta_from);
+}
+
+/* Extra header bytes by version (excluding the 4-byte text-size word). */
+static uint64_t kv_header_extra(uint8_t v) {
+    if (v == KV_CACHE_VERSION2) return DS4_KVSTORE_HEADER_V2_EXTRA;
+    if (v == KV_CACHE_VERSION3) return DS4_KVSTORE_HEADER_V3_EXTRA;
+    return 0;
+}
+
+/* Total header bytes including the text-size word. */
+static uint64_t kv_header_total(uint8_t v) {
+    return DS4_KVSTORE_FIXED_HEADER + kv_header_extra(v) + 4ull;
+}
+
+static bool kv_delta_enabled(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("DS4_KV_DELTA");
+        v = (e && !strcmp(e, "0")) ? 0 : 1;
+    }
+    return v == 1;
+}
+
 bool ds4_kvstore_read_header(FILE *fp, ds4_kvstore_entry *e,
                              uint32_t *text_bytes) {
     uint8_t h[DS4_KVSTORE_FIXED_HEADER];
     if (fread(h, 1, sizeof(h), fp) != sizeof(h)) return false;
     if (h[0] != KV_CACHE_MAGIC0 || h[1] != KV_CACHE_MAGIC1 ||
         h[2] != KV_CACHE_MAGIC2) return false;
-    if (h[3] != KV_CACHE_VERSION && h[3] != KV_CACHE_VERSION2) return false;
+    if (h[3] != KV_CACHE_VERSION && h[3] != KV_CACHE_VERSION2 &&
+        h[3] != KV_CACHE_VERSION3) return false;
     if (h[20] != KV_CACHE_PAYLOAD_ABI) return false;
     const uint8_t version = h[3];
     e->quant_bits = h[4];
@@ -507,7 +552,9 @@ bool ds4_kvstore_read_header(FILE *fp, ds4_kvstore_entry *e,
     e->last_used = kv_le_get64(h + 32);
     e->payload_bytes = kv_le_get64(h + 40);
     e->hdr_version = version;
-    if (version == KV_CACHE_VERSION2) {
+    e->delta_from = 0;
+    e->parent_sha[0] = '\0';
+    if (version == KV_CACHE_VERSION2 || version == KV_CACHE_VERSION3) {
         uint8_t x[DS4_KVSTORE_HEADER_V2_EXTRA];
         if (fread(x, 1, sizeof(x), fp) != sizeof(x)) return false;
         e->conv_id = kv_le_get64(x);
@@ -515,7 +562,15 @@ bool ds4_kvstore_read_header(FILE *fp, ds4_kvstore_entry *e,
         e->bucket = ds4_kvstore_le_get32(x + 16);
         e->level = x[20];
         e->stale = x[21] != 0;
-    } else {
+        if (version == KV_CACHE_VERSION3) {
+            uint8_t v3[44];
+            if (fread(v3, 1, sizeof(v3), fp) != sizeof(v3)) return false;
+            memcpy(e->parent_sha, v3, 40);
+            e->parent_sha[40] = '\0';
+            e->delta_from = ds4_kvstore_le_get32(v3 + 40);
+            if (e->delta_from == 0 || e->parent_sha[0] == '\0') return false;
+        }
+    } else if (version == KV_CACHE_VERSION) {
         /* v1 header: no conversation metadata.  conv_id==0 marks a legacy
          * singleton that is always kept (never redundant) and exits only via
          * the legacy-LRU path keyed on last_used, so bucket/level are unused and
@@ -525,6 +580,8 @@ bool ds4_kvstore_read_header(FILE *fp, ds4_kvstore_entry *e,
         e->bucket = 0;
         e->level = 0;
         e->stale = false;
+        e->delta_from = 0;
+        e->parent_sha[0] = '\0';
     }
     uint8_t tb[4];
     if (fread(tb, 1, sizeof(tb), fp) != sizeof(tb)) return false;
@@ -546,9 +603,7 @@ bool ds4_kvstore_read_entry_file(const char *path, const char sha[41],
     bool ok = ds4_kvstore_read_header(fp, &e, &text_bytes);
     fclose(fp);
     if (!ok) return false;
-    const uint64_t hdr_total =
-        DS4_KVSTORE_FIXED_HEADER + 4ull +
-        (e.hdr_version == KV_CACHE_VERSION2 ? DS4_KVSTORE_HEADER_V2_EXTRA : 0ull);
+    const uint64_t hdr_total = kv_header_total(e.hdr_version);
     if (UINT64_MAX - hdr_total < (uint64_t)text_bytes ||
         UINT64_MAX - hdr_total - (uint64_t)text_bytes < e.payload_bytes)
         return false;
@@ -578,6 +633,18 @@ static void kv_cache_refresh(ds4_kvstore *kc) {
         free(path);
     }
     closedir(d);
+    /* v3 delta nodes hold a parent pointer; index children so eviction can
+     * defer parents while any dependent chain member still exists. */
+    for (int i = 0; i < kc->len; i++) {
+        const ds4_kvstore_entry *c = &kc->entry[i];
+        if (c->delta_from == 0 || c->parent_sha[0] == '\0') continue;
+        for (int j = 0; j < kc->len; j++) {
+            if (strcmp(kc->entry[j].sha, c->parent_sha) == 0) {
+                kc->entry[j].children++;
+                break;
+            }
+        }
+    }
     kv_text_refs_prune(kc);
 }
 
@@ -591,11 +658,15 @@ bool ds4_kvstore_touch_file(const char *path, uint32_t hits, bool stale,
     if (ok) {
         if (last_used == 0) last_used = (uint64_t)time(NULL);
         const size_t hdr_len =
-            (e.hdr_version == KV_CACHE_VERSION2)
-                ? (DS4_KVSTORE_FIXED_HEADER + DS4_KVSTORE_HEADER_V2_EXTRA)
-                : DS4_KVSTORE_FIXED_HEADER;
-        uint8_t h[DS4_KVSTORE_FIXED_HEADER + DS4_KVSTORE_HEADER_V2_EXTRA];
-        if (e.hdr_version == KV_CACHE_VERSION2) {
+            (size_t)(DS4_KVSTORE_FIXED_HEADER + kv_header_extra(e.hdr_version));
+        uint8_t h[DS4_KVSTORE_FIXED_HEADER + DS4_KVSTORE_HEADER_V3_EXTRA];
+        if (e.hdr_version == KV_CACHE_VERSION3) {
+            ds4_kvstore_fill_header_v3(h, e.model_id, e.quant_bits, e.reason,
+                                       e.ext_flags, e.tokens, hits, e.ctx_size,
+                                       e.created_at, last_used, e.payload_bytes,
+                                       e.conv_id, e.model_fp, e.bucket, level,
+                                       stale, e.parent_sha, e.delta_from);
+        } else if (e.hdr_version == KV_CACHE_VERSION2) {
             /* level comes from the caller: re-reading it from disk here would
              * silently discard an in-memory halving bump (the header rewrite
              * would persist the pre-bump value). */
@@ -757,7 +828,7 @@ static bool kv_rel_prefixes(const kv_chain_rel *r, int anc, int desc) {
 }
 
 static bool kv_cache_entry_is_legacy(const ds4_kvstore_entry *e) {
-    return e->hdr_version != KV_CACHE_VERSION2;
+    return e->hdr_version < KV_CACHE_VERSION2;
 }
 
 /* A leaf is an entry with no strict descendant: the frontier of its branch. */
@@ -1120,7 +1191,31 @@ static int kv_cache_find_lru_legacy(ds4_kvstore *kc) {
 static void kv_cache_unlink_entry(ds4_kvstore *kc, int victim,
                                   uint64_t *total, const char *reason) {
     ds4_kvstore_entry e = kc->entry[victim];
+    if (e.children > 0) {
+        /* Delta chain parent: deleting it would orphan every dependent row
+         * span. Defer; the parent becomes deletable once its children die.
+         * The FILE stays; only the in-memory entry is dropped, mirroring the
+         * failed-unlink path so this budget pass never re-picks it. */
+        kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
+                "%s: kv cache delete deferred reason=%s tokens=%u children=%u file=%s",
+                kv_log_name(kc), reason, (unsigned)e.tokens, (unsigned)e.children,
+                e.path ? e.path : "?");
+        ds4_kvstore_entry_free(&e);
+        memmove(kc->entry + victim, kc->entry + victim + 1,
+                (size_t)(kc->len - victim - 1) * sizeof(kc->entry[0]));
+        kc->len--;
+        return;
+    }
     bool freed = unlink(e.path) == 0;
+    if (freed && e.delta_from > 0 && e.parent_sha[0]) {
+        for (int i = 0; i < kc->len; i++) {
+            if (kc->entry[i].children > 0 &&
+                strcmp(kc->entry[i].sha, e.parent_sha) == 0) {
+                kc->entry[i].children--;
+                break;
+            }
+        }
+    }
     if (!freed && errno == ENOENT) freed = true; /* already gone: space is free */
     if (freed) {
         kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
@@ -1635,13 +1730,114 @@ static void kv_cache_maybe_store_divergence(ds4_kvstore *kc,
                                   "cold", hooks, err, err_len);
 }
 
+/* Inspect the tokenizer fingerprint trailer section of a checkpoint.  Returns
+ * false only when a TKF section is present and mismatches the engine;
+ * *present reports whether the file is stamped at all.  The file position is
+ * restored to the payload start. */
+static bool kv_file_tokfp_ok(FILE *fp, uint64_t payload_bytes,
+                             ds4_engine *engine, bool *present) {
+    if (present) *present = false;
+    const long payload_start = ftell(fp);
+    if (payload_start < 0) return true;   /* best-effort: legacy behaviour */
+    if (fseek(fp, payload_start + (long)payload_bytes, SEEK_SET) != 0) {
+        fseek(fp, payload_start, SEEK_SET);
+        return true;
+    }
+    uint8_t sh[8];
+    uint8_t fb[8];
+    bool ok = true;
+    if (fread(sh, 1, sizeof(sh), fp) == (long)sizeof(sh) &&
+        sh[0] == 'T' && sh[1] == 'K' && sh[2] == 'F' && sh[3] == 1 &&
+        ds4_kvstore_le_get32(sh + 4) == 8 &&
+        fread(fb, 1, sizeof(fb), fp) == (long)sizeof(fb)) {
+        uint64_t tokfp = 0;
+        for (int i = 0; i < 8; i++) tokfp |= (uint64_t)fb[i] << (8 * i);
+        if (present) *present = true;
+        ok = (tokfp == ds4_engine_tokenizer_fingerprint(engine));
+    }
+    fseek(fp, payload_start, SEEK_SET);
+    return ok;
+}
+
+/* Choose the deepest existing anchor checkpoint that a continued store can
+ * delta from: same quant regime and model, rendered text a byte prefix of
+ * this text, stamped with the engine tokenizer fingerprint, and carrying an
+ * exact token-prefix payload (re-verified from the file, never trusted from
+ * memory).  Returns the parent entry index with its sha and frontier rows, or
+ * -1 when no parent qualifies. */
+static int kv_store_pick_parent(ds4_kvstore *kc, ds4_engine *engine,
+                                const char *text, size_t text_len,
+                                const ds4_tokens *tokens,
+                                int model_id, int quant_bits,
+                                char out_sha[41], uint32_t *out_from) {
+    int skip[8];
+    int skip_len = 0;
+    for (;;) {
+        int best = -1;
+        uint32_t best_tokens = 0;
+        for (int i = 0; i < kc->len; i++) {
+            const ds4_kvstore_entry *o = &kc->entry[i];
+            if (o->tokens == 0 || (int)o->tokens >= tokens->len) continue;
+            if ((o->tokens % 4u) != 0u) continue;
+            if (o->quant_bits != (uint8_t)quant_bits) continue;
+            if (o->model_id != (uint8_t)model_id) continue;
+            if (o->text_bytes == 0 || o->text_bytes > (uint64_t)text_len) continue;
+            bool skipped = false;
+            for (int k = 0; k < skip_len; k++)
+                if (skip[k] == i) { skipped = true; break; }
+            if (skipped) continue;
+            if ((uint32_t)o->tokens <= best_tokens) continue;
+            best = i;
+            best_tokens = (uint32_t)o->tokens;
+        }
+        if (best < 0) return -1;
+        if (skip_len < (int)(sizeof(skip) / sizeof(skip[0]))) skip[skip_len++] = best;
+
+        const ds4_kvstore_entry *o = &kc->entry[best];
+        bool ok = false;
+        FILE *fp = o->path ? fopen(o->path, "rb") : NULL;
+        if (fp) {
+            ds4_kvstore_entry ph = {0};
+            uint32_t ptb = 0;
+            if (ds4_kvstore_read_header(fp, &ph, &ptb) &&
+                ph.tokens == o->tokens && ptb > 0 &&
+                (uint64_t)ptb <= (uint64_t)text_len) {
+                char *pt = kv_xmalloc((size_t)ptb + 1);
+                bool text_ok = pt &&
+                    fread(pt, 1, ptb, fp) == (size_t)ptb &&
+                    memcmp(pt, text, ptb) == 0;
+                free(pt);
+                if (text_ok) {
+                    bool present = false;
+                    if (kv_file_tokfp_ok(fp, ph.payload_bytes, engine, &present) &&
+                        present) {
+                        char terr[160];
+                        ok = ds4_session_payload_token_span(
+                                 fp, ph.tokens, tokens->v, terr,
+                                 sizeof(terr)) == 0;
+                    }
+                }
+            }
+            fclose(fp);
+        }
+        if (ok) {
+            memcpy(out_sha, o->sha, 41);
+            *out_from = (uint32_t)o->tokens;
+            return best;
+        }
+    }
+}
+
 static bool kv_cache_file_size_bytes(uint64_t text_bytes,
                                      uint64_t payload_bytes,
                                      uint64_t trailer_bytes,
+                                     bool is_delta,
                                      uint64_t *file_bytes) {
-    /* New stores write the v2 header (48 + 24 extra + 4 text-bytes). */
+    /* New stores write the v2 header (48 + 24 extra + 4 text-bytes), or the
+     * v3 delta header (48 + 68 extra + 4) when chaining from a parent. */
     const uint64_t fixed = DS4_KVSTORE_FIXED_HEADER +
-                           DS4_KVSTORE_HEADER_V2_EXTRA + 4ull;
+                           (is_delta ? DS4_KVSTORE_HEADER_V3_EXTRA
+                                     : DS4_KVSTORE_HEADER_V2_EXTRA) + 4ull;
     if (UINT64_MAX - fixed < text_bytes ||
         UINT64_MAX - fixed - text_bytes < payload_bytes ||
         UINT64_MAX - fixed - text_bytes - payload_bytes < trailer_bytes)
@@ -1666,11 +1862,12 @@ bool ds4_kvstore_file_size_fits(const ds4_kvstore *kc,
                                 uint64_t text_bytes,
                                 uint64_t payload_bytes,
                                 uint64_t trailer_bytes,
+                                bool is_delta,
                                 uint64_t *file_bytes_out,
                                 uint64_t *required_bytes_out) {
     uint64_t file_bytes = 0;
     if (!kv_cache_file_size_bytes(text_bytes, payload_bytes, trailer_bytes,
-                                  &file_bytes))
+                                  is_delta, &file_bytes))
         return false;
     if (file_bytes_out) *file_bytes_out = file_bytes;
     if (!kc || kc->budget_bytes == 0) return true;
@@ -1902,9 +2099,47 @@ bool ds4_kvstore_store_live_prefix_text(ds4_kvstore *kc,
         return true;
     }
 
+    /* Delta chain (P1): continued stores hang off the deepest verified
+     * ancestor and persist only rows [parent_frontier, store_frontier). */
+    char parent_sha_hex[41] = {0};
+    uint32_t delta_from = 0;
+    int parent_idx = -1;
+    if (kv_delta_enabled() && strcmp(reason, "continued") == 0 && !text_override &&
+        store_tokens.len >= 4 && (store_tokens.len % 4) == 0 &&
+        ds4_session_supports_delta(session)) {
+        /* The entry index is (re)built by directory scans; a store never
+         * pushes.  Refresh so a previous anchor from THIS process (e.g. the
+         * root stored moments ago) is visible as a delta parent. */
+        kv_cache_refresh(kc);
+        parent_idx = kv_store_pick_parent(kc, engine, text, text_len,
+                                          &store_tokens, model_id, quant_bits,
+                                          parent_sha_hex, &delta_from);
+        if (parent_idx < 0) {
+            parent_sha_hex[0] = '\0';
+            delta_from = 0;
+        }
+    }
+
     ds4_session_payload_file staged = {0};
-    if (ds4_session_stage_payload(session, &staged,
-                                  save_err, sizeof(save_err)) != 0) {
+    int stage_rc;
+    if (delta_from > 0) {
+        stage_rc = ds4_session_stage_payload_span(session, &staged, delta_from,
+                                                  save_err, sizeof(save_err));
+        if (stage_rc != 0) {
+            kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
+                    "%s: kv cache delta staging failed (%s), writing a full checkpoint instead",
+                    kv_log_name(kc), save_err[0] ? save_err : "unknown error");
+            delta_from = 0;
+            parent_sha_hex[0] = '\0';
+            parent_idx = -1;
+            stage_rc = ds4_session_stage_payload(session, &staged,
+                                                 save_err, sizeof(save_err));
+        }
+    } else {
+        stage_rc = ds4_session_stage_payload(session, &staged,
+                                             save_err, sizeof(save_err));
+    }
+    if (stage_rc != 0) {
         kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
                 "%s: kv cache skipped tokens=%d reason=%s because KV payload staging failed: %s",
                 kv_log_name(kc),
@@ -1922,7 +2157,7 @@ bool ds4_kvstore_store_live_prefix_text(ds4_kvstore *kc,
 
     uint64_t est_file_bytes = 0, est_required_bytes = 0;
     if (!ds4_kvstore_file_size_fits(kc, (uint64_t)text_len, payload_bytes,
-                                    trailer_est_bytes,
+                                    trailer_est_bytes, delta_from > 0,
                                     &est_file_bytes, &est_required_bytes)) {
         kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
                 "%s: kv cache skipped tokens=%d reason=%s because estimated file size %.2f MiB (%.2f MiB with safety) exceeds budget %.2f MiB",
@@ -1988,20 +2223,34 @@ bool ds4_kvstore_store_live_prefix_text(ds4_kvstore *kc,
     const uint32_t bucket = kc->opt.anchor_step > 0
         ? (uint32_t)(store_tokens.len / (uint32_t)kc->opt.anchor_step)
         : 0u;
-    uint8_t h[DS4_KVSTORE_FIXED_HEADER + DS4_KVSTORE_HEADER_V2_EXTRA];
+    const bool is_delta = delta_from > 0;
+    size_t hdr_bytes;
+    uint8_t h[DS4_KVSTORE_FIXED_HEADER + DS4_KVSTORE_HEADER_V3_EXTRA];
     uint8_t ext_flags = trailer_est_bytes > 0 && hooks ? hooks->ext_flag : 0;
     if (text_override) ext_flags |= cache_text_ext;
-    ds4_kvstore_fill_header_v2(h, (uint8_t)model_id, (uint8_t)quant_bits,
-                               reason_code, ext_flags,
-                               (uint32_t)store_tokens.len, 0,
-                               (uint32_t)ds4_session_ctx(session),
-                               now, now, payload_bytes,
-                               conv_id, kc->model_fp, bucket, level, false);
+    if (is_delta) {
+        ds4_kvstore_fill_header_v3(h, (uint8_t)model_id, (uint8_t)quant_bits,
+                                   reason_code, ext_flags,
+                                   (uint32_t)store_tokens.len, 0,
+                                   (uint32_t)ds4_session_ctx(session),
+                                   now, now, payload_bytes,
+                                   conv_id, kc->model_fp, bucket, level, false,
+                                   parent_sha_hex, delta_from);
+        hdr_bytes = sizeof(h);
+    } else {
+        ds4_kvstore_fill_header_v2(h, (uint8_t)model_id, (uint8_t)quant_bits,
+                                   reason_code, ext_flags,
+                                   (uint32_t)store_tokens.len, 0,
+                                   (uint32_t)ds4_session_ctx(session),
+                                   now, now, payload_bytes,
+                                   conv_id, kc->model_fp, bucket, level, false);
+        hdr_bytes = DS4_KVSTORE_FIXED_HEADER + DS4_KVSTORE_HEADER_V2_EXTRA;
+    }
     uint8_t tb[4];
     ds4_kvstore_le_put32(tb, (uint32_t)text_len);
     uint64_t trailer_bytes = 0;
     errno = 0;
-    bool ok = fwrite(h, 1, sizeof(h), fp) == sizeof(h) &&
+    bool ok = fwrite(h, 1, hdr_bytes, fp) == hdr_bytes &&
               fwrite(tb, 1, sizeof(tb), fp) == sizeof(tb) &&
               fwrite(text, 1, text_len, fp) == text_len &&
               ds4_session_write_staged_payload(&staged, fp,
@@ -2016,7 +2265,7 @@ bool ds4_kvstore_store_live_prefix_text(ds4_kvstore *kc,
     uint64_t final_file_bytes = 0, final_required_bytes = 0;
     bool final_size_over_budget = false;
     if (ok && !ds4_kvstore_file_size_fits(kc, (uint64_t)text_len, payload_bytes,
-                                          trailer_bytes,
+                                          trailer_bytes, delta_from > 0,
                                           &final_file_bytes,
                                           &final_required_bytes))
     {
@@ -2055,15 +2304,23 @@ bool ds4_kvstore_store_live_prefix_text(ds4_kvstore *kc,
         }
         unlink(tmp);
     } else {
+        if (is_delta && parent_idx >= 0 && parent_idx < kc->len &&
+            strcmp(kc->entry[parent_idx].sha, parent_sha_hex) == 0) {
+            kc->entry[parent_idx].children++;
+        }
+        char delta_note[64] = "";
+        if (is_delta)
+            snprintf(delta_note, sizeof(delta_note), " delta=%u..%d",
+                     delta_from, store_tokens.len);
         kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
-                "%s: kv cache stored tokens=%d trimmed=%d reason=%s key=%s size=%.2f MiB save=%.1f ms",
+                "%s: kv cache stored tokens=%d trimmed=%d reason=%s key=%s%s size=%.2f MiB save=%.1f ms",
                 kv_log_name(kc),
                 store_tokens.len,
                 original_len - store_tokens.len,
                 reason,
                 text_override ? (cache_text_key ? cache_text_key : "visible-transcript") : "token-text",
-                (double)(DS4_KVSTORE_FIXED_HEADER + DS4_KVSTORE_HEADER_V2_EXTRA +
-                         4ull + text_len + payload_bytes + trailer_bytes) / (1024.0 * 1024.0),
+                delta_note,
+                (double)final_file_bytes / (1024.0 * 1024.0),
                 save_ms);
     }
     ds4_session_payload_file_free(&staged);
@@ -2190,6 +2447,14 @@ void ds4_kvstore_mark_stale_at_load(ds4_kvstore *kc, const char *prompt_text,
  * abort the whole chain into a full prefill from 0 when a valid smaller anchor
  * exists (observed in the field: a truncated/full-session payload discard cost
  * a 94s prefill that a 32768 anchor would have reduced to seconds). */
+/* One file in a delta chain, in load order (root first). */
+typedef struct {
+    char *path;
+    uint32_t tokens;
+    uint32_t delta_from;
+    uint64_t payload_bytes;
+} kv_chain_node;
+
 static int kv_cache_try_load_one(ds4_kvstore *kc, ds4_engine *engine,
                                  ds4_session *session, const char *prompt_text,
                                  size_t prompt_bytes, int idx,
@@ -2268,42 +2533,141 @@ static int kv_cache_try_load_one(ds4_kvstore *kc, ds4_engine *engine,
      * Reject before touching the payload (session untouched); the next
      * store under this text key writes a fresh stamped file.  Unstamped
      * legacy files keep today's trusted behavior. */
-    if (hdr.ext_flags & DS4_KVSTORE_EXT_TOKFP) {
-        long payload_start = ftell(fp);
-        uint64_t tokfp = 0;
-        bool have_fp = false;
-        if (payload_start >= 0 &&
-            fseek(fp, payload_start + (long)hdr.payload_bytes, SEEK_SET) == 0) {
-            uint8_t sh[8];
-            uint8_t fb[8];
-            if (fread(sh, 1, sizeof(sh), fp) == (long)sizeof(sh) &&
-                sh[0] == 'T' && sh[1] == 'K' && sh[2] == 'F' &&
-                sh[3] == 1 && ds4_kvstore_le_get32(sh + 4) == 8 &&
-                fread(fb, 1, sizeof(fb), fp) == (long)sizeof(fb)) {
-                for (int i = 0; i < 8; i++) tokfp |= (uint64_t)fb[i] << (8 * i);
-                have_fp = true;
+    if (!kv_file_tokfp_ok(fp, hdr.payload_bytes, engine, NULL)) {
+        *retryable = true;
+        kv_logf(kc, DS4_KVSTORE_LOG_WARNING,
+                "%s: kv cache tokenizer fingerprint mismatch, refusing stale tokenization%s%s %s",
+                kv_log_name(kc),
+                responses_protocol ? " " : "",
+                responses_protocol ? "RESPPROTO" : "",
+                path);
+        fclose(fp);
+        free(cached_text);
+        free(path);
+        return 0;
+    }
+
+    char err[160] = {0};
+    int loaded = 0;
+
+    /* v3 delta: validate the complete parent chain BEFORE touching the
+     * session.  Links must agree on quant/model, carry a byte-prefix text
+     * relation against the child's text (already read), be stamped with the
+     * current tokenizer fingerprint, and chain frontiers exactly
+     * (parent.tokens == child.delta_from).  Text + fingerprint stamping make
+     * the token history identical by construction, so no per-link token-array
+     * read is needed at load.  Any break: the child is an orphan -> unlink it
+     * and let the caller fall back to the next candidate (the parent itself
+     * usually is one). */
+    kv_chain_node chain[64];
+    int nchain = 0;
+    if (hdr.hdr_version == KV_CACHE_VERSION3 && hdr.delta_from > 0) {
+        kv_chain_node anc[63];
+        int nanc = 0;
+        bool chain_bad = false;
+        ds4_kvstore_entry cur = hdr;
+        for (;;) {
+            if (nanc == 63) { chain_bad = true; break; }
+            char *ppath = ds4_kvstore_path_for_sha(kc, cur.parent_sha);
+            ds4_kvstore_entry ph = {0};
+            uint32_t ptb = 0;
+            bool link_ok = false;
+            FILE *pf = ppath ? fopen(ppath, "rb") : NULL;
+            if (pf && ds4_kvstore_read_header(pf, &ph, &ptb) &&
+                ph.tokens == cur.delta_from &&
+                ph.quant_bits == cur.quant_bits &&
+                ph.model_id == cur.model_id &&
+                ptb > 0 && (uint64_t)ptb <= (uint64_t)text_bytes) {
+                char *pt = kv_xmalloc((size_t)ptb + 1);
+                link_ok = pt &&
+                          fread(pt, 1, ptb, pf) == (size_t)ptb &&
+                          memcmp(pt, cached_text, ptb) == 0;
+                free(pt);
+                if (link_ok) {
+                    bool present = false;
+                    link_ok = kv_file_tokfp_ok(pf, ph.payload_bytes, engine,
+                                               &present) && present;
+                }
+                if (link_ok && ph.delta_from > 0 && ph.parent_sha[0] == '\0')
+                    link_ok = false;
             }
-            fseek(fp, payload_start, SEEK_SET);
+            if (pf) fclose(pf);
+            if (!link_ok) {
+                free(ppath);
+                chain_bad = true;
+                break;
+            }
+            anc[nanc].path = ppath;
+            anc[nanc].tokens = ph.tokens;
+            anc[nanc].delta_from = ph.delta_from;
+            anc[nanc].payload_bytes = ph.payload_bytes;
+            nanc++;
+            if (ph.delta_from == 0) break;   /* full-format root reached */
+            cur = ph;
         }
-        if (have_fp && tokfp != ds4_engine_tokenizer_fingerprint(engine)) {
+        if (chain_bad) {
+            for (int k = 0; k < nanc; k++) free(anc[k].path);
             *retryable = true;
-            kv_logf(kc, DS4_KVSTORE_LOG_WARNING,
-                    "%s: kv cache tokenizer fingerprint mismatch, refusing stale tokenization%s%s %s",
-                    kv_log_name(kc),
+            kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
+                    "%s: kv cache delta chain broken, dropping orphan %s (falling back)%s%s",
+                    kv_log_name(kc), path,
                     responses_protocol ? " " : "",
-                    responses_protocol ? "RESPPROTO" : "",
-                    path);
+                    responses_protocol ? "RESPPROTO" : "");
+            unlink(path);
             fclose(fp);
             free(cached_text);
             free(path);
             return 0;
         }
+        for (int k = nanc - 1; k >= 0; k--) chain[nchain++] = anc[k];
     }
+    chain[nchain].path = kv_xstrdup(path);
+    chain[nchain].tokens = hdr.tokens;
+    chain[nchain].delta_from =
+        (hdr.hdr_version == KV_CACHE_VERSION3) ? hdr.delta_from : 0;
+    chain[nchain].payload_bytes = hdr.payload_bytes;
+    nchain++;
 
-    char err[160] = {0};
-    int loaded = 0;
-    if (ds4_session_load_payload(session, fp, hdr.payload_bytes, err,
-                                 sizeof(err)) == 0)
+    int lrc;
+    if (nchain == 1) {
+        lrc = ds4_session_load_payload_span(session, fp, hdr.payload_bytes, 0,
+                                            err, sizeof(err));
+    } else {
+        fclose(fp);
+        fp = NULL;
+        lrc = 0;
+        for (int k = 0; k < nchain && lrc == 0; k++) {
+            FILE *lf = fopen(chain[k].path, "rb");
+            if (!lf) {
+                snprintf(err, sizeof(err), "delta chain file vanished");
+                lrc = 1;
+                break;
+            }
+            ds4_kvstore_entry lh = {0};
+            uint32_t ltb = 0;
+            bool hdr_ok = ds4_kvstore_read_header(lf, &lh, &ltb) &&
+                          lh.tokens == chain[k].tokens &&
+                          lh.payload_bytes == chain[k].payload_bytes;
+            if (hdr_ok && fseek(lf, (long)ltb, SEEK_CUR) != 0) hdr_ok = false;
+            if (!hdr_ok) {
+                snprintf(err, sizeof(err), "delta chain file changed mid-load");
+                fclose(lf);
+                lrc = 1;
+                break;
+            }
+            if (ds4_session_load_payload_span(session, lf,
+                                              chain[k].payload_bytes,
+                                              chain[k].delta_from,
+                                              err, sizeof(err)) != 0) {
+                fclose(lf);
+                lrc = 1;
+                break;
+            }
+            if (k == nchain - 1) fp = lf;   /* child: keep positioned for trailer */
+            else fclose(lf);
+        }
+    }
+    if (lrc == 0)
     {
         const ds4_tokens *loaded_tokens = ds4_session_tokens(session);
         if (loaded_tokens && loaded_tokens->len == (int)hdr.tokens) {
@@ -2354,7 +2718,8 @@ static int kv_cache_try_load_one(ds4_kvstore *kc, ds4_engine *engine,
                 responses_protocol ? "RESPPROTO" : "",
                 path, err, (kv_now_sec() - load_t0) * 1000.0);
     }
-    fclose(fp);
+    if (fp) fclose(fp);
+    for (int k = 0; k < nchain; k++) free(chain[k].path);
 
     if (loaded > 0) {
         const double load_ms = (kv_now_sec() - load_t0) * 1000.0;

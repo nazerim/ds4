@@ -10,6 +10,9 @@
 
 #define DS4_KVSTORE_FIXED_HEADER 48u
 #define DS4_KVSTORE_HEADER_V2_EXTRA 24u
+/* v3 delta chain extension: v2's 24 bytes + 40-byte parent sha hex +
+ * 4-byte delta_from rows. A v3 node persists only rows [delta_from, tokens). */
+#define DS4_KVSTORE_HEADER_V3_EXTRA 68u
 #define DS4_KVSTORE_CONV_ID_MAX_BYTES 131072u
 #define DS4_KVSTORE_DEFAULT_MB 4096
 #define DS4_KVSTORE_HIT_HALF_LIFE_SECONDS (6ull * 60ull * 60ull)
@@ -84,8 +87,14 @@ typedef struct {
     uint32_t bucket;       /* tokens / anchor_step; orders redundant eviction
                             * (oldest/smallest bucket first, plan §3.3) */
     uint8_t  level;        /* halving level of this conversation's large-middle spacing */
-    uint8_t  hdr_version;  /* 1 or 2, from the file's version byte */
+    uint8_t  hdr_version;  /* 1, 2 or 3, from the file's version byte */
     bool     stale;        /* decommissioned: never set, never acted on (inert) */
+    /* v3 delta chain: rows [delta_from, tokens) live in this file; rows
+     * [0, delta_from) come from parent_sha's file. children is an in-memory
+     * refcount built at scan time (never persisted). */
+    char     parent_sha[41];
+    uint32_t delta_from;
+    uint32_t children;
 } ds4_kvstore_entry;
 
 typedef struct {
@@ -237,6 +246,7 @@ bool ds4_kvstore_file_size_fits(const ds4_kvstore *kc,
                                 uint64_t text_bytes,
                                 uint64_t payload_bytes,
                                 uint64_t trailer_bytes,
+                                bool is_delta,
                                 uint64_t *file_bytes_out,
                                 uint64_t *required_bytes_out);
 void ds4_kvstore_evict(ds4_kvstore *kc, const ds4_tokens *live,
@@ -302,6 +312,14 @@ void ds4_kvstore_fill_header(uint8_t h[DS4_KVSTORE_FIXED_HEADER],
                              uint32_t tokens, uint32_t hits, uint32_t ctx_size,
                              uint64_t created_at, uint64_t last_used,
                              uint64_t payload_bytes);
+void ds4_kvstore_fill_header_v3(
+        uint8_t h[DS4_KVSTORE_FIXED_HEADER + DS4_KVSTORE_HEADER_V3_EXTRA],
+        uint8_t model_id, uint8_t quant_bits, uint8_t reason, uint8_t ext_flags,
+        uint32_t tokens, uint32_t hits, uint32_t ctx_size,
+        uint64_t created_at, uint64_t last_used, uint64_t payload_bytes,
+        uint64_t conv_id, uint64_t model_fp, uint32_t bucket, uint8_t level,
+        bool stale, const char parent_sha[41], uint32_t delta_from);
+
 void ds4_kvstore_fill_header_v2(uint8_t h[DS4_KVSTORE_FIXED_HEADER + DS4_KVSTORE_HEADER_V2_EXTRA],
                                 uint8_t model_id, uint8_t quant_bits,
                                 uint8_t reason, uint8_t ext_flags,
