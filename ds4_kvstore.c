@@ -521,6 +521,12 @@ static uint64_t kv_header_total(uint8_t v) {
     return DS4_KVSTORE_FIXED_HEADER + kv_header_extra(v) + 4ull;
 }
 
+static bool kv_debug_enabled(void) {
+    static int v = -1;
+    if (v < 0) v = getenv("DS4_KV_DEBUG") ? 1 : 0;
+    return v == 1;
+}
+
 static bool kv_delta_enabled(void) {
     static int v = -1;
     if (v < 0) {
@@ -1800,31 +1806,43 @@ static int kv_store_pick_parent(ds4_kvstore *kc, ds4_engine *engine,
 
         const ds4_kvstore_entry *o = &kc->entry[best];
         bool ok = false;
+        const char *rej = "open";
+        char terr[160];
+        terr[0] = '\0';
         FILE *fp = o->path ? fopen(o->path, "rb") : NULL;
         if (fp) {
             ds4_kvstore_entry ph = {0};
             uint32_t ptb = 0;
+            rej = "header";
             if (ds4_kvstore_read_header(fp, &ph, &ptb) &&
                 ph.tokens == o->tokens && ptb > 0 &&
                 (uint64_t)ptb <= (uint64_t)text_len) {
                 char *pt = kv_xmalloc((size_t)ptb + 1);
+                rej = "text-prefix";
                 bool text_ok = pt &&
                     fread(pt, 1, ptb, fp) == (size_t)ptb &&
                     memcmp(pt, text, ptb) == 0;
                 free(pt);
                 if (text_ok) {
                     bool present = false;
+                    rej = "tokfp";
                     if (kv_file_tokfp_ok(fp, ph.payload_bytes, engine, &present) &&
                         present) {
-                        char terr[160];
+                        rej = "token-span";
                         ok = ds4_session_payload_token_span(
                                  fp, ph.tokens, tokens->v, terr,
                                  sizeof(terr)) == 0;
+                        if (ok) rej = NULL;
                     }
                 }
             }
             fclose(fp);
         }
+        if (rej && kv_debug_enabled())
+            kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
+                    "%s: DBG pick_parent reject reason=%s cand_tokens=%u cand=%.12s child_tokens=%d%s%s",
+                    kv_log_name(kc), rej, o->tokens, o->sha, tokens->len,
+                    terr[0] ? " detail=" : "", terr);
         if (ok) {
             free(skip);
             memcpy(out_sha, o->sha, 41);
@@ -2115,7 +2133,7 @@ bool ds4_kvstore_store_live_prefix_text(ds4_kvstore *kc,
      * token-span re-read below is the ground truth and fails closed. */
     if (kv_delta_enabled() &&
         (strcmp(reason, "continued") == 0 || strcmp(reason, "turn") == 0) &&
-        store_tokens.len >= 4 && (store_tokens.len % 4) == 0 &&
+        store_tokens.len >= 4 &&
         ds4_session_supports_delta(session)) {
         /* The entry index is (re)built by directory scans; a store never
          * pushes.  Refresh so a previous anchor from THIS process (e.g. the
@@ -2401,6 +2419,7 @@ static int kv_cache_find_text_prefix_skip(ds4_kvstore *kc, const char *prompt_te
     if (!prompt_text) return -1;
     const size_t prompt_bytes = strlen(prompt_text);
     int best = -1;
+    int best_mem = -1;  /* deepest memory-plausible entry (debug diff on miss) */
     for (int i = 0; i < kc->len; i++) {
         ds4_kvstore_entry *e = &kc->entry[i];
         bool skipped = false;
@@ -2408,6 +2427,9 @@ static int kv_cache_find_text_prefix_skip(ds4_kvstore *kc, const char *prompt_te
             if (skip[s] == i) { skipped = true; break; }
         if (skipped) continue;
         if (e->text_bytes > prompt_bytes) continue;
+        if (kv_debug_enabled() &&
+            (best_mem < 0 || e->text_bytes > kc->entry[best_mem].text_bytes))
+            best_mem = i;
         /* Payload-less (agent /strip'd) files pass header/text verification but
          * can never load a session; skipping them here keeps them from
          * terminating the fallback chain in front of a valid smaller anchor. */
@@ -2428,6 +2450,40 @@ static int kv_cache_find_text_prefix_skip(ds4_kvstore *kc, const char *prompt_te
         char sha[41];
         ds4_kvstore_sha1_bytes_hex(prompt_text, (size_t)e->text_bytes, sha);
         if (!strcmp(sha, e->sha)) best = i;
+    }
+    /* Verdict fix #4: on a miss, name the mechanism - first divergent byte
+     * of the deepest memory-plausible candidate vs the query, both windows.
+     * This is what the drift investigation had to reconstruct by hand. */
+    if (best < 0 && best_mem >= 0 && kv_debug_enabled()) {
+        const ds4_kvstore_entry *m = &kc->entry[best_mem];
+        FILE *fp = m->path ? fopen(m->path, "rb") : NULL;
+        if (fp) {
+            ds4_kvstore_entry ph = {0};
+            uint32_t ptb = 0;
+            if (ds4_kvstore_read_header(fp, &ph, &ptb) && ptb > 0 &&
+                (uint64_t)ptb <= prompt_bytes) {
+                char *pt = kv_xmalloc((size_t)ptb);
+                if (fread(pt, 1, ptb, fp) == (size_t)ptb) {
+                    uint32_t d = 0;
+                    while (d < ptb && pt[d] == prompt_text[d]) d++;
+                    if (d < ptb) {
+                        uint32_t w = d > 32 ? d - 32 : 0;
+                        uint32_t win = ptb - w > 96 ? 96 : ptb - w;
+                        kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
+                                "%s: DBG stitch miss: deepest cand %.12s (tokens=%u) diverges at byte %u/%u",
+                                kv_log_name(kc), m->sha, ph.tokens, d, ptb);
+                        kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
+                                "%s: DBG stitch miss query window: %.*s",
+                                kv_log_name(kc), (int)win, prompt_text + w);
+                        kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
+                                "%s: DBG stitch miss cand  window: %.*s",
+                                kv_log_name(kc), (int)win, pt + w);
+                    }
+                }
+                free(pt);
+            }
+            fclose(fp);
+        }
     }
     return best;
 }

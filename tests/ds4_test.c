@@ -618,6 +618,70 @@ static void test_kv_delta_parity(void) {
     }
     free(otext);
 
+    /* Odd-frontier DELTA (field finding 2026-09-28: the child-side %4 gate
+     * silently full-stored ~75% of turn snapshots).  An unaligned frontier
+     * with a chainable reason must delta over the deepest aligned ancestor
+     * (pooled block keys floor by group index, so the span [2048, 2051)
+     * carries 3 rows and zero new block keys), and loading the stitched
+     * chain must equal loading a FULL checkpoint of the SAME live state.
+     * Note the parity baseline: a 1-token append sync runs decode-shaped
+     * kernels whose rows legitimately differ in the last ULPs from one-shot
+     * prefill rows, so the store source here is the one-shot session itself
+     * (prefill-shaped tail) - stitch-vs-full is the format invariant. */
+    const int odd2 = 2051;
+    ds4_tokens t_odd2 = prompt; t_odd2.len = odd2;
+    ds4_session *s_F = NULL;
+    TEST_ASSERT(ds4_session_create(&s_F, engine, 8192) == 0);
+    TEST_ASSERT(ds4_session_sync(s_F, &t_odd2, err, sizeof(err)) == 0);
+    /* Full twin in dirA (reason bypasses the delta gate) ... */
+    TEST_ASSERT(ds4_kvstore_store_live_prefix(&kcA, engine, s_F,
+                ds4_session_tokens(s_F), odd2, "evict", &hooks,
+                err, sizeof(err)));
+    /* ... and the continued store in dirB, which must chain onto 2048. */
+    TEST_ASSERT(ds4_kvstore_store_live_prefix(&kcB, engine, s_F,
+                ds4_session_tokens(s_F), odd2, "continued", &hooks,
+                err, sizeof(err)));
+    size_t o2len = 0;
+    char *o2text = ds4_kvstore_render_tokens_text(engine, &t_odd2, &o2len);
+    TEST_ASSERT(o2text && o2len > 0);
+    char shaO2[41];
+    ds4_kvstore_sha1_bytes_hex(o2text, o2len, shaO2);
+    char pathO2[512];
+    snprintf(pathO2, sizeof(pathO2), "%s/%.40s.kv", dirB, shaO2);
+    ds4_kvstore_entry eO2 = {0};
+    uint32_t tob2 = 0;
+    FILE *fo2 = fopen(pathO2, "rb");
+    TEST_ASSERT(fo2 != NULL);
+    if (fo2) { TEST_ASSERT(ds4_kvstore_read_header(fo2, &eO2, &tob2)); fclose(fo2); }
+    TEST_ASSERT(eO2.hdr_version == 3 && eO2.tokens == (uint32_t)odd2 &&
+                eO2.delta_from == (uint32_t)full && eO2.parent_sha[0] != '\0');
+    {
+        ds4_session *s_E = NULL, *s_G = NULL;
+        TEST_ASSERT(ds4_session_create(&s_E, engine, 8192) == 0);
+        TEST_ASSERT(ds4_session_create(&s_G, engine, 8192) == 0);
+        ds4_tokens effO2 = {0};
+        ds4_kvstore_load_result resO2 = {0};
+        /* Stitch load (1024 root + 2048 span + 2051 span). */
+        TEST_ASSERT(ds4_kvstore_try_load_text(&kcB, engine, s_E, o2text,
+                    &effO2, &resO2, NULL, false) == odd2);
+        ds4_kvstore_load_result_free(&resO2);
+        resO2 = (ds4_kvstore_load_result){0};
+        /* Full twin load. */
+        TEST_ASSERT(ds4_kvstore_try_load_text(&kcA, engine, s_G, o2text,
+                    &effO2, &resO2, NULL, false) == odd2);
+        ds4_kvstore_load_result_free(&resO2);
+        test_qwen_prefill_scores_equal(s_E, s_G);
+        test_qwen_prefill_scores_equal(s_G, s_F);
+        /* Continuation past an odd delta frontier must also agree. */
+        TEST_ASSERT(ds4_session_sync(s_E, &prompt, err, sizeof(err)) == 0);
+        TEST_ASSERT(ds4_session_sync(s_F, &prompt, err, sizeof(err)) == 0);
+        test_qwen_prefill_scores_equal(s_E, s_F);
+        ds4_session_free(s_E);
+        ds4_session_free(s_G);
+    }
+    free(o2text);
+    ds4_session_free(s_F);
+
     /* Broken chain: deleting the root orphans the delta.  Load must return
      * 0 (no shorter anchor left) and drop the orphan file. */
     TEST_ASSERT(unlink(rootB) == 0);

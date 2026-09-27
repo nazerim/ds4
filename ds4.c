@@ -62813,9 +62813,13 @@ static int qwen4_session_save_payload_span(ds4_session *s, FILE *fp,
      * snapshot's block-key region truncates toward zero exactly as before.
      * Gating on rows itself silently skipped every odd-length full store
      * (turn/evict/cold at unaligned frontiers) - caught in the field. */
-    if (rows_from > 0 &&
-        (rows_from > rows || (rows_from % 4u) != 0u || (rows % 4u) != 0u)) {
-        payload_set_err(err, errlen, "Qwen3.8 delta span must align to row groups of 4");
+    /* Only the PARENT boundary must align to row groups: pooled block keys
+     * are counted by floored group index, so an arbitrary frontier N stores
+     * exactly the complete groups [rows_from/4, N/4) - identical to a full
+     * snapshot at N.  Gating the child on %4 made every odd-frontier turn
+     * store fall back to a full snapshot (~75% of them; caught in field). */
+    if (rows_from > 0 && (rows_from > rows || (rows_from % 4u) != 0u)) {
+        payload_set_err(err, errlen, "Qwen3.8 delta span parent must align to row groups of 4");
         return 1;
     }
     uint32_t header[DS4_SESSION_PAYLOAD_U32_FIELDS] = {
@@ -62919,8 +62923,7 @@ static int qwen4_session_load_payload_span(ds4_session *s, FILE *fp, const uint3
         payload_set_err(err, errlen, "KV checkpoint is longer than this session's context");
         return 1;
     }
-    if (rows_from > 0 &&
-        (rows_from > rows || (rows_from % 4u) != 0u || (rows % 4u) != 0u)) {
+    if (rows_from > 0 && (rows_from > rows || (rows_from % 4u) != 0u)) {
         payload_set_err(err, errlen, "KV delta span is not row-aligned or exceeds the checkpoint");
         return 1;
     }

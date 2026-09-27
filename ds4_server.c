@@ -11736,25 +11736,31 @@ static bool kv_cache_store_live_prefix_text(server *s, server_slot *slot,
          *    byte-exactly replays the same images.
          */
         const slot_vision_store *vs = &slot->vision_store;
+        const char *vrej = NULL;
         bool okv = vs->valid && store_len == tokens->len &&
                    vs->rec_count <= KV_VISION_MAX_RECORDS;
+        if (!okv)
+            vrej = !vs->valid ? "store-context-invalid"
+                 : store_len != tokens->len ? "not-frontier"
+                 : "too-many-records";
         size_t rec_count = 0;
         const bool partial = okv && store_len < vs->base_tokens;
         if (okv && partial) {
-            if (cache_text_override) okv = false;  /* keyed snapshots need the full base */
+            if (cache_text_override) { okv = false; vrej = "partial-with-override"; }
             for (size_t i = 0; okv && i < vs->rec_count; i++) {
                 const uint64_t start = (uint64_t)vs->recs[i].token_start;
                 const uint64_t end = start + vs->recs[i].token_count;
                 if (vs->recs[i].token_count == 0) {
-                    okv = false;
+                    okv = false; vrej = "empty-record";
                 } else if (end <= (uint64_t)store_len) {
                     recs[rec_count++] = vs->recs[i];
                 } else if (start < (uint64_t)store_len) {
                     okv = false;  /* a span crossing the frontier is unusable */
+                    vrej = "image-crosses-frontier";
                 }
             }
         } else if (okv && vs->base_tokens > store_len) {
-            okv = false;
+            okv = false; vrej = "base-past-frontier";
         }
         if (okv && !partial) {
             for (size_t i = 0; i < vs->rec_count; i++) {
@@ -11763,6 +11769,7 @@ static bool kv_cache_store_live_prefix_text(server *s, server_slot *slot,
                 if (vs->recs[i].token_count == 0 ||
                     end > (uint64_t)store_len) {
                     okv = false;  /* a span crossing the frontier is unusable */
+                    vrej = "frontier-image-crossing";
                     break;
                 }
                 recs[i] = vs->recs[i];
@@ -11809,16 +11816,16 @@ static bool kv_cache_store_live_prefix_text(server *s, server_slot *slot,
             for (size_t i = 0; okv && i < rec_count; i++) {
                 if (recs[i].token_count == 0 ||
                     (uint64_t)recs[i].token_start < (uint64_t)tok_cursor) {
-                    okv = false;  /* records must be ordered and disjoint */
+                    okv = false; vrej = "records-unordered";
                     break;
                 }
                 const char *mk = memmem(vs->base_text + bpos,
                                         vs->base_len - bpos,
                                         MKPFX, sizeof(MKPFX) - 1);
-                if (!mk) { okv = false; break; }
+                if (!mk) { okv = false; vrej = "marker-not-found"; break; }
                 const char *mk_end = memchr(mk, '\x1f',
                                             (size_t)(vs->base_text + vs->base_len - mk));
-                if (!mk_end) { okv = false; break; }
+                if (!mk_end) { okv = false; vrej = "marker-unterminated"; break; }
                 mk_end += 1;
                 size_t seg = (size_t)(mk_end - (vs->base_text + bpos));
                 if (klen + seg >= cap) { okv = false; break; }
@@ -11827,7 +11834,7 @@ static bool kv_cache_store_live_prefix_text(server *s, server_slot *slot,
                 bpos += seg;
                 tok_cursor = (int)(recs[i].token_start + recs[i].token_count);
             }
-            if (okv && store_len < tok_cursor) okv = false;
+            if (okv && store_len < tok_cursor) { okv = false; vrej = "cursor-past-frontier"; }
             if (okv && store_len > tok_cursor) {
                 /* Skip structural placeholder tokens (e.g. the vision_end
                  * that follows a record's pad span): a token whose render
@@ -11858,11 +11865,11 @@ static bool kv_cache_store_live_prefix_text(server *s, server_slot *slot,
                  * continuation, so the spliced key is an exact normalized
                  * prefix (any re-tokenization drift fails the store closed
                  * instead of writing an unreachable key). */
-                if (!run_text) okv = false;
+                if (!run_text) { okv = false; vrej = "tail-render-failed"; }
                 else if (run_len == 0 || vs->base_len - bpos < run_len ||
-                         memcmp(vs->base_text + bpos, run_text, run_len) != 0)
-                    okv = false;
-                else if (klen + run_len >= cap) okv = false;
+                         memcmp(vs->base_text + bpos, run_text, run_len) != 0) {
+                    okv = false; vrej = "tail-render-mismatch";
+                } else if (klen + run_len >= cap) { okv = false; vrej = "key-cap"; }
                 else { memcpy(key + klen, run_text, run_len); klen += run_len; }
                 free(run_text);
             }
@@ -11879,6 +11886,12 @@ static bool kv_cache_store_live_prefix_text(server *s, server_slot *slot,
             }
         }
         if (!okv) {
+            if (getenv("DS4_KV_DEBUG"))
+                server_log(DS4_LOG_KVCACHE,
+                           "ds4-server: DBG vision store rejected reason=%s store_len=%d len=%d base_tokens=%d recs=%zu/%zu valid=%d",
+                           vrej ? vrej : "unknown", store_len, tokens->len,
+                           vs->base_tokens, rec_count, vs->rec_count,
+                           (int)vs->valid);
             pthread_mutex_unlock(&s->inference_mu);
             return false;
         }
