@@ -528,11 +528,16 @@ static void test_kv_delta_parity(void) {
     TEST_ASSERT(ds4_kvstore_store_live_prefix(&kcB, engine, s_live,
                 ds4_session_tokens(s_live), half, "cold", &hooks, err, sizeof(err)));
 
-    /* Frontier 2048: A gets a full node (reason bypasses the delta gate),
-     * B gets a continued store, which must chain onto the 1024 anchor. */
+    /* Frontier 2048: A gets a FULL node, B gets a continued store which must
+     * chain onto the 1024 anchor.  Since P3.2 every reason can chain, so A's
+     * fullness is forced explicitly through the kill switch instead of being
+     * an accident of the reason string. */
     TEST_ASSERT(ds4_session_sync(s_live, &t_full, err, sizeof(err)) == 0);
+    char *saved_frA = test_save_env("DS4_KV_DELTA_FULL_REASONS");
+    setenv("DS4_KV_DELTA_FULL_REASONS", "0", 1);
     TEST_ASSERT(ds4_kvstore_store_live_prefix(&kcA, engine, s_live,
                 ds4_session_tokens(s_live), full, "evict", &hooks, err, sizeof(err)));
+    test_restore_env("DS4_KV_DELTA_FULL_REASONS", saved_frA);
     TEST_ASSERT(ds4_kvstore_store_live_prefix(&kcB, engine, s_live,
                 ds4_session_tokens(s_live), full, "continued", &hooks, err, sizeof(err)));
 
@@ -582,13 +587,17 @@ static void test_kv_delta_parity(void) {
     test_qwen_prefill_scores_equal(s_B, s_ref);
 
     /* Regression (caught in the field 2026-09-27): a non-row-aligned frontier
-     * must still store and load as a FULL checkpoint - the delta alignment
-     * assert must not gate odd-length turn/evict/cold stores. */
+     * must still store and load correctly - the delta alignment assert must
+     * not gate odd-length stores.  Forced full here so the check stays about
+     * the FULL path; the odd-frontier DELTA case below covers chaining. */
     const int odd = 2050;
     ds4_tokens t_odd = prompt; t_odd.len = odd;
     TEST_ASSERT(ds4_session_sync(s_live, &t_odd, err, sizeof(err)) == 0);
+    char *saved_frO = test_save_env("DS4_KV_DELTA_FULL_REASONS");
+    setenv("DS4_KV_DELTA_FULL_REASONS", "0", 1);
     TEST_ASSERT(ds4_kvstore_store_live_prefix(&kcA, engine, s_live,
                 ds4_session_tokens(s_live), odd, "cold", &hooks, err, sizeof(err)));
+    test_restore_env("DS4_KV_DELTA_FULL_REASONS", saved_frO);
     size_t olen = 0;
     char *otext = ds4_kvstore_render_tokens_text(engine, &t_odd, &olen);
     TEST_ASSERT(otext && olen > 0);
@@ -633,10 +642,14 @@ static void test_kv_delta_parity(void) {
     ds4_session *s_F = NULL;
     TEST_ASSERT(ds4_session_create(&s_F, engine, 8192) == 0);
     TEST_ASSERT(ds4_session_sync(s_F, &t_odd2, err, sizeof(err)) == 0);
-    /* Full twin in dirA (reason bypasses the delta gate) ... */
+    /* Full twin in dirA, forced through the kill switch (since P3.2 the
+     * reason alone no longer bypasses chaining) ... */
+    char *saved_frO2 = test_save_env("DS4_KV_DELTA_FULL_REASONS");
+    setenv("DS4_KV_DELTA_FULL_REASONS", "0", 1);
     TEST_ASSERT(ds4_kvstore_store_live_prefix(&kcA, engine, s_F,
                 ds4_session_tokens(s_F), odd2, "evict", &hooks,
                 err, sizeof(err)));
+    test_restore_env("DS4_KV_DELTA_FULL_REASONS", saved_frO2);
     /* ... and the continued store in dirB, which must chain onto 2048. */
     TEST_ASSERT(ds4_kvstore_store_live_prefix(&kcB, engine, s_F,
                 ds4_session_tokens(s_F), odd2, "continued", &hooks,
@@ -681,6 +694,111 @@ static void test_kv_delta_parity(void) {
     }
     free(o2text);
     ds4_session_free(s_F);
+
+    /* P3.2 (2026-09-29): every store reason must be able to chain.  cold,
+     * evict and shutdown were gated out of the delta path, so each wrote a
+     * whole-session payload.  Measured on the live blade that is the dominant
+     * cost: 380 of 424 GiB were full nodes, and four shutdown stores in one
+     * restart-heavy day alone accounted for 32.3 GiB.  pick_parent still fails
+     * closed (header, text prefix, tokenizer fingerprint, exact payload token
+     * span), so a store with no verified ancestor writes full anyway, and
+     * lineage retention already defers evicting a parent while a child lives.
+     * DS4_KV_DELTA_FULL_REASONS=0 restores the pre-P3.2 restriction; the
+     * forced-full twins elsewhere in this test rely on it. */
+    {
+        char dirC[] = "/tmp/ds4-kv-parity-C-XXXXXX";
+        TEST_ASSERT(mkdtemp(dirC) != NULL);
+        ds4_kvstore kcC = {0};
+        TEST_ASSERT(ds4_kvstore_open(&kcC, dirC, 4096, false, 0, opt,
+                                     "parityC", test_kv_log_cb, NULL));
+        ds4_session *s_H = NULL, *s_I = NULL, *s_J = NULL;
+        TEST_ASSERT(ds4_session_create(&s_H, engine, 8192) == 0);
+        TEST_ASSERT(ds4_session_create(&s_I, engine, 8192) == 0);
+        TEST_ASSERT(ds4_session_create(&s_J, engine, 8192) == 0);
+
+        /* A cold store with no ancestor is still a full root. */
+        TEST_ASSERT(ds4_session_sync(s_H, &t_half, err, sizeof(err)) == 0);
+        TEST_ASSERT(ds4_kvstore_store_live_prefix(&kcC, engine, s_H,
+                    ds4_session_tokens(s_H), half, "cold", &hooks,
+                    err, sizeof(err)));
+        /* evict at the aligned frontier must chain onto that cold root. */
+        TEST_ASSERT(ds4_session_sync(s_H, &t_full, err, sizeof(err)) == 0);
+        TEST_ASSERT(ds4_kvstore_store_live_prefix(&kcC, engine, s_H,
+                    ds4_session_tokens(s_H), full, "evict", &hooks,
+                    err, sizeof(err)));
+        /* shutdown at an ODD frontier must chain onto the aligned node. */
+        const int odd3 = 2053;
+        ds4_tokens t_odd3 = prompt; t_odd3.len = odd3;
+        TEST_ASSERT(ds4_session_sync(s_H, &t_odd3, err, sizeof(err)) == 0);
+        TEST_ASSERT(ds4_kvstore_store_live_prefix(&kcC, engine, s_H,
+                    ds4_session_tokens(s_H), odd3, "shutdown", &hooks,
+                    err, sizeof(err)));
+
+        size_t o3len = 0;
+        char *o3text = ds4_kvstore_render_tokens_text(engine, &t_odd3, &o3len);
+        TEST_ASSERT(o3text && o3len > 0);
+        char shaO3[41], pathC3[512], pathCF[512];
+        ds4_kvstore_sha1_bytes_hex(o3text, o3len, shaO3);
+        snprintf(pathCF, sizeof(pathCF), "%s/%.40s.kv", dirC, shaF);
+        snprintf(pathC3, sizeof(pathC3), "%s/%.40s.kv", dirC, shaO3);
+        ds4_kvstore_entry eCF = {0}, eC3 = {0};
+        uint32_t tbCF = 0, tbC3 = 0;
+        FILE *fCF = fopen(pathCF, "rb");
+        TEST_ASSERT(fCF != NULL);
+        if (fCF) { TEST_ASSERT(ds4_kvstore_read_header(fCF, &eCF, &tbCF)); fclose(fCF); }
+        FILE *fC3 = fopen(pathC3, "rb");
+        TEST_ASSERT(fC3 != NULL);
+        if (fC3) { TEST_ASSERT(ds4_kvstore_read_header(fC3, &eC3, &tbC3)); fclose(fC3); }
+        /* The evict node chains onto the cold root; the shutdown node chains
+         * onto the evict node across an unaligned frontier. */
+        TEST_ASSERT(eCF.hdr_version == 3 && eCF.tokens == (uint32_t)full &&
+                    eCF.delta_from == (uint32_t)half && eCF.parent_sha[0] != '\0');
+        TEST_ASSERT(eC3.hdr_version == 3 && eC3.tokens == (uint32_t)odd3 &&
+                    eC3.delta_from == (uint32_t)full && eC3.parent_sha[0] != '\0');
+
+        /* Forced-full twin of the SAME live state in dirA, via the kill switch,
+         * so the parity check is stitch-versus-full and not stitch-versus-
+         * stitch.  This also pins the switch itself. */
+        char *saved_fr = test_save_env("DS4_KV_DELTA_FULL_REASONS");
+        setenv("DS4_KV_DELTA_FULL_REASONS", "0", 1);
+        TEST_ASSERT(ds4_kvstore_store_live_prefix(&kcA, engine, s_H,
+                    ds4_session_tokens(s_H), odd3, "shutdown", &hooks,
+                    err, sizeof(err)));
+        test_restore_env("DS4_KV_DELTA_FULL_REASONS", saved_fr);
+        char pathA3[512];
+        snprintf(pathA3, sizeof(pathA3), "%s/%.40s.kv", dirA, shaO3);
+        struct stat stA3 = {0}, stC3 = {0};
+        TEST_ASSERT(stat(pathA3, &stA3) == 0 && stat(pathC3, &stC3) == 0);
+        ds4_kvstore_entry eA3 = {0};
+        uint32_t tbA3 = 0;
+        FILE *fA3 = fopen(pathA3, "rb");
+        TEST_ASSERT(fA3 != NULL);
+        if (fA3) { TEST_ASSERT(ds4_kvstore_read_header(fA3, &eA3, &tbA3)); fclose(fA3); }
+        TEST_ASSERT(eA3.hdr_version != 3 && eA3.delta_from == 0);
+        /* The chained node must be the smaller of the two. */
+        TEST_ASSERT(stC3.st_size < stA3.st_size);
+
+        /* Load both and compare, then continue past the frontier. */
+        ds4_tokens effC = {0}, effA3 = {0};
+        ds4_kvstore_load_result resC = {0}, resA3 = {0};
+        TEST_ASSERT(ds4_kvstore_try_load_text(&kcC, engine, s_I, o3text,
+                    &effC, &resC, NULL, false) == odd3);
+        ds4_kvstore_load_result_free(&resC);
+        TEST_ASSERT(ds4_kvstore_try_load_text(&kcA, engine, s_J, o3text,
+                    &effA3, &resA3, NULL, false) == odd3);
+        ds4_kvstore_load_result_free(&resA3);
+        test_qwen_prefill_scores_equal(s_I, s_J);
+        TEST_ASSERT(ds4_session_sync(s_I, &prompt, err, sizeof(err)) == 0);
+        TEST_ASSERT(ds4_session_sync(s_J, &prompt, err, sizeof(err)) == 0);
+        test_qwen_prefill_scores_equal(s_I, s_J);
+
+        free(o3text);
+        ds4_session_free(s_H);
+        ds4_session_free(s_I);
+        ds4_session_free(s_J);
+        ds4_kvstore_close(&kcC);
+        test_kv_rmrf(dirC);
+    }
 
     /* Broken chain: deleting the root orphans the delta.  Load must return
      * 0 (no shorter anchor left) and drop the orphan file. */

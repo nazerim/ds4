@@ -536,6 +536,36 @@ static bool kv_delta_enabled(void) {
     return v == 1;
 }
 
+/* Read on every call rather than cached like DS4_KV_DELTA, so a test can
+ * toggle it around a single store to force the pre-P3.2 full-node behaviour.
+ * Operators can also use it to bisect a field regression without losing the
+ * P1 chaining that continued/turn stores depend on. */
+static bool kv_delta_full_reasons_enabled(void) {
+    const char *e = getenv("DS4_KV_DELTA_FULL_REASONS");
+    return !(e && !strcmp(e, "0"));
+}
+
+/* Which store reasons may write a delta node.  Until P3.2 only continued and
+ * turn could, so every cold, evict and shutdown store wrote a whole-session
+ * payload.  On the live blade that was the dominant cost: 380 of 424 GiB were
+ * full nodes, and four shutdown stores in one restart-heavy day accounted for
+ * 32.3 GiB.  Chaining those reasons is safe because pick_parent fails closed
+ * (header, text prefix, tokenizer fingerprint, exact payload token span), so a
+ * store with no verified ancestor still writes full, and lineage retention
+ * already defers evicting a parent while a child lives, so a shutdown node's
+ * ancestors stay resident for as long as it does.  The cost is more pinned
+ * parents, i.e. more eviction deferrals - that is the argument for the P2.1
+ * middle-retire re-anchor. */
+static bool kv_delta_reason_chainable(const char *reason) {
+    if (!reason) return false;
+    /* These two chained before P3.2; the kill switch does not affect them. */
+    if (!strcmp(reason, "continued") || !strcmp(reason, "turn")) return true;
+    if (!strcmp(reason, "cold") || !strcmp(reason, "evict") ||
+        !strcmp(reason, "shutdown"))
+        return kv_delta_full_reasons_enabled();
+    return false;
+}
+
 bool ds4_kvstore_read_header(FILE *fp, ds4_kvstore_entry *e,
                              uint32_t *text_bytes) {
     uint8_t h[DS4_KVSTORE_FIXED_HEADER];
@@ -2132,7 +2162,7 @@ bool ds4_kvstore_store_live_prefix_text(ds4_kvstore *kc,
      * chain too: the text-prefix scan is only a fast filter - the payload
      * token-span re-read below is the ground truth and fails closed. */
     if (kv_delta_enabled() &&
-        (strcmp(reason, "continued") == 0 || strcmp(reason, "turn") == 0) &&
+        kv_delta_reason_chainable(reason) &&
         store_tokens.len >= 4 &&
         ds4_session_supports_delta(session)) {
         /* The entry index is (re)built by directory scans; a store never

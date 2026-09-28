@@ -101,13 +101,26 @@ Status key: [ ] todo, [~] in progress, [x] done.
 - [ ] P0  pi-side prompt-head stability: tool-manifest memoization (user-added;
           largest measured cost, drafted patch exists, different repo so no build
           contention with the ds4 phases)
-- [ ] P1  P3.2 evict/cold/shutdown chaining (biggest recurring disk win)
+- [x] P1  P3.2 evict/cold/shutdown chaining — DONE, see progress log 01:05
 - [ ] P2  Backtick Option A: output-side hardening + repro + content detector
 - [ ] P3  Bootstrap id-index (kill the per-request whole-dir scan)
 - [ ] P4  P3.1 tail: double-write investigation + store telemetry
 - [ ] P5  P2.1 middle-retire re-anchor (highest risk; gate on P1-P4 landing)
 - [ ] P6  oMLX recon synthesis + implement portable perf wins for Qwen 3.8 Flash
 - [ ] P7  Docs closeout (ADR, TODO, HANDOVER), full suite, restart engine, report
+- [ ] P8  Adjacent hygiene (user instruction 00:50: add high-priority adjacent
+          work to tonight's queue): untrack the two committed test binaries
+          tests/kv_policy_harness and tests/test_prompt_prefix, which violate
+          this repo's own "no binary artifacts tracked" rule and show up as
+          permanently dirty after every make. Low risk, do last.
+
+Adjacent-work rule added by the user at 00:50: if high-priority adjacent work
+turns up during any phase, add it to this queue and implement it tonight rather
+than only noting it. Candidates already identified and deliberately NOT queued:
+purging the 380 GiB of full nodes on the blade (destructive to live cache; let
+LRU drain it and report the numbers instead), and the 5 files with no
+fingerprint section (older or aborted stores; the trailer walker already fails
+closed on them).
 
 ### Phase P0 — pi-side prompt-head stability (tool-manifest.ts)
 
@@ -307,3 +320,23 @@ estimator coupling at ds4.c:39652 since larger chunks raise scratch_bytes.
 - 00:35 user added the pi-side prompt-head track (Phase P0) and confirmed no
   other writers are active. Concurrency raised to 3/3 and deployed; pi restart
   pending, after which this file is the resume point.
+- 00:50 pi restarted, capacity verified at 3/3 active async runs. Three
+  read-only `delegate` lanes launched (uncapped budget, unlike `scout`):
+  P0 pi-side prompt-head recon -> /tmp/pi-prompt-head-recon.md;
+  P6 oMLX/ds4 blockers plus Scratch prior art -> /tmp/omlx-recon3.md;
+  P2 backtick Option A recon -> /tmp/backtick-a-recon.md.
+  Lane ids: bc2ca018 (P0), 1f43059e (P6), b9fe5888 (P2). Tree baseline
+  re-saved at e80a68d before launching, since lanes hold bash.
+- 01:05 P1 (P3.2) COMPLETE. RED first: the new third-directory block failed
+  exactly three assertions (evict node not v3, shutdown node not v3, chained
+  node not smaller). Implementation: kv_delta_reason_chainable() admits all
+  five server reasons, gated by a new uncached DS4_KV_DELTA_FULL_REASONS switch
+  (default on) so the pre-P3.2 restriction is restorable and testable. The
+  three existing forced-full stores in the parity test now force fullness
+  through that switch instead of relying on the reason string, which would
+  otherwise have silently turned "delta equals full" into "delta equals delta".
+  GREEN: --kv-delta OK, --server OK, kv_policy_harness all scenarios passed,
+  production make clean. 154 insertions, 6 deletions across ds4_kvstore.c and
+  tests/ds4_test.c. Review deferred: capacity was 3/3 and the parity test is
+  the mechanical gate, so per the standing under-400-lines rule this batched
+  into a single review lane with P2/P3.
