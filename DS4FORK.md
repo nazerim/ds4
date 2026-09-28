@@ -1300,4 +1300,136 @@ profiling to decompose — no batch-level tool can see inside it.
 
 **Negative results recorded so we don't re-try:** chunk-size tuning (done),
 Q4 non-fused MPP (done), attention-kernel optimization (<0.5% share, done),
-ANE (separate track, dead).
+ANE (separate track, dead), **INT8 MoE prefill (done 2026-09-29, dead)**.
+
+**Scope caveat on this whole section, added 2026-09-29:** the attribution above
+was measured on DeepSeek-V4 q2-q4 `fixed-0731`, and it explicitly put "MoE gemm
+(roofline)" out of scope. Qwen3.8 Flash Next has now been attributed separately
+with `DS4_QWEN4_TIMING=2` (ms per 8192-token chunk, at pos=65536): moe 2041.5
+(36.7%), gdn 1472.1 (26.5%), attn 1298.0 (23.3%), hc_ffn 398.5 (7.2%),
+hc_attn 322.0 (5.8%), ple 30.9 (0.6%). At pos=0 the MoE share is 39.0%. So MoE is
+the largest bucket for this model too, and the 0-3% ceiling below does not cover
+it - but the lever that follows from that is staging, not precision:
+
+**INT8 MoE, measured and rejected.** `PLAN-INT8-MOE.md` has the full trail and
+branch `int8-moe-prefill` has the code. int8 x int8 -> int32 cooperative-tensor
+matmul does compile and pipeline on this box in ds4's own kernel shape, and the
+alignment is genuinely favourable (the routed-expert tiles use NK=32, a Q4_K
+sub-block is exactly 32 values, so one K step is one affine correction boundary).
+What kills it is throughput: measured with warm-up discarded and the two kernels
+interleaved, median of 7 at 200k iterations, **half issues at 53.08 TOP/s and int8
+at 107.16 - a ratio of 2.02x**, i.e. the operand-width ratio. The accurate variant
+(quantizing the residual as a second int8 term, which is 11.4x MORE accurate than
+the fp16 path ds4 ships) needs two int8 matmuls per K step, so it nets +0.9% on
+the MoE bucket and about +0.3% on prefill. The single-term variant would be worth
+~+22% prefill but is 16.4x less accurate than today's fp16 path, which is the trade
+oMLX ships as approximate and off by default.
+
+**The reusable number is the ceiling: a bare half `matmul2d` issues at 53.08 TOP/s
+on this M5 Max, while the MoE bucket achieves far less.** So MoE prefill is bound by
+weight decode, threadgroup staging and bandwidth - not by operand precision, and not
+by the 13.5-14 TF/s figure quoted elsewhere in this file, which is a kernel-level
+number for a different model. `tests/mpp_tensor_int8_bench.m` reproduces the
+measurement in seconds with no model loaded, and `tests/mpp_tensor_int8_probe.m`
+answers which operand types this toolchain accepts. Benchmark trap recorded in both:
+without warm-up and interleaving the same code reported 3.38x, 2.44x and 1.89x
+across iteration counts, which is command-buffer overhead and clock ramp - it would
+have greenlit the project on a phantom.
+
+**MTP verify width, measured and closed 2026-09-29.** Counterbalanced A/B under
+High Power on a fixed 32k prompt, greedy, medians of 2 with the second rep in
+reverse order: depth 2 = 61.88 t/s, auto = 61.42, depth 3 = 58.36, no MTP = 47.90,
+`DS4_QWEN4_NO_FUSE=1` = 43.31. Forcing depth 3 costs 5.7% even though acceptance
+RISES from 70.2% to 73.9%, so the auto policy's default of 2 is already optimal and
+the `qwen4_spec_depth` constants should not be touched. MTP plus the fused graph is
+worth +29.2% over no MTP. Note that `DS4_QWEN4_NO_FUSE=1` is **not** a safe
+fallback: it is 9.6% worse than disabling MTP entirely, because the spec cycle
+cannot batch without the fused graph and falls to T=1 while still paying MTP
+bookkeeping. Decode is the trustworthy metric here (no-MTP measured 47.92 and
+47.88 across reps); prefill drifts with run position by more than most effects
+being measured, so any prefill A/B must be counterbalanced.
+
+---
+
+# KVCACHE — 2026-09-29: chaining for every store reason, tool-replay persistence, telemetry
+
+Operator-facing summary. Design detail and measurements live in
+`.codebase-memory/OVERNIGHT-20260928.md` (program log), `.codebase-memory/adr.md`
+(the ADR entry) and `.codebase-memory/TODO-20260927.md` (status log).
+
+## What changed
+
+1. **Every store reason may chain.** Until now only `continued` and `turn` could
+   write a delta node; `cold`, `evict` and `shutdown` always wrote a whole-session
+   payload, and on the live blade that was the dominant cost — four shutdown stores
+   in one restart-heavy day came to 32.3 GiB. `pick_parent` fails closed on four
+   independent checks (header, text prefix, tokenizer fingerprint, exact payload
+   token span), so a store with no verified ancestor still writes full, and
+   lineage retention already defers evicting a parent while a child lives.
+   Measured live at matched frontiers: cold@10240 421→175 MiB, cold@12288
+   483→175, evict@12066 506→199, and shutdown@17661 chained at 196 MiB where the
+   same path had written 8.14–10.79 GiB at production depth hours earlier.
+2. **Tool-replay spans persist and are restored.** The trailer scanner only knew
+   the DeepSeek DSML envelopes, so every qwen store wrote an empty tool map
+   (`tool_replay disk=0` forever) and each restart re-rendered every replayed tool
+   call canonically, orphaning all pre-restart checkpoints past the first replayed
+   call. Two separate bugs: the scanner, and a bootstrap that read the tool map as
+   the first trailer section when a tokenizer-fingerprint section precedes it. The
+   bootstrap also indexes id→file instead of opening every checkpoint per request.
+   Live on a 400k-token session: `tool_replay mem=0 disk=187 canonical=16`.
+3. **An unclosed tool envelope degrades instead of erroring.** It is a model output
+   shape, not a server fault. Setting `finish=error` also made the parser refuse to
+   recover, which made the already-shipped degrade path unreachable — and Anthropic
+   clients never saw the failure at all, because `anthropic_stop_reason` maps error
+   to `end_turn`.
+4. **Telemetry.** `kv cache stats:` every 50 stores and at close; `sha=` on every
+   `kv cache stored` line.
+
+## Env knobs
+
+| Knob | Default | Effect |
+|---|---|---|
+| `DS4_KV_DELTA` | on | `0` disables delta chaining entirely (the P1 kill switch) |
+| `DS4_KV_DELTA_FULL_REASONS` | on | `0` restores the pre-2026-09-29 restriction where only `continued` and `turn` chain. Only the literal `0` disables it. Read per call rather than cached, so it can be toggled around a single store |
+| `DS4_KV_DEBUG` | off | `1` logs `pick_parent` reject reasons and first-divergent-byte windows on failed stitches |
+
+## Reading the numbers without being misled
+
+- The `full/chained` ratio in the stats line covers **one process lifetime**, so a
+  short shallow session shows ~1.0x because the fixed sections dominate both
+  forms. The whole-blade census measured 0.60 GiB average chained against 5.46 GiB
+  average full — 9.1x per checkpoint.
+- A v2 header means "full store", NOT "legacy". The current binary writes v2
+  headers for full stores and v3 for deltas, so header version is not an age
+  signal. Misreading this once produced a wrong "90% of the blade is pre-P1"
+  claim.
+- `key=token-text` / `key=visible-transcript` is a label, not an identity, and
+  `conv_id` is the sha1 of only the first 131072 text bytes XORed with the model
+  fingerprint. Neither distinguishes two conversations at the same frontier; the
+  `sha=` field does. Grouping logs on either is how a benign re-store under a
+  drifted re-render got misread as the same delta written twice.
+- Four read-only census scripts are checked in under `tests/`:
+  `kv_blade_census.py` (bytes by reason, full vs delta, chain topology),
+  `kv_blade_chained_vs_full.py` (per-checkpoint averages and the P2.1 interior-node
+  set), `kv_toolmap_scan.py` (which files carry a tool map and which ids),
+  `kv_toolmap_span_check.py` (a stored span is byte-identical to the span in the
+  same file's key text). All read headers only, never payloads, so they are safe
+  against a running engine.
+
+## Known residual
+
+- Checkpoints written before these commits whose text contains canonical-rendered
+  tool calls stay unreachable past the first replayed call: one render flip at
+  deploy, stable afterwards. `canonical=16` on a live session is that residual and
+  is flat, not growing.
+- The pi-side prompt head changed the same night (the tool manifest moved into
+  `APPEND_SYSTEM.md`, and per-tool guidelines render for the first time), so
+  ds4-cached pi conversations re-root once. Observed live: a 430k-token session
+  re-rooted at 8192 and re-prefilled 422546 tokens at ~1180 t/s, about six
+  minutes, rebuilding its ladder as it went.
+- An orphaned delta degrades, it does not error: the chain walk verifies every
+  link before touching the session, and any broken link — root or mid-chain, the
+  handling is position-agnostic — unlinks the orphan child, returns 0, and the
+  caller falls back to the next candidate.
+- Deferred on evidence rather than skipped: the P2.1 middle-retire re-anchor.
+  Trigger metrics are in `.codebase-memory/OVERNIGHT-20260928.md`.

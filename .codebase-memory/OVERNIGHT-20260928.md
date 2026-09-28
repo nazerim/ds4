@@ -660,6 +660,30 @@ Useful residue:
   so untracking would have left an orphan no clone could reproduce. AGENTS.md now
   carries the post-merge re-check command, because a convention a merge can
   silently undo is not a control.
+- 05:40 Reviewer's open question R1 closed by inspection, which is stronger than
+  the test alone. The chain walk verifies every ancestor link (header, token
+  fingerprint, and that a delta node carries a parent sha) and on ANY failure
+  frees the collected ancestors, logs, unlinks the orphaned child, returns 0 and
+  lets the caller fall to the next candidate. The handling is position-agnostic,
+  so the existing --kv-delta broken-chain case (root deleted -> load returns 0 ->
+  orphan file gone) covers mid-chain breaks too, not just the one instance it
+  exercises. A separate mid-chain test would be low value against code that does
+  not branch on position.
+- 05:50 Two scheduled read-only lanes created so the remaining verification needs
+  no polling and no interference with the live 400k session: deep-store-verify at
+  +25m (the first turn/evict/shutdown store above 250k tokens, which is the one
+  production-scale claim still untested) and overnight-health-check at +160m
+  (wedge signature, error census, stats lines, blade occupancy).
+- 05:55 DS4FORK.md updated with an operator-facing KVCACHE section (knobs, how to
+  read the numbers without being misled, known residual) and with the INT8 and
+  MTP-depth negative results added to its existing "recorded so we don't re-try"
+  list, including the scope caveat that its prefill attribution was DeepSeek-V4
+  and excluded MoE gemm. The four census scripts are checked in under tests/ so
+  the docs stop pointing at volatile /tmp paths, and kv_blade_chained_vs_full.py
+  no longer labels v2 headers "legacy" - that misreading is what produced the
+  wrong "90% of the blade is pre-P1" claim earlier in the night. Live composition
+  at 05:55: 83 full files at 4.99 GiB average versus 169 chained at 0.56 GiB,
+  ratio 9.0x, with 106 of 257 files carrying a tool map.
 
 ## 4. Standing constraints (do not violate)
 
