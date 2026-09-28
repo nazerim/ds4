@@ -48313,6 +48313,7 @@ enum {
     QWEN4_K_VIS_ATTENTION,
     QWEN4_K_VIS_BIAS_RESIDUAL,
     QWEN4_K_VIS_BIAS_ACT,
+    QWEN4_K_ACT_QUANT_I8,
     QWEN4_K_COUNT,
 };
 
@@ -48418,6 +48419,7 @@ static const char *const qwen4_kernel_names[QWEN4_K_COUNT] = {
     "kernel_qwen4_vis_attention",
     "kernel_qwen4_vis_bias_residual",
     "kernel_qwen4_vis_bias_act",
+    "kernel_qwen4_act_quant_i8",
 };
 
 typedef struct {
@@ -49980,6 +49982,38 @@ static ds4_gpu_tensor *qwen4_nax_half_operand(ds4_gpu_tensor **slot, uint64_t *s
     if (!qwen4_dispatch(QWEN4_K_ROWS_F32_TO_F16, &args, sizeof(args), b, 2,
                         MTLSizeMake((n_threads + 255u) / 256u, 1, 1), MTLSizeMake(256, 1, 1), 0)) return NULL;
     return dst;
+}
+
+/* Two-term symmetric int8 quantization of a [T][K] half activation tile in
+ * 32-value groups (== the Q4_K sub-block == the MoE tiles' NK).  Emits the int8
+ * codes for both terms, their per-group scales, and the per-group code sums that
+ * the affine weight correction needs.  INERT: nothing in the engine calls this
+ * yet, so the numerics can be validated before any GEMM depends on them.
+ * Returns nonzero on success, matching the other qwen4 dispatchers. */
+int ds4_gpu_qwen4_act_quant_i8(const ds4_gpu_tensor *x,
+                               ds4_gpu_tensor *qa, ds4_gpu_tensor *qb,
+                               ds4_gpu_tensor *sa, ds4_gpu_tensor *sb,
+                               ds4_gpu_tensor *rowsum_a, ds4_gpu_tensor *rowsum_b,
+                               uint32_t T, uint32_t K) {
+    if (!x || !qa || !qb || !sa || !sb || !rowsum_a || !rowsum_b) return 0;
+    if (T == 0 || K == 0 || (K % 32u) != 0) return 0;
+    const uint32_t n_groups = K / 32u;
+    const uint64_t codes = (uint64_t)T * K;
+    const uint64_t scales = (uint64_t)T * n_groups;
+    struct { uint32_t T, K, n_groups; } args = { T, K, n_groups };
+    qwen4_bind b[7];
+    if (!qwen4_bind_tensor(&b[0], x, codes * sizeof(uint16_t), "act_quant_i8 x") ||
+        !qwen4_bind_tensor(&b[1], qa, codes, "act_quant_i8 qa") ||
+        !qwen4_bind_tensor(&b[2], qb, codes, "act_quant_i8 qb") ||
+        !qwen4_bind_tensor(&b[3], sa, scales * sizeof(float), "act_quant_i8 sa") ||
+        !qwen4_bind_tensor(&b[4], sb, scales * sizeof(float), "act_quant_i8 sb") ||
+        !qwen4_bind_tensor(&b[5], rowsum_a, scales * sizeof(int32_t), "act_quant_i8 rowsum_a") ||
+        !qwen4_bind_tensor(&b[6], rowsum_b, scales * sizeof(int32_t), "act_quant_i8 rowsum_b"))
+        return 0;
+    /* One lane per 32-value group; grid.y is the row. */
+    const uint32_t tg_x = (n_groups + 31u) / 32u;
+    return qwen4_dispatch(QWEN4_K_ACT_QUANT_I8, &args, sizeof(args), b, 7,
+                          MTLSizeMake(tg_x, T, 1), MTLSizeMake(32, 1, 1), 0);
 }
 
 static bool qwen4_moe_mm_tails(uint32_t type, uint32_t nt) {

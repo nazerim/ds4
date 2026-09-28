@@ -3869,6 +3869,91 @@ kernel void kernel_qwen4_rows_f32_to_f16(
     }
 }
 
+/* Two-term symmetric int8 quantization of a [T][K] activation tile in 32-value
+ * groups.  32 is not an arbitrary tile: it is both the Q4_K sub-block (one 6-bit
+ * scale/min pair per 32 weights) and the routed-expert tile kernels' NK, so one
+ * K step of the GEMM equals one activation group AND one weight-correction
+ * boundary.  See PLAN-INT8-MOE.md.
+ *
+ * Two terms, not one.  A single int8 term measures 1.421e-2 mean relative error
+ * on the expert dot product against float64 - 16.4x worse than the fp16 path this
+ * is meant to replace - and no group size rescues it, because the error is
+ * fundamental 8-bit noise amplified by dot-product cancellation rather than
+ * outliers.  Quantizing the residual into a second int8 term reaches 7.636e-5,
+ * which is 11.4x BETTER than plain fp16 (8.668e-4) and 8.1x better than fp16's
+ * own COMP variant (6.219e-4): two int8 terms carry roughly 15 bits against
+ * fp16's 11.  It costs two int32 tensor matmuls per K step instead of one, which
+ * the measured 3x int8-over-fp16 tensor throughput still turns into a net win.
+ *
+ * One lane owns one whole group, so absmax and sum are thread-local and need no
+ * cross-lane reduction.  The group is walked three times rather than cached:
+ * 32 floats plus 32 ints per lane would wreck occupancy for a bandwidth-bound
+ * kernel, and the same 64 bytes stay L1-resident across the passes.  Pass 3
+ * recomputes term a's codes exactly (same inputs, same rint), so its residual is
+ * identical to what pass 2 wrote. */
+struct ds4_metal_args_qwen4_act_quant_i8 {
+    uint32_t T;
+    uint32_t K;
+    uint32_t n_groups;
+};
+
+kernel void kernel_qwen4_act_quant_i8(
+        constant ds4_metal_args_qwen4_act_quant_i8 & args,
+        device const half  *x,
+        device signed char *qa,
+        device signed char *qb,
+        device float       *sa,
+        device float       *sb,
+        device int         *rowsum_a,
+        device int         *rowsum_b,
+        uint3 tgpig [[threadgroup_position_in_grid]],
+        uint  tid   [[thread_index_in_threadgroup]]) {
+    const uint row = tgpig.y;
+    const uint g = tgpig.x * 32u + tid;
+    if (row >= args.T || g >= args.n_groups) return;
+    const size_t base = (size_t)row * args.K + (size_t)g * 32u;
+    device const half *xr = x + base;
+    device signed char *qar = qa + base;
+    device signed char *qbr = qb + base;
+
+    /* Pass 1: group absmax, which sets term a's scale. */
+    float amax = 0.0f;
+    for (uint i = 0; i < 32u; i++) amax = fmax(amax, fabs((float)xr[i]));
+    const float sav = amax > 0.0f ? amax / 127.0f : 1.0f;
+
+    /* Pass 2: emit term a and measure the residual it leaves behind. */
+    int suma = 0;
+    float rmax = 0.0f;
+    for (uint i = 0; i < 32u; i++) {
+        const float v = (float)xr[i];
+        int q = (int)rint(v / sav);
+        q = q < -127 ? -127 : (q > 127 ? 127 : q);
+        qar[i] = (signed char)q;
+        suma += q;
+        rmax = fmax(rmax, fabs(v - sav * (float)q));
+    }
+    const float sbv = rmax > 0.0f ? rmax / 127.0f : 1.0f;
+
+    /* Pass 3: emit term b over the residual. */
+    int sumb = 0;
+    for (uint i = 0; i < 32u; i++) {
+        const float v = (float)xr[i];
+        int qa_i = (int)rint(v / sav);
+        qa_i = qa_i < -127 ? -127 : (qa_i > 127 ? 127 : qa_i);
+        const float r = v - sav * (float)qa_i;
+        int q = (int)rint(r / sbv);
+        q = q < -127 ? -127 : (q > 127 ? 127 : q);
+        qbr[i] = (signed char)q;
+        sumb += q;
+    }
+
+    const size_t sidx = (size_t)row * args.n_groups + g;
+    sa[sidx] = sav;
+    sb[sidx] = sbv;
+    rowsum_a[sidx] = suma;
+    rowsum_b[sidx] = sumb;
+}
+
 #ifdef DS4_METAL_HAS_TENSOR
 /* Routed expert tiles on the Metal 4 tensor ops (M5 neural accelerators):
  * 64 expert rows x NR1 tokens per threadgroup, K in 32-wide steps.  The

@@ -270,6 +270,15 @@ static inline int ds4_gpu_device_is_m5_apple_silicon(void) { return 0; }
 #endif
 void ds4_gpu_set_streaming_expert_cache_budget(uint32_t experts);
 void ds4_gpu_set_streaming_expert_cache_expert_bytes(uint64_t bytes);
+/* Two-term symmetric int8 quantization of a [T][K] half activation tile in
+ * 32-value groups, for the INT8 MoE prefill path (PLAN-INT8-MOE.md).  Currently
+ * inert: implemented on Metal only and called only by the kernel test. */
+int ds4_gpu_qwen4_act_quant_i8(const ds4_gpu_tensor *x,
+                               ds4_gpu_tensor *qa, ds4_gpu_tensor *qb,
+                               ds4_gpu_tensor *sa, ds4_gpu_tensor *sb,
+                               ds4_gpu_tensor *rowsum_a, ds4_gpu_tensor *rowsum_b,
+                               uint32_t T, uint32_t K);
+
 int ds4_gpu_qwen4_conv_stream_rows_tensor(
         ds4_gpu_tensor *x, ds4_gpu_tensor *hist_pool,
         const void *model_map, uint64_t model_size, uint64_t weight_offset,

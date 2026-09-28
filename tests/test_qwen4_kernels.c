@@ -3528,6 +3528,127 @@ static void test_dense_mm_large(arena_t *a, uint32_t wtype) {
 }
 #endif
 
+#ifdef __APPLE__
+/* Stage A of the INT8 MoE path (PLAN-INT8-MOE.md section 5).  Two things are
+ * pinned here.  First, the kernel must reproduce the CPU model bit for bit on the
+ * codes and sums, and within float tolerance on the scales - including the
+ * degenerate all-zero group, where the scale must fall back to 1.0 rather than
+ * divide by zero.  Second, and this is the claim the whole design rests on: the
+ * TWO-term reconstruction must be dramatically closer to the input than the
+ * one-term reconstruction.  The CPU simulation measured 1.421e-2 versus 7.636e-5
+ * mean relative error on the expert dot product; here the same relationship is
+ * asserted directly on the quantized values, per element.
+ *
+ * Inputs are multiples of 1/64 so half rounding is exact and the reference needs
+ * no half-to-float conversion. */
+static void test_act_quant_i8(void) {
+    const uint32_t T = 3, K = 96, NG = K / 32;
+    static uint16_t xh[3 * 96];
+    static float xv[3 * 96];
+    uint32_t st = 987654321u;
+    for (uint32_t i = 0; i < T * K; i++) {
+        st = st * 1103515245u + 12345u;
+        const int k = (int)((st >> 9) % 193u) - 96;   /* -96..96 */
+        const float v = (float)k / 64.0f;             /* exact in half */
+        xv[i] = v;
+        xh[i] = f32_to_f16(v);
+    }
+    /* Row 1's first group is all zeros: pins the degenerate scale path. */
+    for (uint32_t i = K; i < K + 32; i++) { xv[i] = 0.0f; xh[i] = f32_to_f16(0.0f); }
+
+    ds4_gpu_tensor *gx = ds4_gpu_tensor_alloc((uint64_t)T * K * sizeof(uint16_t));
+    ds4_gpu_tensor *qa = ds4_gpu_tensor_alloc((uint64_t)T * K);
+    ds4_gpu_tensor *qb = ds4_gpu_tensor_alloc((uint64_t)T * K);
+    ds4_gpu_tensor *sa = ds4_gpu_tensor_alloc((uint64_t)T * NG * sizeof(float));
+    ds4_gpu_tensor *sb = ds4_gpu_tensor_alloc((uint64_t)T * NG * sizeof(float));
+    ds4_gpu_tensor *ra = ds4_gpu_tensor_alloc((uint64_t)T * NG * sizeof(int32_t));
+    ds4_gpu_tensor *rb = ds4_gpu_tensor_alloc((uint64_t)T * NG * sizeof(int32_t));
+    require_ok(gx && qa && qb && sa && sb && ra && rb, "act_quant_i8 tensors");
+    require_ok(ds4_gpu_tensor_write(gx, 0, xh, (uint64_t)T * K * sizeof(uint16_t)),
+               "act_quant_i8 write x");
+    require_ok(ds4_gpu_qwen4_act_quant_i8(gx, qa, qb, sa, sb, ra, rb, T, K),
+               "act_quant_i8 dispatch");
+
+    static signed char dqa[3 * 96], dqb[3 * 96];
+    static float dsa[3 * 3], dsb[3 * 3];
+    static int32_t dra[3 * 3], drb[3 * 3];
+    require_ok(ds4_gpu_tensor_read(qa, 0, dqa, sizeof(dqa)), "act_quant_i8 read qa");
+    require_ok(ds4_gpu_tensor_read(qb, 0, dqb, sizeof(dqb)), "act_quant_i8 read qb");
+    require_ok(ds4_gpu_tensor_read(sa, 0, dsa, (uint64_t)T * NG * sizeof(float)),
+               "act_quant_i8 read sa");
+    require_ok(ds4_gpu_tensor_read(sb, 0, dsb, (uint64_t)T * NG * sizeof(float)),
+               "act_quant_i8 read sb");
+    require_ok(ds4_gpu_tensor_read(ra, 0, dra, (uint64_t)T * NG * sizeof(int32_t)),
+               "act_quant_i8 read rowsum_a");
+    require_ok(ds4_gpu_tensor_read(rb, 0, drb, (uint64_t)T * NG * sizeof(int32_t)),
+               "act_quant_i8 read rowsum_b");
+
+    double worst_one = 0.0, worst_two = 0.0, sum_one = 0.0, sum_two = 0.0;
+    uint64_t n_val = 0;
+    for (uint32_t r = 0; r < T; r++) {
+        for (uint32_t g = 0; g < NG; g++) {
+            const uint32_t off = r * K + g * 32u;
+            const uint32_t sidx = r * NG + g;
+            /* CPU reference in float, mirroring the kernel's expression order. */
+            float amax = 0.0f;
+            for (uint32_t i = 0; i < 32u; i++) amax = fmaxf(amax, fabsf(xv[off + i]));
+            const float sav = amax > 0.0f ? amax / 127.0f : 1.0f;
+            int suma = 0;
+            float rmax = 0.0f;
+            for (uint32_t i = 0; i < 32u; i++) {
+                const float v = xv[off + i];
+                int q = (int)rintf(v / sav);
+                q = q < -127 ? -127 : (q > 127 ? 127 : q);
+                require_ok(dqa[off + i] == (signed char)q, "act_quant_i8 term-a code");
+                suma += q;
+                rmax = fmaxf(rmax, fabsf(v - sav * (float)q));
+            }
+            const float sbv = rmax > 0.0f ? rmax / 127.0f : 1.0f;
+            int sumb = 0;
+            for (uint32_t i = 0; i < 32u; i++) {
+                const float v = xv[off + i];
+                int qa_i = (int)rintf(v / sav);
+                qa_i = qa_i < -127 ? -127 : (qa_i > 127 ? 127 : qa_i);
+                const float res = v - sav * (float)qa_i;
+                int q = (int)rintf(res / sbv);
+                q = q < -127 ? -127 : (q > 127 ? 127 : q);
+                require_ok(dqb[off + i] == (signed char)q, "act_quant_i8 term-b code");
+                sumb += q;
+            }
+            require_ok(dra[sidx] == suma, "act_quant_i8 rowsum a");
+            require_ok(drb[sidx] == sumb, "act_quant_i8 rowsum b");
+            require_ok(fabsf(dsa[sidx] - sav) <= 1e-6f * fmaxf(1.0f, fabsf(sav)),
+                       "act_quant_i8 scale a");
+            require_ok(fabsf(dsb[sidx] - sbv) <= 1e-6f * fmaxf(1.0f, fabsf(sbv)),
+                       "act_quant_i8 scale b");
+            if (amax == 0.0f) require_ok(dsa[sidx] == 1.0f, "degenerate group scale must be 1");
+
+            /* Reconstruction quality, one term versus two. */
+            for (uint32_t i = 0; i < 32u; i++) {
+                const double v = (double)xv[off + i];
+                const double one = (double)dsa[sidx] * (double)dqa[off + i];
+                const double two = one + (double)dsb[sidx] * (double)dqb[off + i];
+                const double e1 = fabs(one - v), e2 = fabs(two - v);
+                if (e1 > worst_one) worst_one = e1;
+                if (e2 > worst_two) worst_two = e2;
+                sum_one += e1;
+                sum_two += e2;
+                n_val++;
+            }
+        }
+    }
+    printf("act-quant-i8: %llu values, mean abs err one-term %.3e two-term %.3e "
+           "(ratio %.1fx), worst one %.3e two %.3e\n",
+           (unsigned long long)n_val, sum_one / (double)n_val, sum_two / (double)n_val,
+           sum_two > 0.0 ? (sum_one / sum_two) : 0.0, worst_one, worst_two);
+    /* Two terms must cut the mean error by at least 50x; the simulation says
+     * ~186x on these magnitudes. A one-term-only kernel would fail this. */
+    require_ok(sum_two * 50.0 < sum_one, "two-term quantization must beat one-term by 50x");
+    require_ok(worst_two <= worst_one, "worst-case error must not regress with two terms");
+    printf("act-quant-i8: ok\n");
+}
+#endif /* __APPLE__ */
+
 int main(void) {
     arena_t arena;
     arena.size = (uint64_t)1536 << 20;
@@ -3537,6 +3658,9 @@ int main(void) {
     setenv("DS4_QWEN4_ATTN_SPLIT_KEYS", "8", 1);
     require_ok(ds4_gpu_init(), "GPU initialization");
     require_ok(ds4_gpu_set_model_map(arena.base, arena.size), "model map registration");
+#ifdef __APPLE__
+    test_act_quant_i8();
+#endif
 
 #ifndef __APPLE__
     if (getenv("DS4_TEST_QWEN4_ATTN_GROUPS")) { test_attn_groups(); return 0; }
