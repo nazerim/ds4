@@ -91,6 +91,10 @@ __pycache__/
 # fork ops artifacts (never tracked - local runtime)
 *.pid
 log/
+# pi-subagents per-project runtime state (missions, schedules, workflow receipts).
+# Scoped to the subagents subtree rather than all of .pi/ so a deliberate
+# project-level .pi/settings.json can still be tracked if one is ever wanted.
+.pi/subagents/
 *.pid.port
 *.pid.upstream
 
