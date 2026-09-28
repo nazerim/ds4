@@ -93,3 +93,10 @@ __pycache__/
 log/
 *.pid.port
 *.pid.upstream
+
+# build/run artifacts (never track) - restored after merge 7d7b8cc dropped these
+# rules and resurrected the files b3a4cc5 had untracked
+*.o.tmp
+tests/kv_policy_harness
+tests/test_prompt_prefix
+tests/test_spec_rejection

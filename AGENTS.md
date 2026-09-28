@@ -40,6 +40,17 @@ inference engine in C with Metal, CUDA, and ROCm backends. See `AGENT.md`
 ## Conventions
 
 - C11, no C++; Objective-C only where Metal requires it; kernels in `metal/`.
-- No binary artifacts tracked — keep `.o`/binaries out of commits.
+- No binary artifacts tracked — keep `.o`/binaries out of commits. This has
+  regressed once already: `b3a4cc5` untracked four `.o.tmp` files and three test
+  binaries and added ignore rules, then the upstream merge `7d7b8cc` was an evil
+  merge that resurrected all seven *and* dropped the `.gitignore` block. After
+  every upstream merge, re-check both:
+  `git ls-files | grep -E '\.o\.tmp$|^tests/(kv_policy_harness|test_prompt_prefix|test_spec_rejection)$'`
+  must print nothing, and `git check-ignore tests/kv_policy_harness` must match.
+  `tests/kv_policy_harness` and `tests/test_prompt_prefix` are Makefile targets,
+  so untracking them is always safe. `tests/test_spec_rejection` has no source and
+  no rule — its `.c` was deliberately removed in `dd1a02a` when upstream stochastic
+  decoding superseded the fork's rejection-sampling verifier — so if it ever
+  reappears, delete it rather than trying to rebuild it.
 - Do not commit secrets (see `auth_proxy.py` usage docs; credentials go in
   environment variables only).
