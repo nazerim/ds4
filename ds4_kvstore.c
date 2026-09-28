@@ -2370,13 +2370,20 @@ bool ds4_kvstore_store_live_prefix_text(ds4_kvstore *kc,
         if (is_delta)
             snprintf(delta_note, sizeof(delta_note), " delta=%u..%d",
                      delta_from, store_tokens.len);
+        /* The sha is the file identity, so it belongs on the line: key= is only
+         * a label (token-text / visible-transcript) and cannot distinguish two
+         * conversations, which is exactly how a benign re-store of one frontier
+         * under a drifted re-render got read as the same delta written twice.
+         * conv_id is no help either - it hashes only the first 131072 text
+         * bytes, so equal conv_id does not imply equal text. */
         kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
-                "%s: kv cache stored tokens=%d trimmed=%d reason=%s key=%s%s size=%.2f MiB save=%.1f ms",
+                "%s: kv cache stored tokens=%d trimmed=%d reason=%s key=%s sha=%.8s%s size=%.2f MiB save=%.1f ms",
                 kv_log_name(kc),
                 store_tokens.len,
                 original_len - store_tokens.len,
                 reason,
                 text_override ? (cache_text_key ? cache_text_key : "visible-transcript") : "token-text",
+                sha,
                 delta_note,
                 (double)final_file_bytes / (1024.0 * 1024.0),
                 save_ms);

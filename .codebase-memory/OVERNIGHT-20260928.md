@@ -104,8 +104,10 @@ Status key: [ ] todo, [~] in progress, [x] done.
 - [x] P1  P3.2 evict/cold/shutdown chaining — DONE, see progress log 01:05
 - [x] P3  Bootstrap id-index — DONE, see progress log 01:40 (done before P2
           because its RED test was already written and the design was settled)
-- [ ] P2  Backtick Option A: output-side hardening + repro + content detector
-- [ ] P3  Bootstrap id-index (kill the per-request whole-dir scan)- [ ] P4  P3.1 tail: double-write investigation + store telemetry
+- [x] P2  Backtick Option A: output-side hardening + repro + content detector
+          — DONE, see progress log 01:00 and TODO-20260928-BACKTICK.md
+- [ ] P3  Bootstrap id-index (kill the per-request whole-dir scan)- [x] P4  P3.1 tail: double-write investigation + store telemetry — DONE,
+          verdict BENIGN, sha added to the stored log line, see section P4
 - [ ] P5  P2.1 middle-retire re-anchor (highest risk; gate on P1-P4 landing)
 - [ ] P6  oMLX recon synthesis + implement portable perf wins for Qwen 3.8 Flash
 - [ ] P7  Docs closeout (ADR, TODO, HANDOVER), full suite, restart engine, report
@@ -217,16 +219,56 @@ Tests: model-free — assert the dir scan happens once, not per request (instrum
 a counter), that a store makes a new id findable without a rescan, and that a
 stale entry falls back safely.
 
-### Phase P4 — P3.1 tail: double-write + telemetry
+### Phase P4 — P3.1 tail: double-write + telemetry  [COMPLETE]
 
-- Double-write: the 2026-09-27 18:38 observation of the same delta written twice.
-  Forensics first (grep the rotated logs for duplicate sha/frontier pairs within
-  seconds), then decide: benign (two batched-session slots storing the same
-  frontier) or a bug (missing dedupe). If benign, document; if a bug, dedupe by
-  (sha, frontier) under the store lock.
-- Telemetry: a periodic store-summary log line (counts by reason, chained vs
-  full, bytes written, deferral count) so the disk argument stops needing an
-  offline census script.
+Verdict on the double-write: BENIGN, and the original premise was wrong twice
+over.  Full evidence in .codebase-memory/ds4-doublewrite-forensics.md.
+- There is no 2026-09-27 18:38 event.  Log prefixes are real wall clock
+  (localtime_r + strftime), and the file NAMED ds4.log.20260927-221523 contains a
+  09-21 run that was merely rotated on 09-27 22:15.  The "18:38" was read off the
+  rotation filename.
+- Zero same-sha double writes exist.  The store path already dedupes on sha
+  (ds4_kvstore_existing_compatible touches and rewrites the trailer and emits no
+  stored line), so every logged store is a genuinely new file.
+- What is really on disk: 23 groups where the same LOGICAL frontier
+  (conv_id, tokens, delta_from) was stored more than once under DIFFERENT shas,
+  because the re-rendered text drifted by tens of bytes.  29 redundant files,
+  16.96 GiB, 3.3 percent of the volume, reclaimed by
+  sweep_small_dense_divergents and LRU.
+- conv_id cannot identify a conversation: it is the sha1 of only the first
+  131072 text bytes XORed with the model fingerprint, so equal conv_id does not
+  imply equal text.  key=token-text is a label, not a key.  Grouping logs on
+  either is exactly how this came to look like a double write.
+- A (conv_id, tokens, delta_from) dedupe would be WRONG: the texts genuinely
+  differ and the newer rendering is what future prompts match, so skipping it
+  would poison hit rate.  The real fix is upstream of the store - deterministic
+  re-rendering - which is what commits 414b32c, ed7256b and the pi-side P0
+  prompt-head work address.
+
+Shipped from this phase: the stored log line now carries sha=XXXXXXXX.  That is
+the field whose absence caused the misdiagnosis; size and key label cannot
+distinguish two conversations at the same frontier.
+
+Assessed and deliberately NOT changed:
+- Header touch atomicity.  ds4_kvstore_touch_file rebuilds the header in a stack
+  buffer and writes it with ONE fseek+fwrite of 48-116 bytes, so it is already a
+  single contiguous write.  Making it truly atomic would mean copying the whole
+  file (up to 12 GiB) per touch, which is absurd for a hits/last_used bump.  A
+  torn header is caught fail-closed by existing verification: the text section is
+  sha-checked against the filename, the token span is re-verified, and delta
+  chains verify every parent link before the session is touched.  Payload writes
+  are atomic already (temp file + rename, orphans reaped by the .kv.tmp scan).
+- Periodic store-summary telemetry: NOT implemented.  The sha field plus the two
+  read-only census scripts (/tmp/blade_census.py, /tmp/blade_v3.py, reproduced in
+  section 2) answer the disk questions, and adding counters to the store struct
+  was not worth the risk this pass.  Recorded as a follow-up if the disk argument
+  keeps needing an offline scan.
+
+Latent hazard recorded, not reachable today: ds4_kvstore_existing_compatible
+UNLINKS a same-sha file when it deems it incompatible, including on a ctx_size
+test.  Two slots with different ctx_size storing identical text could therefore
+ping-pong unlink+rewrite.  All 202 files on the blade carry ctx_size=524288 and
+the launcher gives each model its own KV dir, so it cannot fire in this config.
 
 ### Phase P5 — P2.1 middle-retire re-anchor
 
