@@ -206,3 +206,66 @@ Operator rule until fixed: the head is conversation identity. Do mode switches,
 extension-set changes, tool-config edits and AGENTS.md changes at conversation
 boundaries, never mid-session. Diagnostic that makes this self-evident: start
 the engine with DS4_KV_DEBUG=1 (logs reject reason plus first-divergent-byte).
+
+## UPDATE 2026-09-29 ~01:00 — Option A IMPLEMENTED, plus the detector
+
+Shipped in ds4_server.c. Design input: .codebase-memory/backtick-option-a-recon.md.
+
+1. degrade_unterminated_tool_call() now holds the policy: an envelope the model
+   opened and never closed is a model output shape, not a server fault and not an
+   executable call. It strips the partial markup keeping the text before it, maps
+   the finish through tool_parse_failure_recovery_finish (a true length stop
+   survives, everything else becomes stop), clears the error, and optionally
+   re-parses. The unterminated branch in the worker calls it instead of setting
+   finish=error.
+2. Why that was the whole bug: setting finish=error made the parser refuse to
+   recover (it must not rewrite a genuine fault), which made the ALREADY SHIPPED
+   degrade path unreachable. The two routes disagreed - one stripped the markup,
+   the other returned it as content with finish_reason=error. Anthropic clients
+   saw something worse: anthropic_stop_reason maps error to end_turn, so the
+   failure was invisible and the markup arrived as ordinary assistant text.
+3. turn_text_was_stripped() is one gate for both degrade routes, because the
+   parse-failure route strips inline without setting any flag. When it is true the
+   live session still holds the dropped tokens, so nothing may bind this turn's
+   visible text to that frontier: gated at the Responses live remember, the
+   thinking checkpoint remember, and the Anthropic live remember. Without that
+   gate a later request could be handed phantom markup it never rendered.
+4. log_structural_content_markers() warns once per request when message content
+   carries any of 24 structural markers. Observability only, never a rewrite -
+   pinned by a test asserting the content bytes come back unchanged, so it cannot
+   become a sanitizer by accident. This is the data that decides Option B.
+
+Review findings acted on (bounded review lane, verdict APPROVE-WITH-NITS):
+- M1, gate the parsed_calls.len remember paths: done, via the derived predicate,
+  which also covers the parse-failure route that a flag-only gate would miss.
+- N2, extend the marker list from 9 to 24 (GLM arg wrappers, qwen function and
+  parameter tags, DSML invoke and parameter openers and closers, and the closers
+  of the singular envelopes): done. A close-only injection was invisible before.
+- N3, reconcile require_thinking_closed between the repair parse (false) and the
+  degrade call (think-mode dependent): the difference is deliberate and now
+  documented - the repair path validates a candidate rewrite, the degrade path
+  renders the final turn, so it must match what the client will replay.
+- N4, cover the gate predicate: done, 7 cases.
+- One review claim was wrong and is recorded so it is not re-litigated:
+  anthropic_live_remember returns void, not bool, so no downstream consumer reads
+  its result and the suggested consumer check does not exist.
+- N1, WARNING is too loud for an expected condition: accepted as a risk for now.
+  The line is the only signal that content-borne structure reached the model, and
+  the point of this phase is to learn the frequency. Downgrade to INFO once the
+  count is known; if it proves constant on agent traffic, gate it behind an env.
+
+Deliberately NOT done:
+- Option B (input-side neutralization). Still deferred, and the reason is sharper
+  now: it must exempt replayed raw tool spans or it re-orphans every checkpoint,
+  it changes what the model sees rather than only the cache key, and it would not
+  have prevented the client-side breakage actually observed this week. The
+  detector supplies the frequency data needed to revisit it.
+- The 19:52 field event stays UNATTRIBUTED. The mechanism is confirmed possible
+  and can no longer error a turn, but that single occurrence preserved no
+  content. The new WARNING is what would identify a recurrence.
+- Upstream: the error site is upstream code (origin/main ds4_server.c
+  14313-14359, from upstream commit 759dd7c). Worth proposing the finish change
+  alone upstream, since it removes a client-visible error for a model output
+  shape; the strip helper is fork-only and must stay out of that patch.
+  Separately reportable: the Anthropic error-to-end_turn mapping hides this whole
+  class of failure from Anthropic clients.

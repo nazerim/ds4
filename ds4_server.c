@@ -3645,6 +3645,70 @@ static DS4_SERVER_MAYBE_UNUSED char *render_chat_prompt_text(
 
 static void server_log(ds4_log_type type, const char *fmt, ...);
 
+/* Content-side structural-marker detector (backtick workstream, Option A).
+ * Message content is rendered verbatim -- append_trimmed_text only trims
+ * whitespace and no sanitizer exists anywhere in this file -- and ds4.c
+ * tokenize_rendered_chat_vocab maps structural strings to real structural token
+ * ids anywhere in the rendered text, via vocab lookups of the same strings the
+ * renderer emits for real structure.  So content that quotes an envelope opener
+ * or a role marker is token-identical to real structure and indistinguishable
+ * to the model.  That is the mechanism by which a session discussing protocol
+ * syntax can steer itself into an unclosed tool envelope.
+ *
+ * Nothing is escaped or rewritten here.  This only makes the frequency
+ * observable, so the decision to neutralize content at render time (Option B,
+ * which costs a one-time cache rebuild per affected conversation and must exempt
+ * replayed tool spans or it re-orphans every checkpoint) can be taken on data
+ * rather than intuition.  Cost: a few substring scans over message content and
+ * at most one log line per request. */
+static void log_structural_content_markers(const chat_msgs *msgs) {
+    if (!msgs) return;
+    static const char *markers[] = {
+        "<|im_start|>",
+        "<|im_end|>",
+        "<|endoftext|>",
+        "<｜DSML｜tool_calls>",
+        "<｜DSML｜ calls>",
+        "<tool_call>",
+        "<tool_response>",
+        "<think>",
+        "</think>",
+            "<arg_key>",
+        "</arg_key>",
+        "<arg_value>",
+        "</arg_value>",
+        "<function=",
+        "<parameter=",
+        "<｜DSML｜invoke",
+        "</｜DSML｜invoke>",
+        "<｜DSML｜parameter",
+        "</｜DSML｜parameter>",
+        "</｜DSML｜tool_calls>",
+        "<｜DSML｜ invoke",
+        "</｜DSML｜ invoke>",
+        "</tool_call>",
+        "</tool_response>",
+};
+    const size_t n = sizeof(markers) / sizeof(markers[0]);
+    int hits = 0;
+    const char *first_role = NULL;
+    for (int i = 0; i < msgs->len; i++) {
+        const char *c = msgs->v[i].content;
+        if (!c || !c[0]) continue;
+        for (size_t k = 0; k < n; k++) {
+            if (!strstr(c, markers[k])) continue;
+            hits++;
+            if (!first_role) first_role = msgs->v[i].role;
+            break;
+        }
+    }
+    if (hits)
+        server_log(DS4_LOG_WARNING,
+                   "ds4-server: structural syntax inside message content in %d message(s)%s%s - rendered verbatim, so it becomes real structure to the model",
+                   hits, first_role ? " first_role=" : "",
+                   first_role ? first_role : "");
+}
+
 /* Vision image budget.  Dropping older images is an intentionally lossy
  * policy, so it is opt-in: by default requests with more than
  * DS4_VISION_REJECT_LIMIT images are rejected.  Setting the environment
@@ -4384,6 +4448,7 @@ static bool parse_chat_request(ds4_engine *e, server *s, const char *body, int d
         think_mode_from_enabled(thinking_enabled, reasoning_effort), ctx_size);
     kv_cache_restore_tool_memory_for_messages(s, &msgs);
     tool_memory_attach_to_messages(s, &msgs, &r->tool_replay);
+    log_structural_content_markers(&msgs);
     const char *active_tool_schemas = r->has_tools ? tool_schemas : NULL;
     r->prompt_preserves_reasoning =
         chat_history_uses_tool_context(&msgs, active_tool_schemas);
@@ -4610,6 +4675,7 @@ static bool parse_anthropic_request(ds4_engine *e, server *s, const char *body, 
     }
     kv_cache_restore_tool_memory_for_messages(s, &msgs);
     tool_memory_attach_to_messages(s, &msgs, &r->tool_replay);
+    log_structural_content_markers(&msgs);
     anthropic_prepare_live_continuation(s, r, &msgs);
     const char *active_tool_schemas = r->has_tools ? tool_schemas : NULL;
     r->prompt_preserves_reasoning =
@@ -5641,6 +5707,7 @@ static bool parse_responses_request(ds4_engine *e, server *s, const char *body, 
     }
     kv_cache_restore_tool_memory_for_messages(s, &msgs);
     tool_memory_attach_to_messages(s, &msgs, &r->tool_replay);
+    log_structural_content_markers(&msgs);
     r->prompt_preserves_reasoning =
         chat_history_uses_tool_context(&msgs, active_tool_schemas);
     responses_prepare_live_continuation(s, r, &msgs);
@@ -6951,6 +7018,77 @@ static const char *tool_parse_failure_recovery_finish(const char *finish) {
      * a normal assistant stop with the raw model text returned as content. */
     if (finish && !strcmp(finish, "length")) return "length";
     return "stop";
+}
+
+/* An envelope the model opened and never closed is a model output shape, not a
+ * server fault, and not an executable tool call either.  Degrade the turn to
+ * inert assistant text: drop the partial markup, keep the text before it, clear
+ * the error, and preserve a true length stop.  This is the same policy the
+ * parse-failure route already applies, so the two routes finally agree.  Before
+ * this the unterminated branch set finish=error, which also made the parser
+ * refuse to recover -- it must not rewrite a genuine fault -- so the shipped
+ * degrade path was unreachable and clients saw finish_reason=error with raw
+ * markup as content.  Anthropic clients saw something worse: anthropic_stop_reason
+ * maps error to end_turn, so the failure was invisible and the markup arrived as
+ * ordinary assistant text.
+ *
+ * saw_tool_start/saw_tool_end come from the decode tracker, which is the
+ * authority on whether the envelope closed and already ignores control text
+ * appearing inside argument values.  Returns false when there is nothing to
+ * degrade, leaving every output untouched.  The out-params are populated only
+ * when all three are supplied, so a caller that strips before its own parse can
+ * pass NULL for all of them.
+ *
+ * Callers must NOT remember a visible checkpoint for a degraded turn: the live
+ * session still holds the tokens this dropped, so keying the stripped text to
+ * that frontier would hand a later request phantom markup it never rendered. */
+static bool degrade_unterminated_tool_call(server_model_syntax syntax, buf *text,
+                                           bool saw_tool_start, bool saw_tool_end,
+                                           bool require_thinking_closed,
+                                           const char **finish_io, char *err,
+                                           char **content_out,
+                                           char **reasoning_out,
+                                           tool_calls *calls_out) {
+    if (!saw_tool_start || saw_tool_end) return false;
+    if (!text || !text->ptr) return false;
+
+    strip_dsml_keep_prefix(text);
+    if (finish_io) *finish_io = tool_parse_failure_recovery_finish(*finish_io);
+    /* Clearing err unconditionally is safe only because every caller excludes
+     * finish=="error" before reaching here: a genuine fault must keep its
+     * message.  Do not reuse this helper from a path that can carry one. */
+    if (err) err[0] = '\0';
+    if (content_out) { free(*content_out); *content_out = NULL; }
+    if (reasoning_out) { free(*reasoning_out); *reasoning_out = NULL; }
+    if (calls_out) tool_calls_free(calls_out);
+    if (content_out && reasoning_out && calls_out) {
+        parse_generated_message_ex_for_syntax(syntax, text->ptr,
+                                              require_thinking_closed,
+                                              content_out, reasoning_out,
+                                              calls_out);
+    }
+    if (content_out && !*content_out)
+        *content_out = xstrdup(text->ptr ? text->ptr : "");
+    return true;
+}
+
+/* Did this turn's generated text get stripped of an unexecutable envelope?
+ * Both degrade routes need the same answer and only one of them sets a flag:
+ * the unterminated branch calls degrade_unterminated_tool_call directly, while
+ * the parse-failure route strips inline.  Deriving it from what stripping
+ * actually does -- truncating the buffer at the first envelope opener -- gives
+ * one predicate for both, and keeps the invariant testable outside the worker.
+ *
+ * When true, the live session still holds the tokens the strip dropped, so
+ * nothing may bind this turn's visible text to that frontier: no visible
+ * checkpoint, no live tool state.  Keying stripped text to unstripped tokens is
+ * how a later request gets handed phantom markup it never rendered. */
+static bool turn_text_was_stripped(bool degrade_flagged, bool is_chat,
+                                   bool saw_tool_start, const buf *text) {
+    if (degrade_flagged) return true;
+    if (!is_chat || !saw_tool_start) return false;
+    if (!text || !text->ptr || text->len == 0) return false;
+    return find_any_tool_start(text->ptr) == NULL;
 }
 
 static bool parse_generated_message_for_response_for_syntax(server_model_syntax syntax,
@@ -15743,6 +15881,10 @@ decode_again:
         trace_event(s, trace_id, "incomplete tool call: stop=%s token=%d generated=%d limit=%d room=%d",
                     stop_detail, stop_token, completion, max_tokens, room);
     }
+    /* Set when an unclosed envelope was degraded to text: the live session
+     * still holds the dropped tokens, so no visible checkpoint may be keyed to
+     * that frontier for this turn. */
+    bool degraded_unterminated = false;
     if (j->req.kind == REQ_CHAT && j->req.has_tools &&
         saw_tool_start && !saw_tool_end && strcmp(finish, "error") != 0 &&
         strcmp(finish, "length") != 0 && !client_stop)
@@ -15813,9 +15955,23 @@ decode_again:
                 snprintf(err, sizeof(err), "invalid tool call recovery failed: %s",
                          recovery_err[0] ? recovery_err : "unknown error");
             } else {
-                finish = "error";
-                snprintf(err, sizeof(err), "unterminated tool call (%s; token=%d, generated=%d, limit=%d)",
-                         stop_detail, stop_token, completion, max_tokens);            }
+                /* Neither a server fault nor an executable call: degrade to
+                 * inert assistant text.  A genuine fault keeps its error
+                 * finish (the guard above excludes finish=error and length),
+                 * and a true length stop is preserved by the helper. */
+                server_log(DS4_LOG_WARNING,
+                           "ds4-server: chat ctx=%s%s%s unterminated tool call; degrading to assistant text (%s; token=%d, generated=%d, limit=%d)",
+                           ctx_span,
+                           req_flags[0] ? " " : "",
+                           req_flags,
+                           stop_detail, stop_token, completion, max_tokens);
+                trace_event(s, trace_id,
+                            "unterminated tool call; degrading to assistant text");
+                degraded_unterminated = degrade_unterminated_tool_call(
+                    j->req.model_syntax, &text, saw_tool_start, saw_tool_end,
+                    ds4_think_mode_enabled(j->req.think_mode), &finish, err,
+                    NULL, NULL, NULL);
+            }
         }
         buf_free(&repaired);
     }
@@ -15874,6 +16030,8 @@ decode_again:
             &parsed_calls,
             &recovered_tool_parse_failure,
             &j->req.tool_orders);
+    degraded_unterminated = turn_text_was_stripped(
+        degraded_unterminated, j->req.kind == REQ_CHAT, saw_tool_start, &text);
         if (!parsed_ok && recovered_tool_parse_failure && j->req.has_tools && saw_tool_start) {
             /* parse_generated_message failed even though DSML was present.
              * Semantic repair is intentionally avoided: if the parser cannot
@@ -16023,7 +16181,8 @@ decode_again:
                  parsed_reasoning, &parsed_calls, now_sec() - t0);
 
     if (j->req.api == API_RESPONSES) {
-        if (strcmp(final_finish, "error") && strcmp(final_finish, "length")) {
+        if (strcmp(final_finish, "error") && strcmp(final_finish, "length") &&
+            !degraded_unterminated) {
             /* Store the post-turn visible transcript plus the live token
              * frontier.  The next Responses request may replay only this
              * visible surface, while the real session also contains hidden
@@ -16046,7 +16205,7 @@ decode_again:
     }
     if (j->req.api == API_ANTHROPIC) {
         if (parsed_calls.len && strcmp(final_finish, "error") &&
-            strcmp(final_finish, "length"))
+            strcmp(final_finish, "length") && !degraded_unterminated)
         {
             anthropic_live_remember(s, slot, &parsed_calls);
         } else {
@@ -16085,7 +16244,7 @@ decode_again:
         {
             thinking_live_clear(s, slot);
         }
-    } else if (!parsed_calls.len &&
+    } else if (!parsed_calls.len && !degraded_unterminated &&
                should_remember_thinking_checkpoint(&j->req, &thinking, final_finish)) {
         remember_thinking_checkpoint(s, slot, j, ctx_span, trace_id,
                                      parsed_content ? parsed_content : "",
@@ -21281,6 +21440,166 @@ static void test_tool_recovery_output_budget(void) {
     TEST_ASSERT(find_any_tool_start("") == NULL);
 }
 
+/* Backtick workstream, Option A.  An envelope the model opened and never closed
+ * is a model output shape, not a server fault, and it is not an executable tool
+ * call either.  The turn must degrade to inert assistant text: partial markup
+ * dropped, the text before it kept, a normal stop, and a true length stop
+ * preserved.  That is the policy the parse-failure route already applies; before
+ * this, the unterminated branch set finish=error, which also made the parser
+ * refuse to recover, so the shipped degrade path was unreachable and clients saw
+ * finish_reason=error with raw markup as content (Anthropic clients saw
+ * end_turn with the markup, because anthropic_stop_reason maps error to
+ * end_turn).  Field event: one transient "unterminated tool call (stop token)"
+ * at 239k context, 2026-09-27 19:52.
+ *
+ * The mechanism that makes this reachable in the field is the input side:
+ * message content is rendered verbatim and ds4.c maps structural strings to real
+ * structural ids, so content quoting an envelope opener injects a real opener
+ * and the model can continue inside a call it believes is open. */
+/* The gate that keeps stripped text from being bound to an unstripped live
+ * frontier.  Both degrade routes must agree, including the parse-failure route
+ * that strips inline without setting a flag. */
+static void test_turn_text_was_stripped_gate(void) {
+    buf stripped = {0};
+    buf_puts(&stripped, "Answer text.");
+    buf intact = {0};
+    buf_puts(&intact, "Answer text.\n\n" DS4_TOOL_CALLS_START "\n");
+    buf empty = {0};
+
+    /* Explicit flag wins regardless of the buffer. */
+    TEST_ASSERT(turn_text_was_stripped(true, true, false, &intact));
+    /* Derived: an envelope was opened but no opener survives in the buffer. */
+    TEST_ASSERT(turn_text_was_stripped(false, true, true, &stripped));
+    /* Markup still present: nothing was stripped, so remember normally. */
+    TEST_ASSERT(!turn_text_was_stripped(false, true, true, &intact));
+    /* No envelope was ever opened: not a degrade. */
+    TEST_ASSERT(!turn_text_was_stripped(false, true, false, &stripped));
+    /* Not a chat turn: the visible-checkpoint family does not apply. */
+    TEST_ASSERT(!turn_text_was_stripped(false, false, true, &stripped));
+    /* Empty buffer is not evidence of a strip. */
+    TEST_ASSERT(!turn_text_was_stripped(false, true, true, &empty));
+    TEST_ASSERT(!turn_text_was_stripped(false, true, true, NULL));
+
+    buf_free(&stripped);
+    buf_free(&intact);
+    buf_free(&empty);
+}
+
+static void test_unterminated_tool_call_degrades_to_text(void) {
+    /* DeepSeek DSML shape, opened and never closed. */
+    buf text = {0};
+    buf_puts(&text, "Answer text.\n\n" DS4_TOOL_CALLS_START "\n"
+             DS4_INVOKE_START " name=\"bash\">\n"
+             DS4_PARAM_START " name=\"command\" string=\"true\">ls -l");
+    const char *finish = "stop";
+    char err[160];
+    snprintf(err, sizeof(err), "unterminated tool call (stop token)");
+
+    TEST_ASSERT(degrade_unterminated_tool_call(SERVER_MODEL_SYNTAX_DEEPSEEK,
+                                               &text, true, false, false,
+                                               &finish, err, NULL, NULL, NULL));
+    TEST_ASSERT(finish && !strcmp(finish, "stop"));
+    TEST_ASSERT(err[0] == '\0');
+    TEST_ASSERT(text.ptr && !strcmp(text.ptr, "Answer text."));
+    TEST_ASSERT(strstr(text.ptr, DS4_TOOL_CALLS_START) == NULL);
+
+    /* A complete envelope is never degraded: the tracker says it closed. */
+    buf done = {0};
+    buf_puts(&done, "Answer text.\n\n" DS4_TOOL_CALLS_START "\n"
+             DS4_INVOKE_START " name=\"bash\">\n"
+             DS4_PARAM_START " name=\"command\" string=\"true\">ls -l"
+             DS4_PARAM_END "\n" DS4_INVOKE_END "\n" DS4_TOOL_CALLS_END);
+    const char *finish_done = "stop";
+    char err_done[160];
+    snprintf(err_done, sizeof(err_done), "must stay untouched");
+    TEST_ASSERT(!degrade_unterminated_tool_call(SERVER_MODEL_SYNTAX_DEEPSEEK,
+                                                &done, true, true, false,
+                                                &finish_done, err_done,
+                                                NULL, NULL, NULL));
+    TEST_ASSERT(!strcmp(finish_done, "stop"));
+    TEST_ASSERT(!strcmp(err_done, "must stay untouched"));
+    TEST_ASSERT(strstr(done.ptr, DS4_TOOL_CALLS_START) != NULL);
+    buf_free(&done);
+
+    /* No envelope opened at all: nothing to degrade. */
+    buf plain = {0};
+    buf_puts(&plain, "Just prose.");
+    const char *finish_plain = "stop";
+    TEST_ASSERT(!degrade_unterminated_tool_call(SERVER_MODEL_SYNTAX_DEEPSEEK,
+                                                &plain, false, false, false,
+                                                &finish_plain, NULL,
+                                                NULL, NULL, NULL));
+    TEST_ASSERT(!strcmp(plain.ptr, "Just prose."));
+    buf_free(&plain);
+
+    /* A true length stop survives the degrade; the prefix is still returned. */
+    buf lentext = {0};
+    buf_puts(&lentext, "Partial answer.\n\n" DS4_TOOL_CALLS_START "\n"
+             DS4_INVOKE_START " name=\"bash\">\n");
+    const char *finish_len = "length";
+    char *len_content = NULL, *len_reasoning = NULL;
+    tool_calls len_calls = {0};
+    TEST_ASSERT(degrade_unterminated_tool_call(SERVER_MODEL_SYNTAX_DEEPSEEK,
+                                               &lentext, true, false, false,
+                                               &finish_len, NULL,
+                                               &len_content, &len_reasoning,
+                                               &len_calls));
+    TEST_ASSERT(finish_len && !strcmp(finish_len, "length"));
+    TEST_ASSERT(len_content && !strcmp(len_content, "Partial answer."));
+    TEST_ASSERT(len_calls.len == 0);
+    TEST_ASSERT(len_calls.raw_tool_text == NULL);
+    free(len_content);
+    free(len_reasoning);
+    tool_calls_free(&len_calls);
+    buf_free(&lentext);
+
+    /* Qwen shape, same policy: the singular envelope with an unclosed body, and
+     * the outputs populated by the re-parse. */
+    buf qt = {0};
+    buf_puts(&qt, "Here is the answer.\n\n" QWEN_TOOL_CALL_START "\n"
+             "<function=bash>" "\n" "<parameter=command>" "\nls -l");
+    const char *qfinish = "stop";
+    char *qcontent = NULL, *qreasoning = NULL;
+    tool_calls qcalls = {0};
+    TEST_ASSERT(degrade_unterminated_tool_call(SERVER_MODEL_SYNTAX_QWEN,
+                                               &qt, true, false, false,
+                                               &qfinish, NULL,
+                                               &qcontent, &qreasoning, &qcalls));
+    TEST_ASSERT(qfinish && !strcmp(qfinish, "stop"));
+    TEST_ASSERT(qcontent && !strcmp(qcontent, "Here is the answer."));
+    TEST_ASSERT(qcalls.len == 0);
+    TEST_ASSERT(qcalls.raw_tool_text == NULL);
+    free(qcontent);
+    free(qreasoning);
+    tool_calls_free(&qcalls);
+    buf_free(&qt);
+
+    /* Qwen shape with the envelope opened inside thinking that never closed:
+     * the reasoning keeps the buffer and content stays empty, per the existing
+     * unterminated-reasoning semantics. */
+    buf tt = {0};
+    buf_puts(&tt, "<think>" "\nstill reasoning\n\n" QWEN_TOOL_CALL_START
+             "\n" "<function=bash>" "\n");
+    const char *tfinish = "stop";
+    char *tcontent = NULL, *treasoning = NULL;
+    tool_calls tcalls = {0};
+    TEST_ASSERT(degrade_unterminated_tool_call(SERVER_MODEL_SYNTAX_QWEN,
+                                               &tt, true, false, true,
+                                               &tfinish, NULL,
+                                               &tcontent, &treasoning, &tcalls));
+    TEST_ASSERT(tfinish && !strcmp(tfinish, "stop"));
+    TEST_ASSERT(tcalls.len == 0);
+    TEST_ASSERT(tcontent == NULL || tcontent[0] == '\0');
+    TEST_ASSERT(treasoning != NULL);
+    TEST_ASSERT(strstr(treasoning, "still reasoning") != NULL);
+    TEST_ASSERT(strstr(treasoning, QWEN_TOOL_CALL_START) == NULL);
+    free(tcontent);
+    free(treasoning);
+    tool_calls_free(&tcalls);
+    buf_free(&tt);
+    buf_free(&text);
+}
+
 static void test_incomplete_tool_call_keeps_stop_reason(void) {
     const char *raw[] = {
         DS4_TOOL_CALLS_START DS4_INVOKE_START " name=\"write\">"
@@ -23907,6 +24226,14 @@ static void test_content_structural_syntax_renders_verbatim(void) {
         TEST_ASSERT(first_end != NULL);
         TEST_ASSERT(strstr(first_end + strlen(role_end), role_end) != NULL);
     }
+
+    /* The detector must observe, never rewrite: content bytes come back
+     * unchanged, so it cannot become a sanitizer by accident.  Neutralizing
+     * content is Option B's decision and would change cache keys. */
+    char *before = xstrdup(msgs.v[0].content);
+    log_structural_content_markers(&msgs);
+    TEST_ASSERT(msgs.v[0].content && !strcmp(msgs.v[0].content, before));
+    free(before);
 
     free(base);
     free(out);
@@ -27001,6 +27328,8 @@ static void ds4_server_unit_tests_run(void) {
     test_invalid_dsml_tool_error_suffix_includes_system_prompt();
     test_invalid_glm_tool_error_suffix();
     test_tool_recovery_output_budget();
+    test_turn_text_was_stripped_gate();
+    test_unterminated_tool_call_degrades_to_text();
     test_incomplete_tool_call_keeps_stop_reason();
     test_invalid_qwen_tool_error_suffix();
     test_thinking_dsml_is_not_executable_before_think_close();
