@@ -558,6 +558,28 @@ static bool kv_delta_full_reasons_enabled(void) {
  * ancestors stay resident for as long as it does.  The cost is more pinned
  * parents, i.e. more eviction deferrals - that is the argument for the P2.1
  * middle-retire re-anchor. */
+
+/* How often the lifetime store summary is emitted, in successful stores. */
+#define KV_STORE_STATS_EVERY 50u
+
+static void kv_store_stats_log(ds4_kvstore *kc) {
+    if (!kc || !kc->log) return;
+    const double gib = 1024.0 * 1024.0 * 1024.0;
+    const double ch_gib = (double)kc->stat_chained_bytes / gib;
+    const double fu_gib = (double)kc->stat_full_bytes / gib;
+    const double ch_avg = kc->stat_chained ? ch_gib / (double)kc->stat_chained : 0.0;
+    const double fu_avg = kc->stat_full ? fu_gib / (double)kc->stat_full : 0.0;
+    kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
+            "%s: kv cache stats: stores=%llu reused=%llu chained=%llu (%.2f GiB, avg %.3f GiB) "
+            "full=%llu (%.2f GiB, avg %.3f GiB) full/chained=%.1fx",
+            kv_log_name(kc),
+            (unsigned long long)kc->stat_stores,
+            (unsigned long long)kc->stat_reused,
+            (unsigned long long)kc->stat_chained, ch_gib, ch_avg,
+            (unsigned long long)kc->stat_full, fu_gib, fu_avg,
+            (ch_avg > 0.0 && fu_avg > 0.0) ? fu_avg / ch_avg : 0.0);
+}
+
 static bool kv_delta_reason_chainable(const char *reason) {
     if (!reason) return false;
     /* These two chained before P3.2; the kill switch does not affect them. */
@@ -1569,6 +1591,8 @@ bool ds4_kvstore_open(ds4_kvstore *kc, const char *dir, uint64_t budget_mb,
 }
 
 void ds4_kvstore_close(ds4_kvstore *kc) {
+    /* Logged before clear/memset, while the callback and log name still exist. */
+    if (kc && kc->stat_stores) kv_store_stats_log(kc);
     ds4_kvstore_clear(kc);
     for (int i = 0; i < kc->text_ref_len; i++) free(kc->text_refs[i].text);
     free(kc->text_refs);
@@ -2148,6 +2172,10 @@ bool ds4_kvstore_store_live_prefix_text(ds4_kvstore *kc,
     if (ds4_kvstore_existing_compatible(kc, path, sha, text, text_len,
                                         model_id,
                                         quant_bits, ds4_session_ctx(session))) {
+        /* Same sha already on disk: the trailer is refreshed and nothing is
+         * written.  Counted separately, because a store that logs nothing is
+         * exactly the case an offline census cannot see. */
+        kc->stat_reused++;
         kv_cache_rewrite_trailer(kc, path, text, hooks);
         free(text);
         free(path);
@@ -2389,6 +2417,15 @@ bool ds4_kvstore_store_live_prefix_text(ds4_kvstore *kc,
                 delta_note,
                 (double)final_file_bytes / (1024.0 * 1024.0),
                 save_ms);
+        kc->stat_stores++;
+        if (is_delta) {
+            kc->stat_chained++;
+            kc->stat_chained_bytes += final_file_bytes;
+        } else {
+            kc->stat_full++;
+            kc->stat_full_bytes += final_file_bytes;
+        }
+        if (kc->stat_stores % KV_STORE_STATS_EVERY == 0) kv_store_stats_log(kc);
     }
     ds4_session_payload_file_free(&staged);
     free(tmp);

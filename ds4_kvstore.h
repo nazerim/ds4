@@ -159,6 +159,17 @@ typedef struct {
     ds4_kvstore_text_ref *text_refs;
     int text_ref_len;
     int text_ref_cap;
+    /* Lifetime store telemetry, logged every KV_STORE_STATS_EVERY stores and at
+     * close.  The point is to answer "is chaining actually saving space, and how
+     * fast is this cache growing" from the log, instead of needing an offline
+     * census that opens every header on the volume.  Split by chained versus full
+     * so the per-checkpoint ratio falls out directly. */
+    uint64_t stat_stores;
+    uint64_t stat_reused;
+    uint64_t stat_chained;
+    uint64_t stat_full;
+    uint64_t stat_chained_bytes;
+    uint64_t stat_full_bytes;
 } ds4_kvstore;
 
 typedef struct {
