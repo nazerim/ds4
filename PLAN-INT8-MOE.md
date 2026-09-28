@@ -97,16 +97,60 @@ Two properties matter:
   is `[T][K/32]` floats (8192 x 80 x 4 B = 2.6 MB at the widest prefill chunk) and
   the error does not accumulate across groups the way a single per-row scale would.
 
+## 4b. Numerical viability — measured, and it changes the recommendation
+
+Simulated on CPU (`/tmp/int8_viability.py`, `/tmp/int8_twoterm.py`; both reproduced
+in the commit message) with T=256, K=2560, 32-value groups, Gaussian activations
+and Q4_K-shaped weights (exact 4-bit codes with per-sub-block scale and min).
+Relative error of the expert dot product against a float64 reference:
+
+| path | mean | p95 | max | int MMAs per K step | modelled prefill |
+|---|---|---|---|---|---|
+| int8 single term | 1.421e-2 | 5.732e-2 | 3.679e-1 | 1 | +32.4% |
+| **int8 two terms** | **7.636e-5** | **3.023e-4** | **2.888e-3** | **2** | **+13.9%** |
+| int8 three terms | 2.299e-7 | 7.728e-7 | 5.522e-6 | 3 | +0.0% |
+| fp16 (ds4 today) | 8.668e-4 | 3.524e-3 | 2.896e-2 | 1 | reference |
+| fp16 + COMP (ds4 today) | 6.219e-4 | 1.981e-3 | 1.960e-2 | 2 | reference |
+
+Three conclusions, in order of importance:
+1. **Single-term int8 is not usable.** 1.4% mean relative error is 16.4x worse than
+   the path ds4 runs today, and it is fundamental 8-bit noise amplified by
+   dot-product cancellation rather than an outlier problem: shrinking the
+   activation group to 16, or widening it to 128 or the whole row, moved the mean
+   only between 1.1e-2 and 1.7e-2. No group-size tuning rescues it.
+2. **Two terms recover far more than the fp16 path.** 7.64e-5 mean, which is 11.4x
+   BETTER than plain fp16 and 8.1x better than fp16's COMP variant, because two
+   int8 terms carry roughly 15 bits against fp16's 11. This is the same
+   compensation trick ds4 already ships for its half path (`COMP` stages
+   x = xh + xr to ~2^-22 relative), applied to integers.
+3. Three terms would be essentially exact but cost 3 MMAs at 3x throughput, i.e.
+   break-even. **Two terms is the sweet spot: better accuracy AND ~+14% prefill.**
+
+The speed column applies the measured ratio of oMLX's 42 TOP/s int8 against
+ds4's ~13.5-14 TF/s fp16 NAX plateau to the measured MoE bucket (2041.5 ms of
+5563.0 ms at pos=65536): `new_total = total - moe + moe * mmas / 3`.
+
+Honest limits on these numbers: activations are synthetic Gaussian and weights are
+uniform-random Q4_K-shaped, so the absolute values will move on real tensors.
+The RANKING is a precision-bits argument rather than a distributional one, so it
+should hold; the 3x MMA ratio is oMLX's measured kernel, not a ds4 kernel, and a
+first ds4 attempt will not hit 42 TOP/s, so treat +13.9% as an upper bound and
++8-12% as the realistic expectation. Stage A cost is not in the model; a
+back-of-envelope puts it near 0.8% of a chunk (two passes per layer over
+8192x2560, ~84 MB each, against a 2041 ms bucket), which must still be measured.
+
 ## 5. Design
 
-Stage A — activation quantizer (new kernel).
+Stage A — activation quantizer (new kernel), TWO terms.
 Input: the `[T][in_dim]` activation tile already rounded to half by
-`kernel_qwen4_rows_f32_to_f16`. Output: `int8 qa[T][in_dim]`, `float sa[T][in_dim/32]`,
-`int32 rowsum[T][in_dim/32]`. One threadgroup per row; each simdgroup owns whole
-32-groups so a group's absmax and sum reduce with a single `simd_sum` and never
-straddle simdgroups (this is the property oMLX's `oq_a8_quantize` is built around).
-Symmetric quantization: `sa = absmax / 127`, no zero point, so `qa` stays int8 and
-the epilogue needs no activation-side min term.
+`kernel_qwen4_rows_f32_to_f16`. Output: `int8 qa[T][in_dim]`,
+`float sa[T][in_dim/32]`, `int32 rowsum_a[T][in_dim/32]`, and the same three for
+the residual term b. One threadgroup per row; each simdgroup lane owns a whole
+32-group, so a group's absmax and sum are thread-local and need no cross-lane
+reduction at all. Symmetric quantization (`sa = absmax/127`, no zero point), then
+`r = x - sa*qa` is quantized the same way into the b term. Grid
+`(ceil(n_groups/32), T, 1)` with 32-thread groups keeps lanes on adjacent groups,
+so the reads stay coalesced.
 
 Stage B — weight operand. Keep the existing packed Q4_K read
 (`qwen4_load_raw16`) but replace `qwen4_dequant_raw16`'s half output with a nibble
@@ -117,12 +161,15 @@ weight stream is read unmodified.
 
 Stage C — the GEMM. Same tiling as `kernel_qwen4_moe_mm_mid_nax_t` (64 expert rows
 x NR1 tokens, K in 32-wide steps) with `matmul2d` instantiated over
-`signed char`/`unsigned char` and an `int` destination. Per K step: run the tensor
-matmul into an int32 cooperative tensor, then accumulate
-`acc += sa_g * (ds_g * (float)mma_g - dm_g * (float)rowsum_g)` into a float
-register tile. The SiLU(gate)*up epilogue and the half copy of `mid` that the down
-tiles read stay exactly as they are, so the down-projection kernel needs the same
-treatment independently and can land later.
+`signed char`/`unsigned char` and an `int` destination. Per K step, run the tensor
+matmul twice (term a and term b) into int32 cooperative tensors, then accumulate
+
+    acc += sa_g * (ds_g * mma_a - dm_g * rowsum_a_g)
+         + sb_g * (ds_g * mma_b - dm_g * rowsum_b_g)
+
+into a float register tile. The SiLU(gate)*up epilogue and the half copy of `mid`
+that the down tiles read stay exactly as they are, so the down-projection kernel
+needs the same treatment independently and can land later.
 
 Host wiring. A new env gate `DS4_QWEN4_MOE_INT8=1`, default OFF, checked where
 `g_metal4_tensor_api_enabled` is consulted, plus a startup capability probe for the
@@ -152,8 +199,11 @@ arena; note the memory estimator coupling at `ds4.c:39652`.
 
 ## 7. Risks
 
-- Cannot be bit-exact, so it must stay opt-in and the FP16 path must remain the
-  reference. This is a fast path, not a replacement.
+- Cannot be bit-exact, so it stays opt-in and the FP16 path remains the reference.
+  Note however that section 4b measures the two-term int8 path as MORE accurate
+  than both fp16 variants ds4 ships today, so "not bit-exact" here does not mean
+  "less accurate" - the bar for promotion is a quality and acceptance-rate study,
+  not an error bound.
 - `metal::uint4b_format` as a direct operand is unproven here; the design above
   widens nibbles to `unsigned char`, which IS proven, so the 4-bit path is an
   optional later refinement rather than a dependency.
@@ -173,9 +223,10 @@ arena; note the memory estimator coupling at `ds4.c:39652`.
 
 1. **[done]** Feasibility probe + this document. Proves the integer cooperative
    tensor path compiles and pipelines on this machine in ds4's own kernel shape.
-2. Stage A quantizer kernel + a unit test bounding its round-trip error against a
-   CPU reference. Self-contained: nothing calls it yet, so the default path cannot
-   regress.
+2. Stage A quantizer kernel emitting BOTH terms + a unit test bounding its
+   round-trip error against a CPU reference (the reference is the simulation in
+   section 4b, so the test asserts the kernel matches the model that was validated).
+   Self-contained: nothing calls it yet, so the default path cannot regress.
 3. int8 mid GEMM behind `DS4_QWEN4_MOE_INT8=1` + the numerical test against the
    FP16 reference + the capability probe and startup log.
 4. Benchmark, counterbalanced; record the numbers in this file and in DS4FORK.md.
