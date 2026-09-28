@@ -685,6 +685,47 @@ Useful residue:
   at 05:55: 83 full files at 4.99 GiB average versus 169 chained at 0.56 GiB,
   ratio 9.0x, with 106 of 257 files carrying a tool map.
 
+## 3d. DIAGNOSIS — "prefill drops to ~400 t/s when a second slot is active" (2026-09-29 ~06:10)
+
+Observed: a subagent lane cold-prefilling 178775 tokens ran at 411.66 t/s average
+(434 s), while solo prefill measures ~1180 t/s. The interactive session stayed
+healthy throughout, decoding at 53.7 t/s.
+
+NOT a regression, and not depth. Three pieces of evidence:
+1. The lane's rate is FLAT at 377-432 t/s from chunk 128 (0.1% depth) through
+   178688 (100%). A depth or cache effect shows a profile; this does not.
+2. The store path is healthy in the same window: chained deltas of 606 MiB with
+   save times of 175-445 ms, no pick_parent reject storm, no deferral churn, zero
+   errors.
+3. Nothing in the 2026-09-29 work touches prefill, the scheduler, or the quanta.
+   The changes were the store-reason gate, the trailer scanner, the bootstrap
+   index, finish-reason handling, and log lines.
+
+Mechanism, in upstream code: ds4_server.c:13972 reads
+`int quantum = generation_active ? s->mixed_prefill_quantum : 2048;` and
+mixed_prefill_quantum defaults to 128 (ds4_server.c:17393). So while ANY decode is
+resident, background prefill advances in 128-token slices instead of 2048 - a 16x
+reduction, plus interleaving overhead. That is the batched-session scheduler doing
+its job: it trades background prefill throughput for interactive decode latency,
+which is why the resident session held 53.7 t/s. The flag arrived in the
+2026-08-04 upstream merge (--mixed-prefill-quantum replaced
+DS4_SERVER_MIXED_PREFILL_QUANTUM), so it predates all fork KV work.
+
+Knob, if the trade is ever wrong: SERVER_EXTRA_ARGS="--mixed-prefill-quantum 512"
+./ds4-server.sh restart-qwen. Larger quanta speed a background prefill and make the
+resident decode lumpier, because the prefill holds the GPU longer per slice. Not
+changed tonight - it needs a restart, which would kill a live prefill, and the
+current setting is favouring the right thing for an interactive session. Any change
+should be measured, not assumed: the decode side is what the operator feels.
+
+Separately, and worth knowing: a lane cold-prefills BY CONSTRUCTION. Its prompt
+head differs from the parent's (different system prompt, tool set, and context
+files), so no checkpoint matches and it starts from 0 - here 178775 tokens for
+434 s. A forked-context lane at depth therefore pays a full cold prefill, while a
+fresh narrow-task lane pays only its own small prompt. At 178k that is the
+difference between seconds and seven minutes, and it is a stronger argument for
+fresh lanes than the concurrency budget is.
+
 ## 4. Standing constraints (do not violate)
 
 - Never run two engines; model-backed ds4_test runs only while ds4-server is
