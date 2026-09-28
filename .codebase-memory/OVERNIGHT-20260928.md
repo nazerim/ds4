@@ -726,6 +726,53 @@ fresh narrow-task lane pays only its own small prompt. At 178k that is the
 difference between seconds and seven minutes, and it is a stronger argument for
 fresh lanes than the concurrency budget is.
 
+## 3e. Scheduled deep-store verification (lane, 2026-09-29 ~05:40) — and corrections
+
+Verdict on the last open production-scale claim: **NOT YET OBSERVED above 250k
+tokens** for the newly chainable reasons, which is a legitimate gap rather than a
+contradiction. Chaining for cold/evict/shutdown IS confirmed live up to 62153
+tokens (`reason=evict delta=24576..62153 size=1398.49 MiB`); no turn/evict/shutdown
+store above 250k has happened since the change, because the deep stores in the
+current session are all `reason=continued`, which chained before tonight.
+
+Numbers from that pass which are better than anything recorded earlier:
+- **Delta stores cost ~607-609 MiB FLAT regardless of session depth** for a
+  16384-token window, from 262144 all the way to 425984 tokens. Full stores scale
+  linearly with depth. That flatness, not the ratio at any one depth, is the win.
+- At comparable depth the ratio is **23.0x**: 427271 full at 14023.39 MiB versus
+  425984 chained at 609.24 MiB. The 9.1x whole-blade average is diluted by shallow
+  stores and understates the deep case badly.
+- **Latency, not previously recorded at all:** a deep full store stalls the slot
+  ~5.2 s (save=4982.8 ms at 427271) against ~0.85 s chained. That is a stall the
+  operator feels, on every deep store.
+
+Correction to my own earlier framing, and it makes P3.2 worth more than I claimed:
+the deep EVICT path was just as expensive as shutdown, and it fires far more
+often. On 0928 between 17:32 and 18:04 - 32 minutes - the engine wrote three deep
+evict stores at 416088 (13.34 GiB), 418613 (13.42 GiB) and 425107 (13.63 GiB),
+plus a shutdown at 427271 (13.69 GiB): **~54 GiB of whole-session payloads in half
+an hour**, each costing ~5 s of stall. I had documented P3.2 against the shutdown
+path only (32.3 GiB/day). Evict is the larger half, because it fires on every
+request that misses the resident prefix and needs a disk load - i.e. on session
+switches, which is exactly the long-agent-session workload.
+
+Correction to the lane's report, verified before propagating: it claimed
+`reason=turn` has zero store lines in any log ever. False - there are three, on
+0910 and 0912, all `key=visible-transcript` (that reason is the multimodal /
+visible-transcript store site). The lane searched only the ds4-qwen rotations.
+Nothing else in its report needed correcting.
+
+Telemetry gap found by the same pass and fixed: the current process had done 43
+stores in 42 minutes and emitted no `kv cache stats:` line, because the cadence was
+every 50. Lowered to 25 (`KV_STORE_STATS_EVERY`), so a normal session reports at
+least once mid-run; the close path always reports regardless. The one stats line in
+the log is from the short-lived 04:57-04:59 process and covers only its 7 shallow
+stores, where `full/chained=1.0x` is meaningless - the ratio only informs at depth.
+
+tool_replay on the live session at that point: `mem=13 disk=47 canonical=18
+missing_ids=18`. disk=47 confirms restoration is working; the earlier disk=187 was
+a different, longer session and not a regression.
+
 ## 4. Standing constraints (do not violate)
 
 - Never run two engines; model-backed ds4_test runs only while ds4-server is

@@ -559,8 +559,11 @@ static bool kv_delta_full_reasons_enabled(void) {
  * parents, i.e. more eviction deferrals - that is the argument for the P2.1
  * middle-retire re-anchor. */
 
-/* How often the lifetime store summary is emitted, in successful stores. */
-#define KV_STORE_STATS_EVERY 50u
+/* How often the lifetime store summary is emitted, in successful stores.  25
+ * rather than 50: a real session was observed doing 43 stores in 42 minutes and
+ * never reaching the threshold, so the one run worth summarising produced no
+ * summary.  The close path always emits one regardless. */
+#define KV_STORE_STATS_EVERY 25u
 
 static void kv_store_stats_log(ds4_kvstore *kc) {
     if (!kc || !kc->log) return;

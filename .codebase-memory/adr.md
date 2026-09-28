@@ -301,6 +301,21 @@ first replayed call — the 255k-token rebuild in the pi drift verdict.
   path wrote 8-11 GiB at production depth earlier the same day. Census afterwards:
   126 chained files at 0.60 GiB average versus 79 full files at 5.46 GiB average
   (9.1x per checkpoint), and zero v3 full stores.
+- Later measurement at production depth supersedes those ratios, which were shallow
+  and therefore conservative. A chained delta costs **~607-609 MiB flat regardless
+  of session depth** for a 16384-token window - observed from 262144 tokens all the
+  way to 425984 - while a full store scales linearly. At comparable depth that is
+  **23.0x**: 427271 full at 14023.39 MiB versus 425984 chained at 609.24 MiB. The
+  flatness is the actual win; the 9.1x whole-blade average is diluted by shallow
+  stores. There is also a latency component that was not recorded at decision time:
+  a deep full store stalls its slot ~5.2 s against ~0.85 s chained.
+- The evict path matters more than the shutdown path, and the decision was argued
+  from shutdown. On 2026-09-28 between 17:32 and 18:04 the engine wrote three deep
+  evict stores (416088, 418613, 425107 tokens) at 13.34, 13.42 and 13.63 GiB plus
+  a 13.69 GiB shutdown: ~54 GiB of whole-session payloads in 32 minutes, each
+  costing ~5 s of stall. Evict fires on every request that misses the resident
+  prefix and needs a disk load, i.e. on session switches, which is exactly the
+  long-agent-session workload this retention design exists for.
 - Post-restart replay traces mem=16 disk=140 canonical=16 missing_ids=16; the
   canonical count is flat rather than growing, which is the expected stable
   residual of calls sampled before the fix.
