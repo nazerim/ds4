@@ -98,9 +98,10 @@ Basis: /tmp/blade_census.py and /tmp/blade_v3.py (both read-only header scans).
 
 Status key: [ ] todo, [~] in progress, [x] done.
 
-- [ ] P0  pi-side prompt-head stability: tool-manifest memoization (user-added;
+- [x] P0  pi-side prompt-head stability: tool-manifest memoization (user-added;
           largest measured cost, drafted patch exists, different repo so no build
-          contention with the ds4 phases)
+          contention with the ds4 phases) — DONE and DEPLOYED, but NOT as the
+          drafted patch: see the P0 results block below
 - [x] P1  P3.2 evict/cold/shutdown chaining — DONE, see progress log 01:05
 - [x] P3  Bootstrap id-index — DONE, see progress log 01:40 (done before P2
           because its RED test was already written and the design was settled)
@@ -108,8 +109,11 @@ Status key: [ ] todo, [~] in progress, [x] done.
           — DONE, see progress log 01:00 and TODO-20260928-BACKTICK.md
 - [ ] P3  Bootstrap id-index (kill the per-request whole-dir scan)- [x] P4  P3.1 tail: double-write investigation + store telemetry — DONE,
           verdict BENIGN, sha added to the stored log line, see section P4
-- [ ] P5  P2.1 middle-retire re-anchor (highest risk; gate on P1-P4 landing)
-- [ ] P6  oMLX recon synthesis + implement portable perf wins for Qwen 3.8 Flash
+- [~] P5  P2.1 middle-retire re-anchor — DEFERRED on evidence, design retained,
+          trigger metrics recorded; see the P5 decision block
+- [x] P6  oMLX recon synthesis + implement portable perf wins for Qwen 3.8 Flash
+          — DONE as measurement: nothing to port, verify width confirmed optimal,
+          one real lever priced and handed back as a decision; see section 3b
 - [ ] P7  Docs closeout (ADR, TODO, HANDOVER), full suite, restart engine, report
 - [ ] P8  Adjacent hygiene (user instruction 00:50: add high-priority adjacent
           work to tonight's queue): untrack the two committed test binaries
@@ -281,6 +285,29 @@ plus a deferral-pressure metric and defer the code. Measured upside is modest
 (35.3 GiB of interior nodes, most of which LRU would drain anyway); the real
 upside is fewer stitch hops and less deferral pressure.
 
+DECISION 2026-09-29 ~02:20 — DEFER, design retained, gate not met. Three
+measurements:
+1. Deferral pressure does not exist yet. Four deferral lines across every
+   available log, all reason=redundant (the divergent sweep, not eviction), and
+   zero exceeds-budget events ever recorded.
+2. The byte upside is far smaller than the 35.3 GiB headline. Retiring an interior
+   node does not delete its rows, it MOVES them into the child, whose span must
+   then extend back to the grandparent. On a uniform 16384-token ladder the
+   child's row region roughly doubles, so the net saving is only the parent's
+   fixed sections, not its whole file. The 9.1x per-checkpoint ratio that chaining
+   already delivers is the large win; middle-retire is second order on top of it.
+3. The latency upside is also small: the deepest chain is 10 hops and the deepest
+   measured resume was 336019 tokens in 2458.6 ms, which is not a problem next to
+   a 60-second prefill.
+   Against that, this is the only change in the whole program that mutates an
+   EXISTING checkpoint rather than writing a new one, so it carries crash-safety
+   and verifier risk that nothing else here does.
+TRIGGER to revisit, any of: (a) exceeds-budget events appear in the log;
+(b) deferrals grow per day instead of staying in single digits; (c) stitch depth
+exceeds roughly 20 hops or resume exceeds roughly 10 s; (d) the budget cannot hold
+two concurrent deep conversations. The metrics are already observable: the
+"kv cache delete deferred" log line and the two census scripts.
+
 ### Phase P6 — oMLX perf: CLOSED AS A PORTING QUESTION, reopened as measurement
 
 Pass-3 recon (delegate lane, report in .codebase-memory/omlx-recon-3.md) reached
@@ -359,7 +386,130 @@ benchmark/ is a remote SWE-bench runner with no perf numbers at all.
 Rule unchanged: no perf change ships without a before/after number in the
 commit message.
 
-## 4. Standing constraints (do not violate)
+## 3b. RESULTS — P0 and P6 (recorded so a compacted session does not redo them)
+
+### P0 outcome: shipped, and the drafted patch was rejected
+
+The drafted memoization patch in PiScratch/PROMPT-HEAD-STABILITY-patch.md was NOT
+applied. A read-only design pass found it does not touch the real mechanism and
+adds two bugs: on the sendCustomMessage path the handler never runs at all (dead
+code for the very incident it targets); its fallback took the newest manifest from
+ANY session in the process, so at globalConcurrencyLimit 3 a parent could be handed
+a lane's manifest; and its memoKey used the slice length as the prefix and hashed
+only the first and last 2048 chars, so every prompt over 4096 chars keyed
+identically and the middle — which contains divergence byte 159188 — was not in the
+key.
+
+Corrected root cause: renderToolManifest returning null was a red herring. The
+handler returned a REPLACEMENT prompt, which becomes forceSystemPrompt for that run
+only; it is cleared in every run's finally, and turns triggered by
+sendCustomMessage({triggerTurn:true}) never emit before_agent_start, so the head
+renders from transcript sections alone and the block is absent.
+
+Shipped (pi-extensions 5076967, deployed ~01:45):
+1. tool-manifest.ts persists the render to ~/.pi/agent/APPEND_SYSTEM.md, which pi
+   folds into the `addendum` section of the BASE system-prompt options, so every
+   turn derives it regardless of entry point. Returns undefined; never forces the
+   prompt. No memo, no process-global state.
+2. pi-scripts/render-tool-manifest.mjs renders the same file at deploy time, wired
+   into deploy.sh --install/--check, so the first session after an install already
+   has it. Skips cleanly with no defaultTools (keeps the sandboxed deploy suite
+   honest) and renders from the agent dir, never process.cwd(), so a deploy and a
+   session-start refresh cannot disagree.
+3. SECOND BUG found on the way: pi populates options.toolGuidelines (a map) and
+   never sets options.promptGuidelines, and its own buildRules() is skipped when a
+   customPrompt is configured. The extension read only promptGuidelines, so EVERY
+   per-tool guideline was silently dropped — the AGENTS.md claim that the injection
+   restores the bash 60s note was false until this fix. Now reads the map in sorted
+   tool order, then global rules, matching pi's order.
+4. review-bounded sets advertise: false. pi-subagents renders advertised_subagents
+   from a before_agent_start handler too, so it inherits the same oscillation, and
+   dropping forceSystemPrompt would have made that section live and churny. Opting
+   our only file-defined lane out removes the source; it stays discoverable via
+   subagent({action:"list",capabilities:true}).
+5. PI_TOOL_MANIFEST_APPEND_PATH redirects the handler's write in tests. Without it
+   the unit test clobbered the deployed manifest (1431 bytes replaced by a 706-byte
+   guideline-less copy) and showed up as phantom drift.
+Verification: tests/run-all.sh green end to end (manifest, extensions, 58
+thinking-scrub, 75 secret-scrub, 44 model-class, 43 deploy regression assertions,
+secret scans, live drift clean). Migration applied at a conversation boundary: the
+head changes once per session, so ds4-cached pi conversations re-root once.
+Residual, now measured: project_context is the dominant churn source (38 patches
+across 78 sessions at byte offset 1921 of a 40532-byte head), so every AGENTS.md
+edit still re-roots nearly the whole head. The operator rule stands.
+
+### P6 outcome: measured; nothing to port, one real lever identified and priced
+
+Rebaseline under High Power, counterbalanced (2 reps, second rep in reverse order),
+fixed 32k prompt, greedy decode, 384 tokens. Medians (full data in
+.codebase-memory/p6-rebaseline.csv):
+
+| case       | gen t/s | prefill t/s | accept | verify width |
+|------------|---------|-------------|--------|--------------|
+| depth_2    | 61.88   | 1336.74     | 70.2%  | T=2          |
+| depth_auto | 61.42   | 1283.89     | 70.7%  | T=2          |
+| depth_3    | 58.36   | 1271.99     | 73.9%  | T=3          |
+| no_mtp     | 47.90   | 1261.75     | —      | T=1          |
+| no_fuse    | 43.31   | 1265.80     | —      | T=1          |
+
+Conclusions:
+- DO NOT raise the verify width. depth_3 is 5.7% SLOWER than depth_2 despite
+  acceptance rising 70.2 -> 73.9%. Counterbalancing strengthens this: depth_2 ran
+  last in rep 2 (most throttled) and still won. Matches the independent prior art
+  in Scratch/eagle (wider verify lost 43% while acceptance rose). The auto policy's
+  default of 2 is already optimal, and auto measured equal to forced 2.
+- MTP plus the fused graph is worth +29.2% over no MTP and +42.9% over unfused.
+- DS4_QWEN4_NO_FUSE=1 is NOT a safe fallback: it is 9.6% worse than disabling MTP
+  entirely, because the spec cycle cannot batch without the fused graph and falls
+  to T=1 while still paying MTP bookkeeping.
+- Decode is the trustworthy metric (no_mtp: 47.92 and 47.88 across reps, 0.1%
+  apart). Prefill drifts with run position (1409 -> 1257 across a sequential
+  series), so prefill comparisons need counterbalancing or they measure heat.
+
+Stage attribution, DS4_QWEN4_TIMING=2, ms per 8192-token chunk (this is the number
+PLAN-PREFILL-M5 never had for this model — its split was measured on DeepSeek-V4):
+- pos=0:     ple 29.4  hc_attn 316.0  gdn 1302.3  attn 916.7   hc_ffn 365.5  moe 1872.1
+- pos=65536: ple 30.9  hc_attn 322.0  gdn 1472.1  attn 1298.0  hc_ffn 398.5  moe 2041.5
+- shares at 65k: moe 36.7%, gdn 26.5%, attn 23.3%, hc_ffn 7.2%, hc_attn 5.8%, ple 0.6%
+- MoE is the largest bucket at every depth (39.0% at pos=0), attention grows with
+  context as expected. Prefill 1326 t/s at 65k under TIMING=2 (pessimistic: the
+  stage syncs cost time).
+
+v0.7.0rc1 reconciliation (report: .codebase-memory/omlx-v070rc1-perf.md):
+NOT COMPARABLE. The release claims prefill 1522->2007 t/s at 16K and 1326->1716 at
+64K for Qwen3.8-Flash-Next oQ4e, batch 1, single runs, paged caching disabled; its
+decode claims (56.9->131.5 and 88.9->136.9) are Qwen3.8-27B — a different, smaller
+model — AGGREGATE over 4 concurrent requests, i.e. ~32.9 t/s per stream against
+ds4's 47-68 single-stream on the larger Flash-Next. oMLX's own cold measurements on
+this exact model, in Scratch, are 992 t/s at 40k, 560 at 80k and 224 at 120k, so
+the 1716 at 64K claim is 3.1x their own measured cold number at a similar depth.
+Three of the release's prefill wins are explicitly host-side Python overhead that a
+C engine with a precompiled graph does not have. Every architectural technique in
+PR #3903 already exists in ds4 (dense/sparse split, MMA gathered sparse-GQA
+attention, fused HC residual-write plus stream norm, fused GDN prework). Note also:
+mlx-serve vendors antirez/ds4 as a submodule (lib/ds4 @ 9139e2a).
+
+The ONE genuine lever, now priced: ds4's Qwen3.8 MoE runs FP16 NAX at the measured
+~13.5-14 TF/s plateau and ds4 has no INT8 MMA path anywhere, while oMLX PR #3548
+measures 42 TOP/s INT8 against a 44.21 ceiling on this same M5 Max. MoE is 36.7-39%
+of Qwen3.8 prefill per the attribution above, so a 3x on that bucket is worth up to
+~22% of total prefill; discounting for the Stage-A activation quantizer and the
+unchanged non-MoE GEMMs, +10-20% prefill is the honest estimate. PLAN-PREFILL-M5's
+"0-3% ceiling" explicitly put MoE gemm out of scope and predates that PR, so it does
+not cover this lever.
+DECISION: not attempted tonight. It is a multi-day Metal kernel project (a new
+activation quantizer, an int8 x int8 -> int32 NAX GEMM, and — because Q4_K's 8x8
+sub-block packing and MXFP4 do not align to oMLX's affine group-size-64 assumption
+either a load-time repack or a Q4_K-specific fragment loader), it CANNOT be
+bit-exact, and it needs a real quality/acceptance study before any default flip.
+Starting it half-way overnight would risk leaving the tree broken for a gain that
+must be opt-in anyway. It is recorded as the recommended next project with the
+measured justification and the exact hook points.
+Also closed by measurement: the GDN prefill token-parallel fusion is worth ~0.4%
+(not 30%) because the fused kernel is gated off at prefill only because its host
+grid is 16 threadgroups with tokens walked inside the kernel; and chunk size stays
+closed (ds4's default is already 8192, exactly oMLX's new wide-prefill step).
+
 
 - Never run two engines; model-backed ds4_test runs only while ds4-server is
   stopped (a second 70 GiB map thrashes a 128 GiB box).
@@ -457,4 +607,39 @@ commit message.
   Eviction behind our back drops the stale ids on the failed open.  One crash
   found and fixed en route: my own test called free() on mkdtemp's stack array
   (SIGABRT, pointer not allocated) - production code was not at fault.
-  GREEN: --server ok, production make clean.
+- 01:55 P0 COMPLETE and DEPLOYED (pi-extensions 5076967 + 82a9add, pushed).
+  The drafted memoization patch was rejected: on the sendCustomMessage path the
+  handler never runs, so it was dead code for the incident it targeted, and its
+  cross-session fallback plus slice-length memo key would have manufactured new
+  divergence. Shipped instead: persist the manifest to APPEND_SYSTEM.md (pi folds
+  it into the base options' addendum section, so every entry point derives it),
+  a deploy-time renderer wired into deploy.sh --install/--check, advertise:false
+  on our only file-defined lane to kill the pi-subagents oscillation, and
+  PI_TOOL_MANIFEST_APPEND_PATH so tests cannot clobber the deployed file.
+  Second bug found en route: pi populates options.toolGuidelines and never sets
+  promptGuidelines, and its buildRules is skipped under a customPrompt, so the
+  extension had been silently dropping EVERY per-tool guideline - the AGENTS.md
+  claim that it restores the bash 60s note was false until this fix.
+  tests/run-all.sh green end to end (43 deploy regression assertions, live drift
+  clean). Migration applied at a conversation boundary: the head changes once per
+  session, so ds4-cached pi conversations re-root once.
+- 02:10 P6 measurement complete. Counterbalanced High Power rebaseline and the
+  DS4_QWEN4_TIMING=2 stage attribution are tabulated in section 3b. Headline:
+  do NOT raise the verify width (depth 3 is 5.7% slower despite acceptance rising
+  70.2 -> 73.9%), production auto is already optimal, MTP plus the fused graph is
+  worth +29.2%, and DS4_QWEN4_NO_FUSE=1 is NOT a safe fallback (9.6% worse than
+  disabling MTP entirely). MoE is 36.7-39.0% of Qwen3.8 prefill, which is the
+  bucket PLAN-PREFILL-M5 put out of scope when it declared a 0-3% ceiling on a
+  different model.
+- 02:20 P5 DEFERRED on evidence (see the decision block in its phase section).
+- 02:30 P3.2 VERIFIED LIVE on the running engine, which was the last unproven KV
+  claim. Fresh-nonce probe (reusing text hits existing checkpoints and stores
+  nothing, so the first attempt proved nothing): cold@10240 421.26 -> 175.13 MiB,
+  cold@12288 482.81 -> 175.15, evict@12066 505.51 -> 198.67, and
+  shutdown@17661 chained at 196.23 MiB where the same path wrote 8.14-10.79 GiB
+  at production depth earlier the same day. A fresh conversation with no ancestor
+  still wrote full (158.17 MiB), so fail-closed behaviour is intact. Census
+  afterwards: 126 chained files at 0.60 GiB average versus 79 full files at
+  5.46 GiB average, zero v3 full stores, and 71 of 210 files carrying a tool map
+  (was 0 of 115 at the start of the night). Blade at 509 of 512 GiB, so LRU is
+  actively reclaiming; zero error-census hits. Engine left running, PID 23463.

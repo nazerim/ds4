@@ -256,3 +256,58 @@ Evidence must be rerun on the SUBMITTED head/config; lossy policy changes
 are opt-in and separate PRs; scope: mechanism vs policy; static review
 catches what lucky live tests hide; authorship preserved on adopted fixes
 (git cherry-pick -C).
+
+## ADR 2026-09-29 — chain every store reason; persist and index tool-replay spans
+
+### Status
+Accepted (implemented: 037a850 chaining for cold/evict/shutdown, 414b32c tool-map
+trailer persistence, ed7256b bootstrap trailer layout, 63c6ac7 bootstrap index,
+d097801 unterminated-envelope degrade, 5204e70 store sha on the log line).
+
+### Context
+Two independent measurements drove this. (1) Disk: 380 of 424 GiB on the blade were
+whole-session payloads, because only continued and turn stores were allowed to
+chain; four shutdown stores in one restart-heavy day cost 32.3 GiB (8.14, 8.96,
+10.79, 4.44 GiB). (2) Render determinism: the tool-map trailer was written empty for
+every qwen store (tool_replay disk=0 forever), so each restart re-rendered every
+replayed tool call canonically and orphaned all pre-restart checkpoints past the
+first replayed call — the 255k-token rebuild in the pi drift verdict.
+
+### Decision
+1. All five store reasons may chain. pick_parent already fails closed on four
+   independent checks (header, text prefix, tokenizer fingerprint, exact payload
+   token span), so a store with no verified ancestor still writes full.
+   DS4_KV_DELTA_FULL_REASONS=0 restores the pre-change restriction, and it is read
+   per call rather than cached so a test can toggle it around a single store.
+2. Shutdown stores chain too. That trades self-containment for bytes: a resume now
+   depends on the whole ancestor chain verifying. Accepted because the loader
+   already verifies every link before touching the session, and drops an orphan
+   child rather than serving bad state.
+3. Tool-replay spans persist in the checkpoint trailer and are restored by an
+   id-keyed bootstrap before rendering. The scanner offers every adjacent-run
+   boundary (longest first) plus the whitespace fringe the parsers absorb, because
+   two remembered spans can sit back to back in rendered text and then only a
+   prefix of the maximal run matches a key.
+4. The bootstrap indexes id -> file instead of opening every checkpoint per
+   request. Guarded by tool_mu with the install phase outside it, since
+   tool_memory_put_source takes the same non-recursive mutex.
+5. An unclosed tool envelope degrades to inert assistant text instead of erroring
+   the turn, and no visible checkpoint may be keyed to a frontier whose tokens were
+   stripped.
+
+### Consequences
+- Measured live on the running engine: cold@10240 421->175 MiB, cold@12288
+  483->175, evict@12066 506->199, shutdown@17661 chained at 196 MiB where the same
+  path wrote 8-11 GiB at production depth earlier the same day. Census afterwards:
+  126 chained files at 0.60 GiB average versus 79 full files at 5.46 GiB average
+  (9.1x per checkpoint), and zero v3 full stores.
+- Post-restart replay traces mem=16 disk=140 canonical=16 missing_ids=16; the
+  canonical count is flat rather than growing, which is the expected stable
+  residual of calls sampled before the fix.
+- More chained nodes means more parents pinned by lineage retention, so more
+  eviction deferrals. Measured pressure is nil (4 deferral lines across all logs,
+  all reason=redundant; zero exceeds-budget events), which is why the P2.1
+  middle-retire re-anchor stays deferred instead of implemented.
+- A one-time render flip at deploy: checkpoints written before these commits whose
+  text contains canonical-rendered calls stay unreachable past the first replayed
+  call. The new lineage is stable across restarts.
