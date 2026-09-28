@@ -1,9 +1,14 @@
 # PLAN-INT8-MOE — INT8-activation MoE prefill for Qwen3.8 Flash Next
 
-Branch: `int8-moe-prefill`. Status: **feasibility proven, design settled, Stage A
-not yet implemented.** Nothing here is wired into the engine yet, so the default
-path is untouched and no benchmark number in this file is a claim about shipped
-behaviour.
+Branch: `int8-moe-prefill`. Status: **CLOSED — investigated, measured, and
+rejected.** Feasibility was proven and the numerics validated, but the throughput
+premise turned out to be false on this hardware: int8 cooperative-tensor matmul
+runs at 2.02x the half rate, not the 3x the plan was built on, so the accurate
+(two-term) design is break-even at +0.9% on the MoE bucket. See section 4c.
+Increments 1 and 2 are committed on the branch as the evidence trail; they are
+deliberately NOT merged to main, because Stage A would be dead code in a fork that
+already carries merge burden. Nothing here is wired into the engine, so no shipped
+path changed at any point.
 
 ## 1. Why this lever, with measurements
 
@@ -138,6 +143,59 @@ first ds4 attempt will not hit 42 TOP/s, so treat +13.9% as an upper bound and
 +8-12% as the realistic expectation. Stage A cost is not in the model; a
 back-of-envelope puts it near 0.8% of a chunk (two passes per layer over
 8192x2560, ~84 MB each, against a 2041 ms bucket), which must still be measured.
+
+## 4c. CONCLUSION — measured, and the lever does not pay off as scoped
+
+`tests/mpp_tensor_int8_bench.m` measures the raw cooperative-tensor matmul issue
+rate on this machine (Apple M5 Max), in the same register-fragment form MLX's
+`steel/gemm/nax.h` uses, with identical kernels differing only in operand and
+accumulator types, warm-up dispatches discarded, and the two kernels interleaved
+within every rep so neither gets a systematically cooler clock. Median of 7 reps
+at 200000 iterations per dispatch:
+
+    half x half -> f32     31.607 ms    53.08 TOP/s
+    int8 x int8 -> i32     15.657 ms   107.16 TOP/s
+    ratio int8/half = 2.02x
+
+**The ratio is 2x, not 3x.** That is the operand-width ratio, and it is a hardware
+property rather than a kernel-quality artefact. The 3x in section 1 came from
+comparing oMLX's measured 42 TOP/s int8 against ds4's ~13.5-14 TF/s *kernel-level*
+MoE plateau - two different things. A raw-issue microbenchmark of the same half
+path reaches 53 TOP/s, so ds4's MoE tiles are nowhere near MMA-issue-bound; they
+are bound by weight decode, threadgroup staging and bandwidth. Changing the
+operand precision therefore cannot buy what the 3x assumption promised.
+
+Consequences, arithmetic on the measured attribution (moe 2041.5 ms of 5563.0 ms):
+- **Two-term int8 (the accurate design) is break-even.** 2 int8 MMAs at 2.02x =
+  0.99x the fp16 cost, i.e. +0.9% on the MoE bucket and roughly +0.3% on total
+  prefill. That is inside measurement noise, and it would cost a new quantizer,
+  a new GEMM variant, a loss of bit-exactness, and permanent fork maintenance.
+  DO NOT BUILD IT.
+- **Single-term int8 would be worth about +22% prefill** (moe 2041.5 -> ~1011 ms,
+  total 5563 -> ~4532 ms) but carries the 1.421e-2 mean relative error measured in
+  section 4b - 16.4x worse than the fp16 path ds4 ships today. That is exactly the
+  trade oMLX itself makes: its INT8-activation prefill is documented as
+  approximate, "can change outputs", and off by default. It is a real option for
+  an opt-in fast path, and it is the only variant with a meaningful payoff, but it
+  needs an end-to-end quality study (perplexity plus MTP acceptance rate, since
+  prefill errors land in the KV cache and therefore in every later decode step)
+  before anyone should consider it. Not attempted here.
+
+Methodology note worth keeping: the first version of this benchmark reported
+ratios of 3.38x, 2.44x and 1.89x at 5000, 20000 and 80000 iterations. That spread
+is fixed command-buffer overhead plus GPU clock ramp, not a real effect - fitting
+the two largest points gave a ~2.35 ms constant for the half kernel against ~1.0 ms
+of steady-state work. Warm-up plus interleaved medians at 200000 iterations is what
+made the number trustworthy. The same trap applies to any kernel microbenchmark on
+this box, and it is the same reason the prefill A/B in section 3b had to be
+counterbalanced.
+
+Secondary finding, and the more useful one: because a bare half matmul2d issues at
+53 TOP/s while the MoE bucket runs far below that, **the MoE prefill lever is in
+the staging and weight-decode path, not in operand precision.** Any future attempt
+should attack how Q4_K nibbles are decoded and staged into threadgroup memory, and
+should measure against this 53 TOP/s ceiling rather than against the 13.5-14 TF/s
+figure inherited from a different model's kernel.
 
 ## 5. Design
 
