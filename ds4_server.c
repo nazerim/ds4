@@ -10382,6 +10382,87 @@ static bool id_list_contains(const stop_list *ids, const char *id);
 static void id_list_push_unique(stop_list *ids, const char *id);
 
 
+/* ---- Tool-map bootstrap index --------------------------------------------
+ * The attach-time bootstrap needs to know which checkpoint file carries each
+ * wanted call id.  It used to open every file in the KV dir on every request to
+ * find out, which was harmless while the trailers were always empty but is
+ * O(files) per request now that they are populated -- and the dir is allowed to
+ * hold tens of thousands of files (cold_max 30000).  The index maps call id to
+ * the file name carrying it and remembers which files were already read, so a
+ * request costs one readdir, plus an open per NEW file, plus an open per
+ * distinct file that can satisfy a wanted id.
+ *
+ * Guarded by s->tool_mu.  The install phase deliberately runs OUTSIDE that lock
+ * because tool_memory_put_source takes it and the mutex is not recursive.  A
+ * file evicted behind our back is dropped from the index on the failed open, so
+ * staleness degrades to a miss rather than wedging the walk. */
+#define DS4_TOOL_MAP_INDEX_MAX_IDS 1000000u
+
+typedef struct {
+    rax *ids;    /* call id -> xstrndup(file name) */
+    rax *seen;   /* file name -> (void *)1, files already indexed */
+    char *dir;   /* the directory this index describes */
+} tool_map_index;
+
+static void tool_map_index_clear_entries(tool_map_index *ix) {
+    if (!ix) return;
+    if (ix->ids) {
+        raxFreeWithCallback(ix->ids, free);
+        ix->ids = NULL;
+    }
+    if (ix->seen) {
+        raxFree(ix->seen);
+        ix->seen = NULL;
+    }
+}
+
+static void tool_map_index_reset(tool_map_index *ix) {
+    if (!ix) return;
+    tool_map_index_clear_entries(ix);
+    free(ix->dir);
+    memset(ix, 0, sizeof(*ix));
+}
+
+static void tool_map_index_note(tool_map_index *ix, const char *id, size_t id_len,
+                                const char *fname, size_t fname_len) {
+    if (!ix || !id || !id_len || !fname || !fname_len) return;
+    if (!ix->ids) ix->ids = raxNew();
+    if (!ix->ids) return;
+    if (raxFind(ix->ids, (unsigned char *)id, id_len) != raxNotFound) return;
+    if (raxSize(ix->ids) >= DS4_TOOL_MAP_INDEX_MAX_IDS) {
+        /* Bounded memory beats completeness: drop the mappings and let the next
+         * request rebuild them.  `seen` goes too, so the rebuild is a full
+         * rescan rather than a permanently blind index. */
+        tool_map_index_clear_entries(ix);
+        ix->ids = raxNew();
+        if (!ix->ids) return;
+    }
+    char *dup = xstrndup(fname, fname_len);
+    if (!dup) return;
+    if (!raxInsert(ix->ids, (unsigned char *)id, id_len, dup, NULL)) free(dup);
+}
+
+/* Drop every id that pointed at fname (the file is gone). */
+static void tool_map_index_drop_file(tool_map_index *ix, const char *fname) {
+    if (!ix || !ix->ids || !fname) return;
+    size_t flen = strlen(fname);
+    raxIterator it;
+    raxStart(&it, ix->ids);
+    raxSeek(&it, "^", NULL, 0);
+    while (raxNext(&it)) {
+        char *v = (char *)it.data;
+        if (!v || strlen(v) != flen || memcmp(v, fname, flen) != 0) continue;
+        raxRemove(ix->ids, it.key, it.key_len, NULL);
+        free(v);
+        /* Removal invalidates the iterator's position; restart the walk.  The
+         * id space per file is small and this path only runs on eviction. */
+        raxStop(&it);
+        raxStart(&it, ix->ids);
+        raxSeek(&it, "^", NULL, 0);
+    }
+    raxStop(&it);
+}
+
 struct server {
     ds4_engine *engine;
     ds4_tp *tp_leader;
@@ -10394,6 +10475,7 @@ struct server {
     int default_tokens;
     kv_disk_cache kv;
     tool_memory tool_mem;
+    tool_map_index tool_map;   /* id -> file; guarded by tool_mu */
     server_image_cache image_cache; /* Protected by inference_mu. */    bool disable_exact_dsml_tool_replay;
     bool enable_cors;
     pthread_mutex_t tool_mu;
@@ -11499,14 +11581,41 @@ static int kv_tool_map_load_from_pos(server *s, FILE *fp, const stop_list *wante
 }
 #endif
 
-/* Walk the trailer from the current position and install every tool-map entry
- * whose id is wanted.  The writer emits a tokenizer-fingerprint section ahead
- * of the tool map and a vision section after it, so the tool map is not at a
- * fixed offset from the payload: reading it as the first section matched the
- * fingerprint magic instead and restored nothing.  Section order is not
- * assumed here either, and unknown sections stop the walk. */
-static int kv_trailer_restore_tool_map(server *s, FILE *fp,
-                                       const stop_list *wanted) {
+/* Record every id in a tool-map section against fname WITHOUT installing it.
+ * Mirrors kv_tool_map_load_body's bounds so a corrupt section is rejected the
+ * same way in both modes. */
+static int kv_tool_map_index_body(FILE *fp, uint32_t count, tool_map_index *ix,
+                                  const char *fname, size_t fname_len) {
+    if (!fp || !ix) return -1;
+    if ((uint64_t)count > DS4_TOOL_MAP_INDEX_MAX_IDS) return -1;
+    for (uint32_t i = 0; i < count; i++) {
+        uint8_t lens[8];
+        if (fread(lens, 1, sizeof(lens), fp) != sizeof(lens)) return -1;
+        uint32_t id_len = le_get32(lens);
+        uint32_t dsml_len = le_get32(lens + 4);
+        if (id_len == 0 || id_len > 256 || dsml_len == 0 ||
+            dsml_len > DS4_TOOL_MEMORY_MAX_BYTES) return -1;
+        char id[257];
+        if (fread(id, 1, id_len, fp) != id_len) return -1;
+        id[id_len] = '\0';
+        if (dsml_len > (uint32_t)INT32_MAX) return -1;
+        if (fseek(fp, (long)dsml_len, SEEK_CUR) != 0) return -1;
+        tool_map_index_note(ix, id, id_len, fname, fname_len);
+    }
+    return 0;
+}
+
+/* Walk the trailer from the current position in one of two modes.  Install mode
+ * (ix == NULL) puts every tool-map entry whose id is wanted into RAM; index mode
+ * (ix != NULL) records every id in the section against fname and installs
+ * nothing.  The writer emits a tokenizer-fingerprint section ahead of the tool
+ * map and a vision section after it, so the tool map is not at a fixed offset
+ * from the payload: reading it as the first section matched the fingerprint
+ * magic instead and restored nothing.  Section order is not assumed here either,
+ * and an unknown section stops the walk. */
+static int kv_trailer_walk_tool_map(server *s, FILE *fp, const stop_list *wanted,
+                                    tool_map_index *ix, const char *fname,
+                                    size_t fname_len) {
     for (;;) {
         uint8_t h[8];
         size_t n = fread(h, 1, sizeof(h), fp);
@@ -11519,7 +11628,13 @@ static int kv_trailer_restore_tool_map(server *s, FILE *fp,
         }
         if (h[0] == KV_TOOL_MAP_MAGIC0 && h[1] == KV_TOOL_MAP_MAGIC1 &&
             h[2] == KV_TOOL_MAP_MAGIC2 && h[3] == KV_TOOL_MAP_VERSION) {
-            if (kv_tool_map_load_body(s, fp, le_get32(h + 4), wanted) < 0) return -1;
+            uint32_t count = le_get32(h + 4);
+            if (ix) {
+                if (kv_tool_map_index_body(fp, count, ix, fname, fname_len) < 0)
+                    return -1;
+            } else if (kv_tool_map_load_body(s, fp, count, wanted) < 0) {
+                return -1;
+            }
             continue;
         }
         if (h[0] == KV_VISION_MAGIC0 && h[1] == KV_VISION_MAGIC1 &&
@@ -11552,6 +11667,15 @@ static bool kv_read_header(FILE *fp, kv_entry *e, uint32_t *text_bytes) {
 
 
 
+/* Test instrumentation for the bootstrap's file-open count.  The per-request
+ * whole-dir scan made that O(files) for every request; the index is supposed to
+ * make it O(new files + files holding a wanted id).  Counted only in test
+ * builds so production pays nothing and there is no unsynchronized write. */
+#ifdef DS4_SERVER_TEST
+static uint64_t kv_restore_file_opens;
+static uint64_t kv_restore_file_opens_for_test(void) { return kv_restore_file_opens; }
+#endif
+
 static void kv_cache_restore_tool_memory_for_messages(server *s, const chat_msgs *msgs) {
     if (!s || s->disable_exact_dsml_tool_replay || !s->kv.enabled || !msgs) return;
     stop_list wanted = {0};
@@ -11562,21 +11686,85 @@ static void kv_cache_restore_tool_memory_for_messages(server *s, const chat_msgs
      * Flash/Pro shapes even when the rendered chat text is identical. */
     uint8_t model_id = s->engine ? (uint8_t)ds4_engine_model_id(s->engine) : 0;
 
-    DIR *d = opendir(s->kv.dir);
-    if (!d) {
-        id_list_free(&wanted);
-        return;
+    /* Phase 1, under tool_mu: index any file not seen before, then resolve the
+     * wanted ids to the distinct file names that carry them.  No tool-memory
+     * calls in here -- the install phase below needs this same non-recursive
+     * mutex. */
+    stop_list files = {0};
+    pthread_mutex_lock(&s->tool_mu);
+    tool_map_index *ix = &s->tool_map;
+    if (ix->dir && s->kv.dir && strcmp(ix->dir, s->kv.dir) != 0)
+        tool_map_index_reset(ix);
+    if (!ix->dir && s->kv.dir) ix->dir = xstrdup(s->kv.dir);
+    if (!ix->ids) ix->ids = raxNew();
+    if (!ix->seen) ix->seen = raxNew();
+    DIR *d = ix->dir ? opendir(ix->dir) : NULL;
+    if (d) {
+        struct dirent *de;
+        while ((de = readdir(d)) != NULL) {
+            char sha[41];
+            if (!sha_hex_name(de->d_name, sha)) continue;
+            size_t nlen = strlen(de->d_name);
+            if (ix->seen &&
+                raxFind(ix->seen, (unsigned char *)de->d_name, nlen) != raxNotFound)
+                continue;
+            char *path = ix->dir ? path_join(ix->dir, de->d_name) : NULL;
+#ifdef DS4_SERVER_TEST
+            kv_restore_file_opens++;
+#endif
+            FILE *fp = path ? fopen(path, "rb") : NULL;
+            free(path);
+            if (fp) {
+                kv_entry hdr = {0};
+                uint32_t text_bytes = 0;
+                bool ok = kv_read_header(fp, &hdr, &text_bytes);
+                uint64_t skip = (uint64_t)text_bytes + hdr.payload_bytes;
+                if (ok && hdr.model_id == model_id &&
+                    (hdr.ext_flags & KV_EXT_TOOL_MAP) &&
+                    skip <= (uint64_t)INT64_MAX &&
+                    fseeko(fp, (off_t)skip, SEEK_CUR) == 0)
+                {
+                    kv_trailer_walk_tool_map(NULL, fp, NULL, ix, de->d_name, nlen);
+                }
+                fclose(fp);
+            }
+            /* Mark it seen even when unreadable: retrying a bad file on every
+             * request is how the old scan wasted its time. */
+            if (ix->seen)
+                raxInsert(ix->seen, (unsigned char *)de->d_name, nlen,
+                          (void *)1, NULL);
+        }
+        closedir(d);
     }
-    struct dirent *de;
-    while ((de = readdir(d)) != NULL) {
-        char sha[41];
-        if (!sha_hex_name(de->d_name, sha)) continue;
-        (void)sha;
-        char *path = path_join(s->kv.dir, de->d_name);
-        FILE *fp = fopen(path, "rb");
-        free(path);
-        if (!fp) continue;
+    if (ix->ids) {
+        for (int i = 0; i < wanted.len; i++) {
+            const char *id = wanted.v[i];
+            if (!id || !id[0]) continue;
+            void *v = raxFind(ix->ids, (unsigned char *)id, strlen(id));
+            if (v == raxNotFound) continue;
+            id_list_push_unique(&files, (const char *)v);
+        }
+    }
+    pthread_mutex_unlock(&s->tool_mu);
 
+    /* Phase 2, unlocked: open only the files that can satisfy a wanted id. */
+    for (int i = 0; i < files.len; i++) {
+        const char *fname = files.v[i];
+        if (!fname || !fname[0]) continue;
+        char *path = path_join(s->kv.dir, fname);
+#ifdef DS4_SERVER_TEST
+        kv_restore_file_opens++;
+#endif
+        FILE *fp = path ? fopen(path, "rb") : NULL;
+        free(path);
+        if (!fp) {
+            /* Evicted behind our back.  Drop the ids that pointed here so the
+             * next request does not retry a file that no longer exists. */
+            pthread_mutex_lock(&s->tool_mu);
+            tool_map_index_drop_file(&s->tool_map, fname);
+            pthread_mutex_unlock(&s->tool_mu);
+            continue;
+        }
         kv_entry hdr = {0};
         uint32_t text_bytes = 0;
         bool ok = kv_read_header(fp, &hdr, &text_bytes);
@@ -11585,11 +11773,11 @@ static void kv_cache_restore_tool_memory_for_messages(server *s, const chat_msgs
             skip <= (uint64_t)INT64_MAX &&
             fseeko(fp, (off_t)skip, SEEK_CUR) == 0)
         {
-            kv_trailer_restore_tool_map(s, fp, &wanted);
+            kv_trailer_walk_tool_map(s, fp, &wanted, NULL, NULL, 0);
         }
         fclose(fp);
     }
-    closedir(d);
+    id_list_free(&files);
     id_list_free(&wanted);
 }
 
@@ -16850,6 +17038,7 @@ static void server_close_resources(server *s) {
     }
     kv_cache_close(&s->kv);
     tool_memory_free(&s->tool_mem);
+    tool_map_index_reset(&s->tool_map);
     server_image_cache_clear(&s->image_cache);    for (int i = 0; i < s->slot_count; i++) {
         server_slot *slot = &s->slots[i];
         live_tool_state_free(&slot->responses_live);
@@ -23907,6 +24096,160 @@ static void test_kv_tool_map_restores_before_prompt_render(void) {
  * restored nothing, which is the second half of the tool_replay disk=0 field
  * finding.  The file here is built with the production writer hooks so the
  * test cannot drift away from the real layout again. */
+/* Build one distinct qwen-syntax span per index.  The envelope macros come from
+ * the scanner; the inner tags are the shape the renderer emits. */
+static char *test_make_qwen_span(int which) {
+    buf b = {0};
+    buf_puts(&b, "\n\n" QWEN_TOOL_CALL_START "\n" "<function=get_weather>" "\n" "<parameter=city>" "\ncity-");
+    buf_putc(&b, (char)('a' + which));
+    buf_puts(&b, "\n" "</parameter>" "\n" "</function>" "\n" QWEN_TOOL_CALL_END);
+    return buf_take(&b);
+}
+
+/* Write a checkpoint file through the PRODUCTION trailer hooks so the layout on
+ * disk is the real one, with a tool map holding exactly one call id. */
+static bool test_write_tool_map_kv_file(const char *dir, const char *sha40,
+                                        const char *text, server *src) {
+    char name[64];
+    snprintf(name, sizeof(name), "%.40s.kv", sha40);
+    char *path = path_join(dir, name);
+    if (!path) return false;
+    kv_trailer_ctx tctx = {0};
+    tctx.s = src;
+    ds4_kvstore_trailer_hooks hooks = kv_cache_tool_map_hooks(&tctx, false);
+    uint64_t trailer_bytes = 0;
+    if (!hooks.serialized_size(hooks.ud, text, &trailer_bytes)) {
+        free(path);
+        return false;
+    }
+    FILE *fp = fopen(path, "wb");
+    if (!fp) { free(path); return false; }
+    uint8_t h[KV_CACHE_FIXED_HEADER];
+    kv_fill_header(h, 2, KV_REASON_CONTINUED, hooks.ext_flag, 512, 0, 32768,
+                   100, 100, 0);
+    uint8_t tl[4];
+    le_put32(tl, (uint32_t)strlen(text));
+    bool ok = fwrite(h, 1, sizeof(h), fp) == sizeof(h) &&
+              fwrite(tl, 1, sizeof(tl), fp) == sizeof(tl) &&
+              fwrite(text, 1, strlen(text), fp) == strlen(text);
+    uint64_t written = 0;
+    ok = ok && hooks.write(hooks.ud, fp, text, &written) &&
+         written == trailer_bytes;
+    ok = ok && fclose(fp) == 0;
+    free(path);
+    return ok;
+}
+
+/* One assistant message carrying a single call id: run the bootstrap and report
+ * whether the raw span came back. */
+static bool test_restore_one_id(server *dst, const char *id) {
+    chat_msgs msgs = {0};
+    chat_msg m = {0};
+    m.role = xstrdup("assistant");
+    tool_call tc = {0};
+    tc.id = xstrdup(id);
+    tc.name = xstrdup("get_weather");
+    tc.arguments = xstrdup("{\"city\":\"canonical\"}");
+    tool_calls_push(&m.calls, tc);
+    chat_msgs_push(&msgs, m);
+    kv_cache_restore_tool_memory_for_messages(dst, &msgs);
+    tool_replay_stats st = {0};
+    tool_memory_attach_to_messages(dst, &msgs, &st);
+    bool got = msgs.v[0].calls.raw_tool_text != NULL;
+    chat_msgs_free(&msgs);
+    return got;
+}
+
+/* The bootstrap used to open every file in the KV dir on every request to find
+ * whichever tool map held a wanted call id.  Now that trailers are actually
+ * populated that scan is useful, but it is O(files) per request and the dir is
+ * allowed to hold tens of thousands of files (cold_max 30000).  This pins the
+ * indexed behaviour: new files are discovered, already-indexed files are not
+ * reopened, a wanted id costs one open of the file that holds it, and a file
+ * deleted behind our back degrades instead of wedging the walk. */
+static void test_kv_tool_map_bootstrap_indexes_files_not_rescans(void) {
+    char tmpl[] = "/tmp/ds4-kv-tool-map-index.XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    TEST_ASSERT(dir != NULL);
+    if (!dir) return;
+
+    static const char *shas[4] = {
+        "5555555555555555555555555555555555555551",
+        "5555555555555555555555555555555555555552",
+        "5555555555555555555555555555555555555553",
+        "5555555555555555555555555555555555555554",
+    };
+    const char *ids[4] = {"call_idx_a", "call_idx_b", "call_idx_c", "call_idx_d"};
+
+    server src = {0};
+    pthread_mutex_init(&src.tool_mu, NULL);
+    char *spans[4] = {NULL, NULL, NULL, NULL};
+    char *texts[4] = {NULL, NULL, NULL, NULL};
+    for (int i = 0; i < 4; i++) {
+        spans[i] = test_make_qwen_span(i);
+        TEST_ASSERT(spans[i] != NULL);
+        tool_memory_put(&src, ids[i], spans[i]);
+        buf t = {0};
+        buf_puts(&t, "visible transcript prefix ");
+        buf_putc(&t, (char)('a' + i));
+        buf_puts(&t, "\n");
+        buf_puts(&t, spans[i]);
+        texts[i] = buf_take(&t);
+    }
+    /* Only three files exist at first; the fourth appears mid-test. */
+    for (int i = 0; i < 3; i++)
+        TEST_ASSERT(test_write_tool_map_kv_file(dir, shas[i], texts[i], &src));
+
+    server dst = {0};
+    pthread_mutex_init(&dst.tool_mu, NULL);
+    dst.kv.enabled = true;
+    dst.kv.dir = xstrdup(dir);
+    dst.kv.opt = kv_cache_default_options();
+
+    /* First call: index the three files, then open the one holding the id. */
+    uint64_t base = kv_restore_file_opens_for_test();
+    TEST_ASSERT(test_restore_one_id(&dst, ids[0]));
+    uint64_t first = kv_restore_file_opens_for_test() - base;
+    TEST_ASSERT(first >= 3 && first <= 4);
+
+    /* Second call, a different id, no new files: exactly ONE open.  This is the
+     * assertion that fails while the bootstrap still rescans the directory. */
+    base = kv_restore_file_opens_for_test();
+    TEST_ASSERT(test_restore_one_id(&dst, ids[2]));
+    TEST_ASSERT(kv_restore_file_opens_for_test() - base == 1);
+
+    /* A file written after the first call must be discovered on the next one,
+     * without reopening the files already indexed. */
+    TEST_ASSERT(test_write_tool_map_kv_file(dir, shas[3], texts[3], &src));
+    base = kv_restore_file_opens_for_test();
+    TEST_ASSERT(test_restore_one_id(&dst, ids[3]));
+    uint64_t after_new = kv_restore_file_opens_for_test() - base;
+    TEST_ASSERT(after_new >= 1 && after_new <= 2);
+
+    /* Deleting a file behind the index must degrade, not wedge: the walk
+     * survives, the lost id simply is not restored, and other ids still work. */
+    char victim[512];
+    snprintf(victim, sizeof(victim), "%s/%.40s.kv", dir, shas[1]);
+    TEST_ASSERT(unlink(victim) == 0);
+    TEST_ASSERT(!test_restore_one_id(&dst, ids[1]));
+    TEST_ASSERT(test_restore_one_id(&dst, ids[0]));
+
+    for (int i = 0; i < 4; i++) {
+        free(spans[i]);
+        free(texts[i]);
+        char p[512];
+        snprintf(p, sizeof(p), "%s/%.40s.kv", dir, shas[i]);
+        unlink(p);
+    }
+    kv_cache_close(&dst.kv);
+    tool_memory_free(&src.tool_mem);
+    tool_memory_free(&dst.tool_mem);
+    pthread_mutex_destroy(&src.tool_mu);
+    pthread_mutex_destroy(&dst.tool_mu);
+    /* dir is mkdtemp's own array, not a heap pointer: rmdir only. */
+    rmdir(dir);
+}
+
 static void test_kv_tool_map_bootstrap_reads_real_trailer_layout(void) {
     char tmpl[] = "/tmp/ds4-kv-tool-map-layout.XXXXXX";
     char *dir = mkdtemp(tmpl);
@@ -26689,6 +27032,7 @@ static void ds4_server_unit_tests_run(void) {
     test_kv_tool_map_persists_qwen_syntax_blocks();
     test_kv_tool_map_restores_before_prompt_render();
     test_kv_tool_map_bootstrap_reads_real_trailer_layout();
+    test_kv_tool_map_bootstrap_indexes_files_not_rescans();
     test_thinking_checkpoint_canonical_matches_future_prompt();
     test_prompt_text_drop_oldest_images();
     test_normalize_image_text_and_trailer_roundtrip();

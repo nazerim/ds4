@@ -102,9 +102,10 @@ Status key: [ ] todo, [~] in progress, [x] done.
           largest measured cost, drafted patch exists, different repo so no build
           contention with the ds4 phases)
 - [x] P1  P3.2 evict/cold/shutdown chaining — DONE, see progress log 01:05
+- [x] P3  Bootstrap id-index — DONE, see progress log 01:40 (done before P2
+          because its RED test was already written and the design was settled)
 - [ ] P2  Backtick Option A: output-side hardening + repro + content detector
-- [ ] P3  Bootstrap id-index (kill the per-request whole-dir scan)
-- [ ] P4  P3.1 tail: double-write investigation + store telemetry
+- [ ] P3  Bootstrap id-index (kill the per-request whole-dir scan)- [ ] P4  P3.1 tail: double-write investigation + store telemetry
 - [ ] P5  P2.1 middle-retire re-anchor (highest risk; gate on P1-P4 landing)
 - [ ] P6  oMLX recon synthesis + implement portable perf wins for Qwen 3.8 Flash
 - [ ] P7  Docs closeout (ADR, TODO, HANDOVER), full suite, restart engine, report
@@ -238,44 +239,83 @@ plus a deferral-pressure metric and defer the code. Measured upside is modest
 (35.3 GiB of interior nodes, most of which LRU would drain anyway); the real
 upside is fewer stitch hops and less deferral pressure.
 
-### Phase P6 — oMLX perf for Qwen 3.8 Flash
+### Phase P6 — oMLX perf: CLOSED AS A PORTING QUESTION, reopened as measurement
 
-Recon status (two scout passes, reports in .codebase-memory/omlx-recon-1.md and
-omlx-recon-2.md). All three candidates are NEEDS-MEASUREMENT, none is GO:
-1. Fused GDN prework for MTP verify widths S=3..9 (oMLX
-   omlx/patches/qwen35_gdn_prework.py, one Metal launch replacing ~10 dispatches
-   per GDN layer per verify cycle; ~0.29 ms x layers measured on M3 Ultra).
-   ds4 hook: metal/qwen4.metal GDN kernels driven from ds4_metal.m, state layout
-   near ds4.c:39668-39675 (conv state plus 2 MTP snapshots per linear layer).
-   BLOCKER: if ds4's MTP verify width never reaches 3, the premise evaporates.
-2. Verify SDPA split / chunked causal attention (+4..9% decode with speculation
-   upstream). ds4 hook: metal/flash_attn.metal and metal/qwen4.metal via
-   ds4_metal.m. BLOCKER: unknown whether ds4 already chunks causally.
-3. Fused MoE decode router top-k (~51 us to ~5 us per layer upstream). ds4 hook:
-   metal/moe.metal plus the qwen4 router dispatch. NOT dead: ds4.c:39663 sizes
-   qwen4 scratch with (DS4_N_EXPERT_USED + 1) * (E + 2 * DS4_N_FF_EXP), which
-   only makes sense for a routed MoE FFN — but DS4_N_EXPERT_USED > 1 for this
-   checkpoint is unconfirmed, and tie-break semantics must stay bit-identical.
+Pass-3 recon (delegate lane, report in .codebase-memory/omlx-recon-3.md) reached
+a firm negative on all three candidates. Do not port any of them:
+1. Fused GDN prework — NO-GO, already implemented.  kernel_qwen4_gdn_front
+   (metal/qwen4.metal:4545) via ds4_gpu_qwen4_gdn_front_tensor (ds4_metal.m)
+   from qwen4_graph_linear (ds4.c:58368) already fuses conv-state concat,
+   depthwise conv1d, SiLU, q/k split, L2 norm, scaling, alpha/beta (folded
+   GEMVs), the g and beta activations, next-conv-state slice AND both MTP
+   snapshots.  Independently, ds4's verify width is only T=2 (default) or 3
+   (adaptive), so oMLX's S=3..9 amortisation window is unreachable without
+   changing DS4_N_NEXTN_PREDICT, which is a model-weight property.
+2. Verify SDPA split — NO-GO, inverted premise.  qwen4_graph_attention_core
+   (ds4.c:58404) already issues ONE batched multi-row call per sub-batch, and
+   qwen4_graph_attention_tail (ds4.c:58455) deliberately NARROWS T=3 into 2+1
+   sub-batches to preserve bit-exact kernel rounding.  ds4 attention is
+   block-sparse (indexer top-k over ratio-4 pooled blocks), not dense causal
+   SDPA, so there is no per-row loop to collapse and no bottom-right
+   construction to port.  A widening port would break the exactness split.
+3. Fused MoE decode router top-k — NO-GO, already implemented and a superset.
+   kernel_qwen4_router_topk (metal/qwen4.metal:1122) does softmax + top-k +
+   renorm + the shared-expert gate logit in one launch.  Semantics warning:
+   ds4 breaks ties to the LOWEST expert index, oMLX/mlx-argpartition to the
+   HIGHEST, so a port would silently change expert selection.
+   The NAX runner-up is also already in-tree (kernel_qwen4_moe_mm_mid_nax_t,
+   kernel_qwen4_moe_mm_down_nax_t).
 
-Verified ds4 facts: DS4_QWEN4_PREFILL_CHUNK is read at ds4.c:39636 in
-qwen4_prefill_chunk_tokens, default 8192, 0 or >65536 falls back to 8192,
-clamped to ctx, and there is NO fixed-shape alignment (so oMLX's chunk-align
-idea has no ds4 counterpart). ds4_qwen4_layer_is_linear(il) gates per-layer
-attention vs recurrent handling. ds4-bench and ds4_bench.c exist; make targets
-dspark-acceptance, dspark-verify-depth and mtp-verify-depth exist and are the
-likely MTP-width harnesses. PLAN-PREFILL-M5.md at repo root is UNREAD and is the
-most likely place for existing M5 prefill reasoning — read it first.
+Model facts worth keeping: Qwen3.8 Flash Next IS a routed MoE in ds4 — 512
+experts, 10 used plus 1 shared, FF exp 640 (ds4.c:816-819), and the GGUF
+metadata check is a hard fail, not advisory (ds4.c:7062-7068).  Trunk is 48
+layers, of which 36 are GDN and 12 full attention (interval 4).  A full GDN
+layer costs about 18 Metal dispatches at T=2.
 
-Still unknown and blocking: actual verify width S, per-layer GDN dispatch count,
-ds4-bench CLI flags and whether prefill/decode report separately, and ALL prior
-art in /Users/naz/Projects/Scratch (not mined — scout budget). Next action: one
-`delegate` lane (uncapped) to mine Scratch for measured tok/s and to answer the
-ds4 blockers, then benchmark before porting anything.
+PLAN-PREFILL-M5.md closes several doors that pass 1 and 2 left open: chunk size
+is PLATEAUED and the default is already optimal (2048 wins at 2k, loses at 65k;
+4096 about equals 8192), ANE is a dead track, attention kernels are 0.4 percent
+of prefill, and the honest ceiling on M5 Max for that model was 0-3 percent,
+not the 10-15 estimated from the TF/s plateau.  Its exactness doctrine binds
+any future kernel work: env-gate every lever, balanced A/B with
+metal_prefill_variant_bench, promote only with --quality keeping the reference
+path, because accumulation order alone changes 129278 of 129280 logits.
 
-Rule: no perf change ships without a before/after number in the commit message.
-Cheapest first win from verified evidence: an A/B sweep of
-DS4_QWEN4_PREFILL_CHUNK (env knob, zero code risk), watching the memory
-estimator coupling at ds4.c:39652 since larger chunks raise scratch_bytes.
+What P6 becomes instead — a zero-code measurement, since the only live lever is
+speculation economics, and prior art says wider verify can REGRESS even when
+acceptance rises (eagle/README.md: dflash verify lifted acceptance 51.7 to
+57.3 percent but tok/s fell 29.5 to 16.8; ddtree 60.6 percent acceptance at
+13.7 tok/s).  Also relevant: ds4's own depth policy encodes a measured claim
+(second draft accepts about 0.6 on prose, 0.95+ on deterministic continuations,
++10-20 percent when depth 3 engages; ds4.c:74331) that has never been
+re-validated on this checkpoint.
+
+Measurement plan (engine must be down; never two model processes on this box):
+1. ds4-bench cannot exercise qwen4 MTP at all — ds4_bench.c never sets
+   .glm_mtp — so MTP numbers must come from the ds4 CLI with --mtp-timing.
+   ds4-bench is still the right tool for the non-MTP prefill/decode reference,
+   and it does report prefill_tps and gen_steady_tps separately (--csv).
+2. Baseline: DS4_QWEN4_MTP_DEPTH=2 with DS4_QWEN4_TIMING=1, fixed prompt,
+   3 runs, median.  Record wall tok/s, the "Qwen3.8 mtp: N verify cycles,
+   M drafts accepted (P%)" line, and forward(T=2) avg ms gpu.
+3. Same at DS4_QWEN4_MTP_DEPTH=3, then unset (auto) to see how often depth 3
+   actually engages; DS4_QWEN4_SPEC_TRACE=1 on one short run to confirm.
+4. Fusion A/B with DS4_QWEN4_NO_FUSE=1 — this retroactively PRICES the
+   already-landed fused GDN prework across 36 GDN layers on ds4 hardware and
+   closes oMLX candidate 1 permanently with a number instead of an argument.
+5. Only if depth 3 wins by more than 3 percent sustained on real prose does
+   anything change, and what changes is the policy constants in
+   qwen4_spec_depth (ds4.c:74333-74340), not a kernel.
+6. Stage attribution if step 4 is interesting: DS4_QWEN4_TIMING=2 gives
+   per-group GPU ms (ple hc_attn gdn attn hc_ffn moe).
+Known traps: Scratch oMLX numbers are MLX-Python on a different quant (oQ4e,
+69.6 GB resident) so they bound expectations but are not ds4 baselines;
+flash-next-perf/perf_results.json is cache-polluted and the decode_est_tok_s
+field of perf_results2.json is broken — neither may be cited; and
+benchmark/ is a remote SWE-bench runner with no perf numbers at all.
+
+Rule unchanged: no perf change ships without a before/after number in the
+commit message.
 
 ## 4. Standing constraints (do not violate)
 
@@ -340,3 +380,39 @@ estimator coupling at ds4.c:39652 since larger chunks raise scratch_bytes.
   tests/ds4_test.c. Review deferred: capacity was 3/3 and the parity test is
   the mechanical gate, so per the standing under-400-lines rule this batched
   into a single review lane with P2/P3.
+- 01:25 P6 recon lane returned (report .codebase-memory/omlx-recon-3.md):
+  ALL THREE oMLX candidates are already in ds4 in equal or stronger form, so
+  there is nothing to port.  kernel_qwen4_gdn_front already fuses the whole GDN
+  prework plus both MTP snapshots; kernel_qwen4_router_topk already does
+  softmax+topk+renorm+shared-expert gate in one launch (and breaks ties to the
+  LOWEST index where oMLX uses the highest, so a port would silently change
+  expert selection); verify attention is already batched and deliberately
+  narrows T=3 into 2+1 for bit-exactness, so the SDPA-split premise is
+  inverted.  ds4's verify width is only T=2 or 3, so oMLX's S=3..9 window is
+  unreachable.  PLAN-PREFILL-M5.md additionally closes chunk size (plateaued,
+  default optimal) and ANE (dead track), with a stated ceiling of 0-3 percent.
+  P6 is therefore redefined as a zero-code MEASUREMENT plan (MTP depth 2 vs 3
+  vs auto, and DS4_QWEN4_NO_FUSE A/B to price the fusion that already landed).
+  Note ds4-bench cannot exercise qwen4 MTP at all (never sets .glm_mtp), so MTP
+  numbers must come from the ds4 CLI with --mtp-timing.
+- 01:35 P2 recon lane returned (report /tmp/backtick-a-recon.md, to be copied
+  into .codebase-memory): the unterminated-tool-call error site is the else
+  branch at ds4_server.c:15627-15630; the escape case is every STREAMING chat
+  request (the continuation route at 15595 excludes stream), plus a second
+  unclosed envelope or exhaustion of max_tokens.  A degrade path already exists
+  at 15731 but is unreachable because the parser refuses to recover when
+  finish is already "error" (guard at 6994).  Fix is to stop setting error
+  there, which routes into the shipped degrade.  One real hazard to handle:
+  d.5/d.7, a visible checkpoint could be remembered while the live session
+  still holds the stripped markup tokens - mitigation is to clear live state in
+  the degrade branch.  Also confirmed upstreamable: the site is upstream code
+  (origin/main 14313-14359 from upstream commit 759dd7c).
+- 01:40 P3 COMPLETE.  RED: second bootstrap call opened 3 files instead of 1.
+  Implementation: tool_map_index (id -> file name, plus a seen set) guarded by
+  tool_mu, with the install phase outside that lock because
+  tool_memory_put_source takes the same non-recursive mutex; one trailer walker
+  serves both install and index modes so the section-order fix cannot drift.
+  Eviction behind our back drops the stale ids on the failed open.  One crash
+  found and fixed en route: my own test called free() on mkdtemp's stack array
+  (SIGABRT, pointer not allocated) - production code was not at fault.
+  GREEN: --server ok, production make clean.
