@@ -610,6 +610,57 @@ Useful residue:
   disk=1 canonical=0 missing_ids=0, with zero error-census hits. Engine left
   running, PID 25841.
 
+- 04:50 CONTAMINATION BUG FOUND IN MY OWN P0 WORK, empirically: the deployed
+  APPEND_SYSTEM.md had been rewritten between deploys. Every pi session runs the
+  handler with its OWN selectedTools, and lanes carry ls while the install default
+  does not, so a lane rewrote the shared file with a lane-flavored manifest and the
+  next parent session would have read it at startup - wrong tool list plus a head
+  change, the exact churn the route exists to remove. Fixed: syncAppendSystem is
+  now create-if-missing and never overwrites; the deploy-time renderer is the
+  authoritative writer (it renders from settings.json defaultTools, which is
+  session-independent). That split needed making explicit, because the renderer
+  shared the function and would otherwise have lost the ability to update the file.
+  pi-extensions a3e93e8.
+- 04:55 Lane concurrency documented rather than mechanized, per operator call.
+  AGENTS.md now owns an engine-class rule: cloud up to 3 concurrent async lanes
+  bounded by the provider's slots, local 1 sequentially, decided with
+  pi-scripts/model-class.py. Two honest limits recorded - the config keys are
+  static and pi-subagents supports no env override, so they cannot follow a
+  mid-session switch to a local model; and writers stay serialized in both cases
+  because two lanes running make in one tree clobber object files. The config
+  comment and SUBAGENT-LANES.md now point at AGENTS.md instead of restating a rule
+  that had gone stale in both. A deploy-time checker that fails on a
+  config/class mismatch is the natural control and the data already exists; not
+  built, recorded as an option. pi-extensions b431f87.
+- 05:05 Store telemetry shipped (02f1f12). Six lifetime counters in ds4_kvstore,
+  logged every 50 stores and at close, split chained versus full so the
+  per-checkpoint ratio falls out, with the dedup path counted separately as
+  `reused` because a store that writes nothing logs no stored line at all - the
+  exact blind spot that made the double-write question need a header walk.
+  Verified live on a real stop: stores=7 reused=0 chained=4 (0.85 GiB, avg 0.212)
+  full=3 (0.67 GiB, avg 0.222) full/chained=1.0x. The 1.0x is correct and must not
+  be misread: the ratio covers one process lifetime, and at 8-17k tokens the fixed
+  sections dominate both forms. Whole-blade census measured 9.1x.
+- 05:15 Upstream proposals DRAFTED, NOT SENT (.codebase-memory/
+  UPSTREAM-PROPOSALS-20260929.md, commit 7aeeef6). Both verified against
+  origin/main, not the fork: upstream ships recovered_tool_parse_failure (4
+  occurrences) and does not have strip_dsml_keep_prefix (0), and
+  anthropic_stop_reason really does collapse everything but tool_calls/length to
+  end_turn. Proposal 1 is a six-line PR; Proposal 2 is an issue with three options,
+  since Anthropic's stop_reason vocabulary has no error member. The KV layer stays
+  unproposed per the standing decision, and the input-side syntax question is
+  recorded as needing a migration conversation rather than a PR.
+- 05:20 Housekeeping the operator asked about (0ccf551): the tracked binaries were
+  a REGRESSION, not an original mistake - b3a4cc5 had untracked all seven artifacts
+  and added the ignore rules, then the upstream merge 7d7b8cc was an evil merge that
+  resurrected them from nothing and dropped the .gitignore block. Four zero-byte
+  .o.tmp files deleted; both harnesses untracked but kept (Makefile targets, proven
+  by deleting and rebuilding them); tests/test_spec_rejection deleted outright
+  because its source was deliberately removed in dd1a02a and it has no build rule,
+  so untracking would have left an orphan no clone could reproduce. AGENTS.md now
+  carries the post-merge re-check command, because a convention a merge can
+  silently undo is not a control.
+
 ## 4. Standing constraints (do not violate)
 
 - Never run two engines; model-backed ds4_test runs only while ds4-server is
