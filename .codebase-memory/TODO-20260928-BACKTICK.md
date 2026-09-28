@@ -184,3 +184,25 @@ assistant prose broke the opencode session twice (parsed as live tool calls)
 and a stray code-fence character terminated a turn.  That is the client-side
 face of the same problem class and is tracked separately in PiScratch;
 nothing here changes ds4 behaviour for it.
+
+## Follow-on 2026-09-28 18:20 — prompt-head churn costs KV ladder depth (pi-side)
+A live linode-agent conversation (418978 tokens) lost resume depth and re-rooted
+at 40960 after an agent to subagent to agent round trip, forcing a ~378k-token
+re-prefill. NOT a ds4 fault: the first divergent byte (159188) is inside the
+block pi's tool-manifest extension appends after the cwd element, and the
+parent-lineage checkpoint written after the dive has no manifest at all where
+the 16:09 checkpoint had one. Chain integrity was clean (110 chained files, zero
+orphans, no warnings), and 40960 is simply the deepest rung whose stored bytes
+end before the divergence.
+Mechanism: renderToolManifest returns null when the registry reports neither
+active built-ins nor guidelines, so a resume can silently drop the block; the
+listing is also derived from the live registry, so a lane granted ls emits a
+different manifest than its parent for the same conversation.
+Handoff with measured variants, prioritised fixes (memoize the manifest on the
+base prompt, reuse instead of dropping, head-stability warning) and a drafted
+unapplied patch: /Users/naz/Projects/PiScratch/PROMPT-HEAD-STABILITY-20260928.md
+and PROMPT-HEAD-STABILITY-patch.md
+Operator rule until fixed: the head is conversation identity. Do mode switches,
+extension-set changes, tool-config edits and AGENTS.md changes at conversation
+boundaries, never mid-session. Diagnostic that makes this self-evident: start
+the engine with DS4_KV_DEBUG=1 (logs reject reason plus first-divergent-byte).
