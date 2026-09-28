@@ -572,6 +572,44 @@ Useful residue:
   warm-up and interleaving, the same code would have "proved" a 3.4x ratio and
   greenlit the project on a phantom.
 
+- 03:10 FINAL REVIEW ACTED ON (2d93217). A bounded review lane over the P1/P3/P4
+  diffs returned APPROVE-WITH-NITS with two must-fix items, both real:
+  M1 - the bootstrap marked a file as indexed even when fopen failed or the
+  trailer walk errored, so a checkpoint being written concurrently or one
+  transient I/O error poisoned that file for the whole process lifetime. The
+  rescan this replaced healed from exactly that. A file is now recorded only once
+  it opened, its header parsed, and the walk completed.
+  The reviewer also caught that phase 1 did blocking disk I/O for up to cold_max
+  files while holding tool_mu, head-of-line-blocking every other request thread on
+  the first request after boot. The bootstrap is now four passes: locked and
+  I/O-free directory walk, unlocked read into a PRIVATE index, locked
+  bound+merge+mark-seen+re-resolve, unlocked install.
+  M2 - the forced-full assertions could pass vacuously: nothing asserted the
+  DS4_KV_DELTA_FULL_REASONS=0 twin really was full, so a broken switch would have
+  turned stitch-vs-full into stitch-vs-stitch and still passed. Now asserted.
+  Nits taken: index bound checked before the merge so a clear cannot strand a
+  half-indexed file marked as read; a separate bound on the seen set (it grows
+  with file churn, not tool calls); drop_file no longer restarts its iterator per
+  removal (was O(k*n) under the mutex, multi-second worst case); documented that
+  only the literal 0 disables the switch.
+  New tests cover the dedup the design rests on and that nothing exercised: two
+  ids in one file must cost one install open and restore both, and two ids in two
+  files must cost exactly two opens. Every earlier case wanted one id from one
+  file, so a file-per-id regression would have passed all of them.
+  One review concern closed by reading rather than assuming: id_list_push_unique
+  copies via xstrdup, so names resolved under the lock and used after unlocking
+  are owned - dropping a stale file from another thread cannot use-after-free.
+  Reviewer's own gap, recorded honestly: it ran out of budget before reading the
+  KV load/resume path, so orphan-delta handling was reasoned about but not
+  verified in that lane. It IS covered by --kv-delta's broken-chain case, which
+  asserts an orphan self-destructs and the load degrades to 0.
+  Full suite re-run green after the rewrite: --server, --kv-delta,
+  --tool-call-quality, --think-tool-recovery, kv_policy_harness, production build
+  warning-free. Then re-proved end to end on the live engine: after a restart with
+  empty RAM, replaying an id that exists only on disk traces tool_replay mem=0
+  disk=1 canonical=0 missing_ids=0, with zero error-census hits. Engine left
+  running, PID 25841.
+
 ## 4. Standing constraints (do not violate)
 
 - Never run two engines; model-backed ds4_test runs only while ds4-server is
