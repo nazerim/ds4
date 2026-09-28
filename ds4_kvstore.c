@@ -539,7 +539,9 @@ static bool kv_delta_enabled(void) {
 /* Read on every call rather than cached like DS4_KV_DELTA, so a test can
  * toggle it around a single store to force the pre-P3.2 full-node behaviour.
  * Operators can also use it to bisect a field regression without losing the
- * P1 chaining that continued/turn stores depend on. */
+ * P1 chaining that continued/turn stores depend on.  Only the literal "0"
+ * disables it: any other value, including "false" or "no", leaves chaining on,
+ * which matches how DS4_KV_DELTA is parsed. */
 static bool kv_delta_full_reasons_enabled(void) {
     const char *e = getenv("DS4_KV_DELTA_FULL_REASONS");
     return !(e && !strcmp(e, "0"));

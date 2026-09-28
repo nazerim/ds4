@@ -10535,6 +10535,9 @@ static void id_list_push_unique(stop_list *ids, const char *id);
  * file evicted behind our back is dropped from the index on the failed open, so
  * staleness degrades to a miss rather than wedging the walk. */
 #define DS4_TOOL_MAP_INDEX_MAX_IDS 1000000u
+/* `seen` grows with file churn rather than with tool calls, so it gets its
+ * own bound: ~150 bytes an entry, so this is tens of megabytes. */
+#define DS4_TOOL_MAP_INDEX_MAX_SEEN 200000u
 
 typedef struct {
     rax *ids;    /* call id -> xstrndup(file name) */
@@ -10567,38 +10570,125 @@ static void tool_map_index_note(tool_map_index *ix, const char *id, size_t id_le
     if (!ix->ids) ix->ids = raxNew();
     if (!ix->ids) return;
     if (raxFind(ix->ids, (unsigned char *)id, id_len) != raxNotFound) return;
-    if (raxSize(ix->ids) >= DS4_TOOL_MAP_INDEX_MAX_IDS) {
-        /* Bounded memory beats completeness: drop the mappings and let the next
-         * request rebuild them.  `seen` goes too, so the rebuild is a full
-         * rescan rather than a permanently blind index. */
-        tool_map_index_clear_entries(ix);
-        ix->ids = raxNew();
-        if (!ix->ids) return;
-    }
     char *dup = xstrndup(fname, fname_len);
     if (!dup) return;
     if (!raxInsert(ix->ids, (unsigned char *)id, id_len, dup, NULL)) free(dup);
 }
 
-/* Drop every id that pointed at fname (the file is gone). */
+/* Drop every id that pointed at fname (the file is gone).  Two passes: collect
+ * the matching keys, stop the iterator, then remove.  Removing during the walk
+ * invalidates the iterator and forces a restart from the beginning, which is
+ * O(k*n) with the mutex held - unimportant for a handful of ids, but a file with
+ * many ids against a large index would stall every request thread for seconds.
+ * The batch bounds work per pass; a file with more ids than the batch converges
+ * over the following requests, since each failed open drops another batch. */
+#define DS4_TOOL_MAP_DROP_BATCH 512
+
 static void tool_map_index_drop_file(tool_map_index *ix, const char *fname) {
     if (!ix || !ix->ids || !fname) return;
-    size_t flen = strlen(fname);
-    raxIterator it;
-    raxStart(&it, ix->ids);
-    raxSeek(&it, "^", NULL, 0);
-    while (raxNext(&it)) {
-        char *v = (char *)it.data;
-        if (!v || strlen(v) != flen || memcmp(v, fname, flen) != 0) continue;
-        raxRemove(ix->ids, it.key, it.key_len, NULL);
-        free(v);
-        /* Removal invalidates the iterator's position; restart the walk.  The
-         * id space per file is small and this path only runs on eviction. */
-        raxStop(&it);
+    const size_t flen = strlen(fname);
+    for (;;) {
+        unsigned char *keys[DS4_TOOL_MAP_DROP_BATCH];
+        size_t key_lens[DS4_TOOL_MAP_DROP_BATCH];
+        size_t n = 0;
+        raxIterator it;
         raxStart(&it, ix->ids);
         raxSeek(&it, "^", NULL, 0);
+        while (n < DS4_TOOL_MAP_DROP_BATCH && raxNext(&it)) {
+            const char *v = (const char *)it.data;
+            if (!v || strlen(v) != flen || memcmp(v, fname, flen) != 0) continue;
+            unsigned char *k = xmalloc(it.key_len);
+            if (!k) continue;
+            memcpy(k, it.key, it.key_len);
+            keys[n] = k;
+            key_lens[n] = it.key_len;
+            n++;
+        }
+        raxStop(&it);
+        if (n == 0) return;
+        for (size_t i = 0; i < n; i++) {
+            void *old = NULL;
+            raxRemove(ix->ids, keys[i], key_lens[i], &old);
+            free(old);
+            free(keys[i]);
+        }
     }
-    raxStop(&it);
+}
+
+/* Append the distinct file names carrying any wanted id.  Called twice per
+ * request (before and after indexing new files) and relies on
+ * id_list_push_unique to deduplicate and to COPY: the returned names outlive the
+ * lock they were resolved under, so aliasing the rax-owned value would be a
+ * use-after-free once another thread drops a stale file. */
+static void tool_map_index_resolve(tool_map_index *ix, const stop_list *wanted,
+                                   stop_list *files) {
+    if (!ix || !ix->ids || !wanted || !files) return;
+    for (int i = 0; i < wanted->len; i++) {
+        const char *id = wanted->v[i];
+        if (!id || !id[0]) continue;
+        void *v = raxFind(ix->ids, (unsigned char *)id, strlen(id));
+        if (v == raxNotFound) continue;
+        id_list_push_unique(files, (const char *)v);
+    }
+}
+
+/* Merge a privately built index into the shared one, first-wins.  Values are
+ * copied rather than moved so the source can be freed wholesale afterwards. */
+static void tool_map_index_merge(tool_map_index *dst, tool_map_index *src) {
+    if (!dst || !src) return;
+    if (src->ids) {
+        raxIterator it;
+        raxStart(&it, src->ids);
+        raxSeek(&it, "^", NULL, 0);
+        while (raxNext(&it)) {
+            const char *v = (const char *)it.data;
+            if (!v) continue;
+            if (!dst->ids) dst->ids = raxNew();
+            if (!dst->ids) break;
+            if (raxFind(dst->ids, it.key, it.key_len) != raxNotFound) continue;
+            char *dup = xstrdup(v);
+            if (!dup) continue;
+            if (!raxInsert(dst->ids, it.key, it.key_len, dup, NULL)) free(dup);
+        }
+        raxStop(&it);
+        raxFreeWithCallback(src->ids, free);
+        src->ids = NULL;
+    }
+    if (src->seen) {
+        raxIterator it;
+        raxStart(&it, src->seen);
+        raxSeek(&it, "^", NULL, 0);
+        while (raxNext(&it)) {
+            if (!dst->seen) dst->seen = raxNew();
+            if (!dst->seen) break;
+            raxInsert(dst->seen, it.key, it.key_len, (void *)1, NULL);
+        }
+        raxStop(&it);
+        raxFree(src->seen);
+        src->seen = NULL;
+    }
+}
+
+/* Bound both raxes.  They are cleared together so a rebuild is a full rescan
+ * rather than a permanently blind index, and the check runs BEFORE a merge so no
+ * file can be half-indexed and then recorded as read.  `seen` needs its own
+ * bound: it grows with file churn even when few files carry a tool map.  Returns
+ * true when it cleared, so the caller can log outside the mutex. */
+static bool tool_map_index_enforce_caps(tool_map_index *ix,
+                                        const tool_map_index *incoming) {
+    if (!ix) return false;
+    const uint64_t ids = (ix->ids ? raxSize(ix->ids) : 0) +
+                         (incoming && incoming->ids ? raxSize(incoming->ids) : 0);
+    const uint64_t seen = (ix->seen ? raxSize(ix->seen) : 0) +
+                          (incoming && incoming->seen ? raxSize(incoming->seen) : 0);
+    bool cleared = false;
+    if (ids > DS4_TOOL_MAP_INDEX_MAX_IDS || seen > DS4_TOOL_MAP_INDEX_MAX_SEEN) {
+        tool_map_index_clear_entries(ix);
+        cleared = true;
+    }
+    if (!ix->ids) ix->ids = raxNew();
+    if (!ix->seen) ix->seen = raxNew();
+    return cleared;
 }
 
 struct server {
@@ -11823,69 +11913,99 @@ static void kv_cache_restore_tool_memory_for_messages(server *s, const chat_msgs
      * scoped too, since token positions and graph state are not portable across
      * Flash/Pro shapes even when the rendered chat text is identical. */
     uint8_t model_id = s->engine ? (uint8_t)ds4_engine_model_id(s->engine) : 0;
+    tool_map_index *ix = &s->tool_map;
 
-    /* Phase 1, under tool_mu: index any file not seen before, then resolve the
-     * wanted ids to the distinct file names that carry them.  No tool-memory
-     * calls in here -- the install phase below needs this same non-recursive
-     * mutex. */
+    /* Pass A - locked, and deliberately free of disk I/O.  Collect the files this
+     * process has not indexed yet and resolve any wanted id the index already
+     * knows.  Reading files here would mean holding tool_mu across up to
+     * cold_max opens on a cold index, and every other request thread needs this
+     * mutex for tool memory. */
+    stop_list new_names = {0};
     stop_list files = {0};
     pthread_mutex_lock(&s->tool_mu);
-    tool_map_index *ix = &s->tool_map;
     if (ix->dir && s->kv.dir && strcmp(ix->dir, s->kv.dir) != 0)
         tool_map_index_reset(ix);
     if (!ix->dir && s->kv.dir) ix->dir = xstrdup(s->kv.dir);
-    if (!ix->ids) ix->ids = raxNew();
     if (!ix->seen) ix->seen = raxNew();
-    DIR *d = ix->dir ? opendir(ix->dir) : NULL;
-    if (d) {
-        struct dirent *de;
-        while ((de = readdir(d)) != NULL) {
-            char sha[41];
-            if (!sha_hex_name(de->d_name, sha)) continue;
-            size_t nlen = strlen(de->d_name);
-            if (ix->seen &&
-                raxFind(ix->seen, (unsigned char *)de->d_name, nlen) != raxNotFound)
-                continue;
-            char *path = ix->dir ? path_join(ix->dir, de->d_name) : NULL;
-#ifdef DS4_SERVER_TEST
-            kv_restore_file_opens++;
-#endif
-            FILE *fp = path ? fopen(path, "rb") : NULL;
-            free(path);
-            if (fp) {
-                kv_entry hdr = {0};
-                uint32_t text_bytes = 0;
-                bool ok = kv_read_header(fp, &hdr, &text_bytes);
-                uint64_t skip = (uint64_t)text_bytes + hdr.payload_bytes;
-                if (ok && hdr.model_id == model_id &&
-                    (hdr.ext_flags & KV_EXT_TOOL_MAP) &&
-                    skip <= (uint64_t)INT64_MAX &&
-                    fseeko(fp, (off_t)skip, SEEK_CUR) == 0)
-                {
-                    kv_trailer_walk_tool_map(NULL, fp, NULL, ix, de->d_name, nlen);
-                }
-                fclose(fp);
+    if (ix->dir) {
+        DIR *d = opendir(ix->dir);
+        if (d) {
+            struct dirent *de;
+            while ((de = readdir(d)) != NULL) {
+                char sha[41];
+                if (!sha_hex_name(de->d_name, sha)) continue;
+                if (ix->seen &&
+                    raxFind(ix->seen, (unsigned char *)de->d_name,
+                            strlen(de->d_name)) != raxNotFound)
+                    continue;
+                id_list_push_unique(&new_names, de->d_name);
             }
-            /* Mark it seen even when unreadable: retrying a bad file on every
-             * request is how the old scan wasted its time. */
-            if (ix->seen)
-                raxInsert(ix->seen, (unsigned char *)de->d_name, nlen,
-                          (void *)1, NULL);
-        }
-        closedir(d);
-    }
-    if (ix->ids) {
-        for (int i = 0; i < wanted.len; i++) {
-            const char *id = wanted.v[i];
-            if (!id || !id[0]) continue;
-            void *v = raxFind(ix->ids, (unsigned char *)id, strlen(id));
-            if (v == raxNotFound) continue;
-            id_list_push_unique(&files, (const char *)v);
+            closedir(d);
         }
     }
+    tool_map_index_resolve(ix, &wanted, &files);
     pthread_mutex_unlock(&s->tool_mu);
 
-    /* Phase 2, unlocked: open only the files that can satisfy a wanted id. */
+    /* Pass B - unlocked: read the new files into a PRIVATE index.  A file is only
+     * recorded once it opened, its header parsed, and (when it carries a tool
+     * map) the walk completed.  Marking a file that merely failed to open would
+     * poison it for the process lifetime - a checkpoint being written
+     * concurrently, or one transient I/O error, would never be retried - and the
+     * pre-index rescan healed from exactly that. */
+    tool_map_index local = {0};
+    stop_list indexed = {0};
+    for (int i = 0; i < new_names.len; i++) {
+        const char *name = new_names.v[i];
+        if (!name || !name[0]) continue;
+        char *path = path_join(s->kv.dir, name);
+#ifdef DS4_SERVER_TEST
+        kv_restore_file_opens++;
+#endif
+        FILE *fp = path ? fopen(path, "rb") : NULL;
+        free(path);
+        if (!fp) continue;
+        kv_entry hdr = {0};
+        uint32_t text_bytes = 0;
+        bool usable = kv_read_header(fp, &hdr, &text_bytes);
+        uint64_t skip = (uint64_t)text_bytes + hdr.payload_bytes;
+        if (usable && hdr.model_id == model_id && (hdr.ext_flags & KV_EXT_TOOL_MAP) &&
+            skip <= (uint64_t)INT64_MAX && fseeko(fp, (off_t)skip, SEEK_CUR) == 0)
+        {
+            /* A truncated or corrupt trailer is not indexed and not marked read,
+             * so a later request retries it once the writer has finished. */
+            if (kv_trailer_walk_tool_map(NULL, fp, NULL, &local, name, strlen(name)) < 0)
+                usable = false;
+        }
+        fclose(fp);
+        if (usable) id_list_push_unique(&indexed, name);
+    }
+
+    /* Pass C - locked: bound, merge, record what was read, then resolve again.
+     * On a cold index the ids this request wants live in the files pass B has
+     * just read, so pass A could not have found them. */
+    pthread_mutex_lock(&s->tool_mu);
+    if (ix->dir && s->kv.dir && strcmp(ix->dir, s->kv.dir) != 0)
+        tool_map_index_reset(ix);
+    bool capped = tool_map_index_enforce_caps(ix, &local);
+    tool_map_index_merge(ix, &local);
+    for (int i = 0; i < indexed.len; i++) {
+        const char *name = indexed.v[i];
+        if (!name || !name[0] || !ix->seen) continue;
+        raxInsert(ix->seen, (unsigned char *)name, strlen(name), (void *)1, NULL);
+    }
+    tool_map_index_resolve(ix, &wanted, &files);
+    pthread_mutex_unlock(&s->tool_mu);
+    if (capped)
+        server_log(DS4_LOG_WARNING,
+                   "ds4-server: tool-map index hit its bound and was rebuilt from scratch");
+
+    id_list_free(&new_names);
+    id_list_free(&indexed);
+    tool_map_index_clear_entries(&local);
+
+    /* Pass D - unlocked: open only the files that can satisfy a wanted id.  The
+     * install must not hold tool_mu either: tool_memory_put_source takes it, and
+     * the mutex is not recursive. */
     for (int i = 0; i < files.len; i++) {
         const char *fname = files.v[i];
         if (!fname || !fname[0]) continue;
@@ -24469,21 +24589,28 @@ static bool test_write_tool_map_kv_file(const char *dir, const char *sha40,
 
 /* One assistant message carrying a single call id: run the bootstrap and report
  * whether the raw span came back. */
-static bool test_restore_one_id(server *dst, const char *id) {
+static void test_restore_ids(server *dst, const char *const *ids, int n, bool *got) {
     chat_msgs msgs = {0};
-    chat_msg m = {0};
-    m.role = xstrdup("assistant");
-    tool_call tc = {0};
-    tc.id = xstrdup(id);
-    tc.name = xstrdup("get_weather");
-    tc.arguments = xstrdup("{\"city\":\"canonical\"}");
-    tool_calls_push(&m.calls, tc);
-    chat_msgs_push(&msgs, m);
+    for (int i = 0; i < n; i++) {
+        chat_msg m = {0};
+        m.role = xstrdup("assistant");
+        tool_call tc = {0};
+        tc.id = xstrdup(ids[i]);
+        tc.name = xstrdup("get_weather");
+        tc.arguments = xstrdup("{\"city\":\"canonical\"}");
+        tool_calls_push(&m.calls, tc);
+        chat_msgs_push(&msgs, m);
+    }
     kv_cache_restore_tool_memory_for_messages(dst, &msgs);
     tool_replay_stats st = {0};
     tool_memory_attach_to_messages(dst, &msgs, &st);
-    bool got = msgs.v[0].calls.raw_tool_text != NULL;
+    for (int i = 0; i < n; i++) got[i] = msgs.v[i].calls.raw_tool_text != NULL;
     chat_msgs_free(&msgs);
+}
+
+static bool test_restore_one_id(server *dst, const char *id) {
+    bool got = false;
+    test_restore_ids(dst, &id, 1, &got);
     return got;
 }
 
@@ -24506,6 +24633,7 @@ static void test_kv_tool_map_bootstrap_indexes_files_not_rescans(void) {
         "5555555555555555555555555555555555555553",
         "5555555555555555555555555555555555555554",
     };
+    static const char *shas_shared = "5555555555555555555555555555555555555555";
     const char *ids[4] = {"call_idx_a", "call_idx_b", "call_idx_c", "call_idx_d"};
 
     server src = {0};
@@ -24553,6 +24681,39 @@ static void test_kv_tool_map_bootstrap_indexes_files_not_rescans(void) {
     uint64_t after_new = kv_restore_file_opens_for_test() - base;
     TEST_ASSERT(after_new >= 1 && after_new <= 2);
 
+    /* Dedup, which the whole resolve-to-distinct-file-names design rests on: two
+     * wanted ids living in ONE file must cost a single open, and both must come
+     * back. Every case above wanted one id from one file, so a regression that
+     * opened a file per wanted id would still have passed all of them. */
+    {
+        const char *two_ids[2] = {"call_idx_e", "call_idx_f"};
+        char *shared = test_make_qwen_span(9);
+        tool_memory_put(&src, two_ids[0], shared);
+        tool_memory_put(&src, two_ids[1], shared);
+        buf tb = {0};
+        buf_puts(&tb, "visible transcript prefix shared\n");
+        buf_puts(&tb, shared);
+        char *ttext = buf_take(&tb);
+        TEST_ASSERT(test_write_tool_map_kv_file(dir, shas_shared, ttext, &src));
+        uint64_t b4 = kv_restore_file_opens_for_test();
+        bool got2[2] = {false, false};
+        test_restore_ids(&dst, two_ids, 2, got2);
+        TEST_ASSERT(got2[0] && got2[1]);
+        /* one open to index the new file, one to install from it */
+        TEST_ASSERT(kv_restore_file_opens_for_test() - b4 == 2);
+
+        /* Two ids in two DIFFERENT already-indexed files: exactly two opens, and
+         * no re-indexing of files this process has already read. */
+        const char *cross[2] = {ids[0], two_ids[0]};
+        uint64_t b5 = kv_restore_file_opens_for_test();
+        bool got3[2] = {false, false};
+        test_restore_ids(&dst, cross, 2, got3);
+        TEST_ASSERT(got3[0] && got3[1]);
+        TEST_ASSERT(kv_restore_file_opens_for_test() - b5 == 2);
+        free(shared);
+        free(ttext);
+    }
+
     /* Deleting a file behind the index must degrade, not wedge: the walk
      * survives, the lost id simply is not restored, and other ids still work. */
     char victim[512];
@@ -24566,6 +24727,11 @@ static void test_kv_tool_map_bootstrap_indexes_files_not_rescans(void) {
         free(texts[i]);
         char p[512];
         snprintf(p, sizeof(p), "%s/%.40s.kv", dir, shas[i]);
+        unlink(p);
+    }
+    {
+        char p[512];
+        snprintf(p, sizeof(p), "%s/%.40s.kv", dir, shas_shared);
         unlink(p);
     }
     kv_cache_close(&dst.kv);

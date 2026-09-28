@@ -668,6 +668,22 @@ static void test_kv_delta_parity(void) {
     if (fo2) { TEST_ASSERT(ds4_kvstore_read_header(fo2, &eO2, &tob2)); fclose(fo2); }
     TEST_ASSERT(eO2.hdr_version == 3 && eO2.tokens == (uint32_t)odd2 &&
                 eO2.delta_from == (uint32_t)full && eO2.parent_sha[0] != '\0');
+    /* Negative control for the kill switch, paired with the positive one above.
+     * The dirA twin was stored with DS4_KV_DELTA_FULL_REASONS=0 and MUST be a
+     * full node: without this assertion a broken or ignored switch would turn the
+     * stitch-vs-full comparison below into stitch-vs-stitch, which would still
+     * pass and silently stop testing anything. */
+    {
+        char pathA2[512];
+        snprintf(pathA2, sizeof(pathA2), "%s/%.40s.kv", dirA, shaO2);
+        ds4_kvstore_entry eA2 = {0};
+        uint32_t ta2 = 0;
+        FILE *fa2 = fopen(pathA2, "rb");
+        TEST_ASSERT(fa2 != NULL);
+        if (fa2) { TEST_ASSERT(ds4_kvstore_read_header(fa2, &eA2, &ta2)); fclose(fa2); }
+        TEST_ASSERT(eA2.tokens == (uint32_t)odd2);
+        TEST_ASSERT(eA2.hdr_version != 3 && eA2.delta_from == 0);
+    }
     {
         ds4_session *s_E = NULL, *s_G = NULL;
         TEST_ASSERT(ds4_session_create(&s_E, engine, 8192) == 0);
