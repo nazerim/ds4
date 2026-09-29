@@ -7,7 +7,13 @@ import struct
 
 D = "/Volumes/FireCuda520/ds4-kv-qwen"
 FIXED, V2, V3 = 48, 24, 44
-REASON = {1: "cold", 2: "continued", 3: "turn", 4: "evict", 5: "shutdown"}
+# Authoritative map: see tests/kv_reason.py (mirrors ds4_kvstore.h). The hand-written
+# map this file used to carry was shifted from value 3 upward and invented a "turn"
+# reason, so every reason-based population below was mislabelled.
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from kv_reason import REASON
 G = 1024 ** 3
 
 rows = []
@@ -52,7 +58,8 @@ for rsn in sorted({r["reason"] for r in v3}):
            len(full), sum(r["size"] for r in full) / G))
 
 # P3.2 target: v3 full stores whose reason could chain (cold/evict/shutdown).
-t32 = [r for r in v3 if r["dfrom"] == 0 and r["reason"] in ("cold", "evict", "shutdown", "turn")]
+t32 = [r for r in v3 if r["dfrom"] == 0 and r["reason"] in
+       ("cold", "evict", "shutdown", "agent-system", "agent-session")]
 # price them as chains: same tokens span from a plausible anchor = marginal rows
 marg = [r for r in v3 if r["dfrom"] > 0 and (r["tokens"] - r["dfrom"]) > 0]
 per_tok = sum(r["size"] for r in marg) / sum(r["tokens"] - r["dfrom"] for r in marg)

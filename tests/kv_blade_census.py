@@ -11,7 +11,14 @@ import struct
 
 D = "/Volumes/FireCuda520/ds4-kv-qwen"
 FIXED, V2, V3 = 48, 24, 44
-REASON = {0: "unknown", 1: "cold", 2: "continued", 3: "turn", 4: "evict", 5: "shutdown"}
+# Reason codes come from the shared authoritative map (tests/kv_reason.py, mirroring
+# ds4_kvstore.h). Do not hand-write a map here: the previous one was shifted from 3
+# up, inventing a "turn" reason that never existed and renaming evict/shutdown/agent
+# stores under it - which also corrupted this file's reason-based filters.
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from kv_reason import REASON
 
 rows = []
 for p in glob.glob(os.path.join(D, "*.kv")):
@@ -21,7 +28,7 @@ for p in glob.glob(os.path.join(D, "*.kv")):
         if len(h) < FIXED or h[0:3] != b"KVC":
             continue
         ver = h[3]
-        reason = REASON.get(h[5], str(h[5]))
+        reason = REASON.get(h[5], "code%d" % h[5])
         tokens = struct.unpack_from("<I", h, 8)[0]
         payload = struct.unpack_from("<Q", h, 40)[0]
         parent, delta_from = "", 0
@@ -40,7 +47,7 @@ G = 1024 ** 3
 print("files=%d  total=%.1f GiB" % (len(rows), total / G))
 
 print("\nby reason (full = delta_from 0):")
-for rsn in ("continued", "turn", "cold", "evict", "shutdown", "unknown"):
+for rsn in ("continued", "cold", "evict", "shutdown", "agent-system", "agent-session", "unknown"):
     sel = [r for r in rows if r["reason"] == rsn]
     if not sel:
         continue

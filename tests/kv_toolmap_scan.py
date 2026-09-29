@@ -12,7 +12,11 @@ import sys
 
 D = sys.argv[1] if len(sys.argv) > 1 else "/Volumes/FireCuda520/ds4-kv-qwen"
 FIXED, V2, V3 = 48, 24, 44
-REASON = {0: "?", 1: "cold", 2: "cont", 3: "turn", 4: "evict", 5: "shut"}
+# Authoritative map: see tests/kv_reason.py (mirrors ds4_kvstore.h).
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from kv_reason import REASON
 
 
 def read_entry(path, want_ids=3):
