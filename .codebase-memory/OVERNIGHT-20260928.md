@@ -307,10 +307,15 @@ measurements:
    EXISTING checkpoint rather than writing a new one, so it carries crash-safety
    and verifier risk that nothing else here does.
 TRIGGER to revisit, any of: (a) exceeds-budget events appear in the log;
-(b) deferrals grow per day instead of staying in single digits; (c) stitch depth
-exceeds roughly 20 hops or resume exceeds roughly 10 s; (d) the budget cannot hold
-two concurrent deep conversations. The metrics are already observable: the
-"kv cache delete deferred" log line and the two census scripts.
+(b) deferrals grow per day instead of staying in single digits; (c) **resume
+latency** exceeds roughly 10 s on a deep load; (d) the budget cannot hold two
+concurrent deep conversations. Note on (c): this trigger was originally written as
+"stitch depth exceeding roughly 20 hops OR resume exceeding roughly 10 s", and hop
+count has since reached 28 while the deepest measured resume is 416088 tokens in
+2881 ms. Hop count is a bad proxy - load time tracks payload bytes and
+verification, not hops linearly, and a shallower 320971-token load measured
+3391-3902 ms, slower than the deeper one. The hop clause is therefore removed and
+latency is the binding metric, with 3.4x of margin as of 2026-09-29.
 
 ### Phase P6 — oMLX perf: CLOSED AS A PORTING QUESTION, reopened as measurement
 
@@ -772,6 +777,69 @@ stores, where `full/chained=1.0x` is meaningless - the ratio only informs at dep
 tool_replay on the live session at that point: `mem=13 disk=47 canonical=18
 missing_ids=18`. disk=47 confirms restoration is working; the earlier disk=187 was
 a different, longer session and not a regression.
+
+## 3f. Scheduled health check (lane, ~07:55) — deep claim CLOSED, two lane errors corrected
+
+**The last open production-scale claim is now confirmed.** A `reason=evict` store at
+**461406 tokens** chained: `delta=425984..461406 size=2336.16 MiB save=2060.3 ms`,
+key=thinking-visible. Pre-change that frontier would have been a whole-session
+payload of roughly 15 GiB (extrapolating from 427271 at 13.69 GiB). Second deepest:
+`tokens=415611 reason=evict delta=163840..415611 size=8721.28 MiB` — chained, but
+note the span was 251771 tokens because its nearest verified ancestor was far
+behind, so the saving depends on having a recent ancestor, not merely on chaining.
+
+**Composition: all 216 parsed objects on the blade are chained, zero full.** By
+reason: continued 186 / 99.4 GiB, turn 17 / 31.1 GiB, code0 2 / 9.6 GiB, cold 7 /
+1.2 GiB, evict 4 / 0.8 GiB; average chained store 0.66 GiB. `DS4_KV_DELTA_FULL_REASONS=0`
+would now be a no-op for existing content — adoption is complete.
+
+Two claims in that report were wrong and are corrected here rather than propagated:
+1. "disk = 0 throughout, the bootstrap has never been exercised in production."
+   **False.** The lane sampled a three-line window. The current trace tail reads
+   `tool_replay: mem=243 disk=47 canonical=18 missing_ids=18`, and an earlier point
+   in the same run read disk=187. Disk restoration is working in production.
+2. "reused=0, so the on-disk 504 GiB is write-only so far." **False, and a category
+   error.** `reused` counts the same-sha store DEDUP path, not cache reads. The log
+   is full of disk hits, including `kv cache hit text tokens=416088 load=2881.1 ms`.
+
+**P2.1 trigger correction — mine, and it matters.** I deferred middle-retire with
+trigger metrics including "stitch depth exceeding roughly 20 hops". Depth is now
+**28 hops**, so that trigger is crossed. But the metric that actually binds is
+resume latency, and the deepest measured load is 416088 tokens in 2881.1 ms against
+a 10 s threshold — 3.4x of margin. Hop count was a bad proxy: load time tracks
+payload bytes and verification, not hop count linearly (320971 tokens variously
+took 3391-3902 ms, more than the deeper 416088 at 2881 ms). P2.1 stays deferred,
+and the trigger is redefined in terms of resume latency alone.
+
+**Detector data, first real sample.** `structural syntax inside message content`
+fired **56 times** in one session, first at 07:01:44 with `first_role=assistant`,
+immediately after tool-call turns — i.e. replayed assistant content carrying raw
+envelope markup. In the same window: **zero** `finish=error`, **zero** `degrading to
+assistant text`, zero chain-broken, zero budget events, and every affected turn
+completed. So content-borne structural syntax is COMMON in this workload and has
+produced no turn failures in this sample. That is the frequency data Option B was
+waiting for, and it currently argues against Option B: high frequency, zero
+observed harm. (The lane called this signal "not covered by the four overnight
+changes"; it is the detector added in d097801, working as designed.)
+
+**Telemetry caveat, observed for real.** The 50-store emission read `chained=46
+(35.02 GiB, avg 0.761 GiB) full=4 (2.85 GiB, avg 0.712 GiB) full/chained=0.9x` — a
+ratio BELOW 1, because the four full stores were shallow fresh-conversation roots
+while the chained ones were deep 16384-token rungs. That is exactly the misreading
+the docs warn about; the ratio only informs when both populations sit at similar
+depth. Cadence is now 25.
+
+**Open, unexplained, not recurring.** ~4m17s of cumulative CPU was consumed in a
+~3 minute window with zero log and trace growth and no client requests. State was
+sleeping before and after, it did not repeat in the following sample, and the engine
+is healthy. No hypothesis is offered; if it recurs, sample the process during it.
+
+**Occupancy.** 504 GiB of the 512 GiB budget (98.4%) across 305 .kv files, while the
+volume itself has 1.1 TiB free — the KV cap, not the disk, is the binding
+constraint, which is the operator's stated preference. Zero exceeds-budget events,
+so eviction is holding. Note 305 files on disk against 216 parseable by the census:
+the difference is consistent with files mid-write during an active session, and the
+census fails closed on a short header.
 
 ## 4. Standing constraints (do not violate)
 
