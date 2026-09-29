@@ -841,6 +841,97 @@ so eviction is holding. Note 305 files on disk against 216 parseable by the cens
 the difference is consistent with files mid-write during an active session, and the
 census fails closed on a short header.
 
+## 3g. The 48k miss (2026-09-29 ~13:06): multimodal sessions have NO incremental KV durability
+
+**Symptom.** After an engine restart, a request with a 137631-token prompt restored
+only 49152 tokens and re-prefilled 88479 tokens: `prompt done 74.266s` at ~1200 t/s
+(the idle rate, so contention was not a factor).
+
+**The restore itself was correct.** Verified four ways: the restored object
+(d77ce384, tokens=49152, born 06:35:43) had **zero** children on disk before the
+restart; its ancestry walks up 5 hops to the 8192 rung of 09-28 with **0 missing**;
+all 38 stores the old process logged in the 49k-140k band are **still present**
+(0 deleted, so nothing was evicted out from under the chain); and all 328 objects
+on the blade parse cleanly (0 truncated - the unclean blade disconnect corrupted
+nothing). 49152 was simply the deepest object that legitimately existed.
+
+**Why nothing deeper existed - root cause, confirmed in code.**
+`ds4_server.c:14970` sets `const bool multimodal = j->req.image_count != 0;` and the
+end-of-request store is gated on it at both `ds4_server.c:15485` and `:15634`:
+
+    if (!multimodal) kv_cache_maybe_store_continued(s, slot);
+
+The two remaining call sites (`:14261`, `:14302`) sit in the prefill-progress
+callback and only fire while a prefill sweep is actually running
+(`current > p->cached_tokens`). So a session whose requests carry images lays down
+continued rungs **only during large prefills**, and never at end of request.
+
+That matches the log exactly. The session's last disk store was 06:35:43
+(`tokens=49152 reason=continued delta=40960..49152`), produced by the one large
+prefill of that period (`ctx=40960..63681:22721` - exactly one rung was due, since
+the next boundary 65536 lies beyond 63681). It then grew to **live=137611** by
+10:32 through decode plus ~44-token tool-turn prefills, and stored **nothing**.
+Its miss line even shows `vision=match`, confirming vision state was present.
+Control case in the same window: a non-image conversation cold-started at 08:34 and
+laddered rungs correctly all morning - 98304, 114688, 131072, 163840, 180224,
+196608, 245760, 327680 - so rung laddering works in general. The gap is specific to
+multimodal requests.
+
+**Why the safety net did not catch it.** A resident slot is never evicted, so the
+evict path never fires; and the only remaining net is the shutdown persist
+(`main()`, `ds4_server.c:17963-17972`, a loop calling
+`kv_cache_store_current(&s, slot, "shutdown", NULL, 0)` per resident slot). That
+failed with ENOENT because the blade was disconnected before the engine was
+stopped:
+
+    10:34:51 persisting resident KV cache before shutdown slot=0 tokens=137611
+    10:34:52 kv cache failed to create .../b20b6d53....kv.tmp.30122: No such file or directory
+    10:34:52 persisting resident KV cache before shutdown slot=1 tokens=338393
+    10:34:55 kv cache failed to create .../415fe2a0....kv.tmp.30122: No such file or directory
+
+Two slots, 137611 and 338393 tokens, both lost. Net effect: **an image-bearing
+session that stays resident has zero incremental durability**, and a SIGKILL, a
+sleep/crash, or an unmounted blade at shutdown costs the entire growth since the
+last large prefill.
+
+**The `!multimodal` gate is probably correct as written** - a token-text payload
+does not carry vision/encoder state, so storing a live prefix mid-request for an
+image-bearing session risks restoring KV rows without the encoder state. The fix is
+not to remove the gate.
+
+**Proposed workstream (design, not yet built): periodic resident durability.**
+Reuse the exact call the shutdown path already uses - `kv_cache_store_current()` is
+already invoked for multimodal slots at shutdown and at evict (the proven
+`key=thinking-visible` chained stores at 367814 and 461406 came through it), so it
+is vision-safe by construction. Add a cadence sweep over resident slots, e.g. every
+~32k decoded tokens or ~10 minutes, only when the slot has grown at least one
+continued_step since its last store. Chaining keeps the cost bounded: a store from
+49152 to 137611 would be an ~88k-token delta (~3.3 GiB, ~3 s), not a 5 GiB whole
+session. Open questions: which reason code (a new `resident` value versus reusing
+`shutdown`), whether to skip while a request is in flight, and interaction with the
+98.4%-full blade (more objects means more eviction pressure - see 3f).
+
+**Operational rule that follows immediately:** stop the engine, *then* unmount. The
+shutdown persist is the only durability a resident multimodal session has, and
+losing it costs a full re-prefill on the next turn.
+
+**Tooling correction.** `mtime` on these objects is **touched on read** by the hit
+path (restored object: birth 06:35:43, mtime 13:06:33). Any age, eviction or
+census analysis must use `st_birthtime`, not mtime. This also explains the earlier
+census disagreement (216 parseable versus 305 files): it was an artifact of the
+read-side touch and of files mid-write, not corruption - all 328 headers parse.
+Probe scripts, promoted into `tests/` because `/tmp` is ephemeral and these are the
+tools that re-verify every claim above. All three are read-only (header reads and
+log parsing; no model, no writes, safe while the engine is live):
+`tests/kv_chain_ancestry.py` (walk a chain up and down from any object, list every
+object at a given depth with its children - needs the blade mounted),
+`tests/kv_store_existence.py` (for every store a log claims, is the object still on
+disk - separates "never stored" from "stored then deleted"),
+`tests/kv_store_attribution.py` (attribute each store to its conversation via the
+nearest preceding `chat ctx=` line, and summarize each conversation's ladder).
+Note the attribution heuristic can misattribute under interleaved resident
+sessions, so cross-check against the delta ranges.
+
 ## 4. Standing constraints (do not violate)
 
 - Never run two engines; model-backed ds4_test runs only while ds4-server is
