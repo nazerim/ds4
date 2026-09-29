@@ -1729,13 +1729,49 @@ static int kv_cache_step_for(const ds4_kvstore *kc, int live_tokens) {
     return step;
 }
 
+/* Kill switch for the snap-down behaviour below (default: enabled).  Kept as an
+ * escape hatch because it changes store cadence, not correctness. */
+static bool kv_continued_snap_disabled(void) {
+    const char *e = getenv("DS4_KV_CONTINUED_SNAP");
+    return e && !strcmp(e, "0");
+}
+
 int ds4_kvstore_continued_store_target(const ds4_kvstore *kc, int live_tokens) {
     const int step = kv_cache_step_for(kc, live_tokens);
     if (step <= 0) return 0;
     if (live_tokens < kc->opt.min_tokens) return 0;
-    if (live_tokens % step != 0) return 0;
-    if (live_tokens <= kc->continued_last_store_tokens) return 0;
-    return live_tokens;
+    if (kv_continued_snap_disabled()) {
+        if (live_tokens % step != 0) return 0;
+        if (live_tokens <= kc->continued_last_store_tokens) return 0;
+        return live_tokens;
+    }
+    /* Snap DOWN to the deepest grid boundary at or below the live length, and
+     * require that it is strictly ahead of the last store.
+     *
+     * This used to be an exact-equality test (live_tokens % step != 0 -> 0), and
+     * that silently disabled the ladder for any session whose frontier was
+     * off-grid.  Frontier stores are off-grid by construction: a shutdown, evict
+     * or turn store writes the exact live length (251255, 263034, ...), which is
+     * almost never a multiple of the grid step.  A session that resumes from such
+     * a frontier then has every subsequent live length off-grid too, so the
+     * equality test never fired again - no rung, ever, for the rest of that
+     * conversation's life.  Measured on the live blade on 2026-09-30: one session
+     * resumed at 251255 and grew to 289520 (38265 tokens) while writing four
+     * frontier stores that all chained from the last grid rung at 131072, because
+     * nothing else existed to chain from - 19.5 GiB written instead of the ~5.8
+     * GiB an intact ladder would have cost, on a cache sitting at 509.7 of 512
+     * GiB.  So this was simultaneously the missing durability and the write
+     * amplification driving eviction pressure.
+     *
+     * Snapping keeps the original design intent - every rung lands on the grid, so
+     * a rung can itself be a parent (pick_parent requires tokens % 4 == 0, and the
+     * grid is a multiple of it) - while making an off-grid frontier recoverable.
+     * The rows between the snapped target and the live length are simply not in
+     * this store; that is what a rung already means, and a resume re-prefills
+     * them like any other gap. */
+    int target = live_tokens - (live_tokens % step);
+    if (target <= kc->continued_last_store_tokens) return 0;
+    return target;
 }
 
 void ds4_kvstore_note_store(ds4_kvstore *kc, int tokens) {

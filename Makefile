@@ -530,6 +530,14 @@ ds4_gpu_args.o: ds4_gpu_args.c ds4_gpu_args.h ds4_gpu_mgpu.h
 ds4_server.o: ds4_server.c ds4.h ds4_ssd.h ds4_distributed.h ds4_help.h ds4_kvstore.h rax.h
 	$(CC) $(CFLAGS) -c -o $@ ds4_server.c
 
+# The server carries an embedded logic-only unit suite behind DS4_SERVER_TEST, and
+# `clean` has long removed a ds4_server_test binary that no rule ever produced.  The
+# suite covers the KV store-target policy, chat anchor placement and stream clamping
+# - pure logic, no model, no Metal context - so it is the only KV regression cover
+# that can run while an engine is live.  Wire it up.
+ds4_server_test.o: ds4_server.c ds4.h ds4_ssd.h ds4_distributed.h ds4_help.h ds4_kvstore.h rax.h
+	$(CC) $(CFLAGS) -DDS4_SERVER_TEST -c -o $@ ds4_server.c
+
 ds4_bench.o: ds4_bench.c ds4.h ds4_ssd.h ds4_distributed.h ds4_help.h
 	$(CC) $(CFLAGS) -c -o $@ ds4_bench.c
 
@@ -981,6 +989,20 @@ ifeq ($(UNAME_S),Darwin)
 else
 	$(DS4_LINK) -o $@ ds4_test.o ds4_help.o ds4_kvstore.o rax.o $(TEST_CORE_OBJS) $(DS4_LINK_LIBS)
 endif
+
+# Model-free server logic suite (see ds4_server_test.o above).
+DS4_SERVER_TEST_BIN = ds4_server_test
+$(DS4_SERVER_TEST_BIN): ds4_server_test.o ds4_help.o ds4_kvstore.o rax.o $(TEST_CORE_OBJS)
+ifeq ($(UNAME_S),Darwin)
+	$(CC) $(CFLAGS) -o $@ ds4_server_test.o ds4_help.o ds4_kvstore.o rax.o $(TEST_CORE_OBJS) $(METAL_LDLIBS)
+else
+	$(DS4_LINK) -o $@ ds4_server_test.o ds4_help.o ds4_kvstore.o rax.o $(TEST_CORE_OBJS) $(DS4_LINK_LIBS)
+endif
+
+# Runs the KV/store-target logic suite without a model, so it is safe alongside a
+# live engine - unlike `make test`, which loads a second model map.
+test-server-logic: $(DS4_SERVER_TEST_BIN)
+	./$(DS4_SERVER_TEST_BIN)
 
 ds4_agent_test: ds4_agent_test.o ds4_help.o ds4_prompt_prefix.o ds4_web.o ds4_kvstore.o linenoise.o $(CORE_OBJS)
 ifeq ($(UNAME_S),Darwin)

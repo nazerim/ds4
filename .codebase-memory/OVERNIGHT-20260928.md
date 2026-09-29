@@ -932,6 +932,89 @@ nearest preceding `chat ctx=` line, and summarize each conversation's ladder).
 Note the attribution heuristic can misattribute under interleaved resident
 sessions, so cross-check against the delta ranges.
 
+**CORRECTION (later the same day): the primary cause is NOT the multimodal gate.**
+The gate is real but secondary. `ds4_kvstore_continued_store_target` required
+`live_tokens % step == 0` - an exact-equality test - so any session whose frontier
+was off-grid could never write another rung. Frontier stores are off-grid by
+construction (a shutdown/evict/turn store writes the exact live length; 251255 %
+16384 = 5495), so **resuming from one killed the ladder permanently**. See 3h, which
+also shows this - not the gate - was the reason nothing above 49152/131072 was ever
+written. The `!multimodal` gate remains a real additional gap for image-bearing
+sessions, but fixing it alone would not have given this session a ladder.
+
+## 3h. The dead-ladder bug: exact-equality grid test, and the write amplification it caused
+
+Discovered while reading the overnight log, and it is the more expensive of the two.
+
+**Mechanism.** `ds4_kvstore_continued_store_target()` returned 0 unless
+`live_tokens % step == 0`. A rung is only ever written when the live length lands
+*exactly* on the grid. Cold/anchor stores already snapped down (`ds4_kvstore_store_len`
+trims then aligns), but the continued path did not. Since every frontier store writes
+the exact live length, a session that resumed from one - or that simply grew past a
+boundary inside a small prefill - had an off-grid frontier forever and wrote **zero**
+rungs for the rest of its life.
+
+**Evidence on the live blade.** The overnight conversation resumed at 251255 and grew
+to 289520 (38265 tokens). Its four frontier stores all claim the *same* parent, the
+grid rung at 131072, with delta-from 131072:
+
+    251255 shutdown  delta=131072..251255  4.25 GiB   (09-29 16:13)
+    263034 evict     delta=131072..263034  4.63 GiB   (09-30 01:30)
+    279831 evict     delta=131072..279831  5.16 GiB   (09-30 02:56)
+    289258 evict     delta=131072..289258  5.46 GiB   (09-30 04:17)
+
+They are siblings, not a chain, and the lineage has **no object between 131072 and
+251255**. So each store re-serialised 120k-158k rows: **19.5 GiB written to advance
+one session 38k tokens**, where an intact ladder costs about 5.8 GiB. That is the
+same session that then re-prefilled 79589 tokens (11834 + 29490 + 38265, about 97 s)
+because nothing deeper than 251255 could be a restore point. It is also a direct
+contributor to the near-full blade (509.7 of 512 GiB, 19 retirement events freeing
+64.6 GiB overnight, every retired object showing `hits=0`).
+
+**Fix (`ds4_kvstore.c`).** Snap *down* to the deepest grid boundary at or below the
+live length, and require it to be strictly ahead of the last store. This keeps the
+original design intent - every rung lands on the grid, which is what makes a rung
+chainable, since `pick_parent` requires `tokens % 4 == 0` - while making an off-grid
+frontier recoverable. The rows between the snapped target and the live length are
+simply not in that store, which is what a rung already means. Kill switch
+`DS4_KV_CONTINUED_SNAP=0` restores legacy behaviour (it changes cadence, not
+correctness). Note `pick_parent`'s `% 4` rule has no comment and came in with the v3
+delta format (19b88a7); nothing in the staging path requires it, so the fix complies
+with it rather than arguing with it.
+
+**Test.** Extended the model-free embedded suite: the off-grid cases above, a grid
+invariant loop over live 8192..200000 asserting every non-zero target is a multiple of
+the step in force *at that depth* and never above live, and a kill-switch case. One
+pre-existing assertion changed: `target(12288) == 0` became `== 8192`. That assertion
+encoded "only store on the grid" as "never store off-grid live"; under snapping the
+property it protects - the target is on the grid - still holds, and 12288 correctly
+yields 8192. `make test-server-logic` passes.
+
+**Build finding.** `make clean` has long deleted a `ds4_server_test` binary that no
+rule ever produced: the embedded suite (KV store-target policy, chat anchor placement,
+stream clamping - all pure logic, no model, no Metal context) was unbuildable, so the
+only KV regression cover that could run alongside a live engine did not exist. Added
+`ds4_server_test.o`, the link target, and `make test-server-logic`. Separately, the
+compiler reports `test_kv_cache_head_divergence_anchor_depth` as an unused function -
+a test that exists but is not registered in the runner.
+
+**Reason-code bug in the analysis tools (mine, not the engine's).** Four tools
+carried hand-written reason maps, all shifted from value 3 upward:
+`{3: turn, 4: evict, 5: shutdown}` against the real enum
+`{3: EVICT, 4: SHUTDOWN, 5: agent-system, 6: agent-session}`. There is no "turn"
+reason and never was. Consequences: (1) I briefly reported a log-vs-header reason
+inconsistency in the engine that did not exist - byte 3 is EVICT and both sides agree;
+(2) `kv_blade_census.py` filtered on `reason != "shutdown"` for the P2.1 reclaimable
+set, so it excluded code 5 (agent-system) instead of real shutdown stores; (3) the
+by-reason composition recorded in 3f was mislabelled. Fixed by
+`tests/kv_reason.py` (single authoritative map, unknown codes rendered as `codeN` so a
+future enum addition cannot hide) imported by all four tools. Corrected census for the
+live blade (387 files, 509.7 GiB): continued 249 / 171.8 GiB, evict 56 / 140.4 GiB,
+unknown 11 / 106.7 GiB (all v2), cold 53 / 41.1 GiB, shutdown 18 / 49.7 GiB; v2
+objects are 92 files / 246.7 GiB - nearly half the blade predates chaining and cannot
+chain at all. P2.1 reclaimable is 178.6 GiB in 254 files, which is a far stronger
+argument for that work than it looked when it was deferred.
+
 ## 4. Standing constraints (do not violate)
 
 - Never run two engines; model-backed ds4_test runs only while ds4-server is

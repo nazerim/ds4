@@ -23890,6 +23890,39 @@ static void test_kv_cache_continued_uses_aligned_frontiers(void) {
     kc.continued_last_store_tokens = 20480;
     TEST_ASSERT(kv_cache_continued_store_target(&kc, 29999) == 0);
     TEST_ASSERT(kv_cache_continued_store_target(&kc, 30000) == 30000);
+
+    /* ---- off-grid frontiers must still ladder (2026-09-30 regression) ----
+     * A frontier store (shutdown / evict / turn) writes the exact live length, so
+     * it is almost never on the grid.  Under the old exact-equality rule a session
+     * resuming from one stayed off-grid for the rest of its life and never wrote
+     * another rung.  Measured live: resumed at 251255, grew to 289520 (38265
+     * tokens), wrote zero rungs, and its four frontier stores all re-chained from
+     * the last grid rung at 131072 - 19.5 GiB instead of the ~5.8 GiB an intact
+     * ladder costs.  Snapping down to the deepest boundary fixes the ladder while
+     * keeping every rung on the grid, which is what makes it chainable in turn. */
+    kc.opt = kv_cache_default_options();
+    kc.continued_last_store_tokens = 131072;
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 251255) == 245760);
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 263089) == 262144);
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 279831) == 278528);
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 280745) == 278528);
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 289520) == 278528);
+    /* Growing past a boundary must not skip it just because live is off-grid. */
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 262145) == 262144);
+    /* A snapped target already stored must not be re-issued. */
+    kc.continued_last_store_tokens = 245760;
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 251255) == 0);
+    /* The grid still doubles above 49152 after a snap. */
+    kc.continued_last_store_tokens = 49152;
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 60000) == 0);
+    kc.continued_last_store_tokens = 49152;
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 65537) == 65536);
+    /* Kill switch restores the legacy exact-equality behaviour. */
+    setenv("DS4_KV_CONTINUED_SNAP", "0", 1);
+    kc.continued_last_store_tokens = 131072;
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 263089) == 0);
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 262144) == 262144);
+    unsetenv("DS4_KV_CONTINUED_SNAP");
 }
 
 static void test_kv_cache_cold_store_suppresses_duplicate_continued_boundary(void) {
@@ -25715,10 +25748,17 @@ static void test_kv_cache_continued_step_aligns_to_prefill_chunk(void) {
     kc.enabled = true;
     kc.opt = kv_cache_default_options();   /* anchor_step=8192, align=2048 */
 
-    /* Default chunk (4096) divides anchor_step (8192): grid stays 8192. */
+    /* Default chunk (4096) divides anchor_step (8192): grid stays 8192.  A live
+     * length that is off-grid snaps DOWN to the deepest grid boundary.  The
+     * property this test protects is "a rung lands on the grid" - which is what
+     * lets that rung itself be a parent - not "wait for a live length that is on
+     * the grid".  Waiting was what silently killed the ladder for every session
+     * resuming from an off-grid frontier; see the regression notes in
+     * test_kv_cache_continued_uses_aligned_frontiers. */
     kc.opt.prefill_chunk = 4096;
     TEST_ASSERT(kv_cache_continued_store_target(&kc, 8192) == 8192);
-    TEST_ASSERT(kv_cache_continued_store_target(&kc, 12288) == 0);
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 12288) == 8192);
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 16385) == 16384);
 
     /* A user-set anchor_step that is NOT a multiple of the chunk is rounded up
      * to a chunk multiple so anchors still land (the original lcm gap). */
@@ -25733,6 +25773,24 @@ static void test_kv_cache_continued_step_aligns_to_prefill_chunk(void) {
     kc.opt.prefill_chunk = 0;
     kc.continued_last_store_tokens = 0;
     TEST_ASSERT(kv_cache_continued_store_target(&kc, 8192) == 8192);
+
+    /* Grid invariant across a full session's range: a target is either 0 or a
+     * multiple of the step in force AT THAT DEPTH (the doubling grid above 49152
+     * means the step must be evaluated on the target, not on the live length),
+     * and is never above the live length.  This is the property that makes a rung
+     * usable as a chain parent, and the equality rule was only one way of reaching
+     * it - the one that broke on off-grid frontiers. */
+    kc.opt = kv_cache_default_options();
+    kc.opt.prefill_chunk = 4096;
+    kc.continued_last_store_tokens = 0;
+    for (int live = 8192; live <= 200000; live += 4096) {
+        int t = kv_cache_continued_store_target(&kc, live);
+        if (t == 0) continue;
+        int step = ds4_kvstore_continued_step_at(&kc, t);
+        TEST_ASSERT(step > 0);
+        TEST_ASSERT(t <= live);
+        TEST_ASSERT(t % step == 0);
+    }
 }
 
 static void test_kv_cache_max_conversations_retires_lru(void) {
