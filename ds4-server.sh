@@ -83,6 +83,16 @@ if [ -z "${QWEN_BATCH_SESSION:-}" ]; then
   if [ "${QWEN_CTX}" -gt 262144 ] 2>/dev/null; then QWEN_BATCH_SESSION=2; else QWEN_BATCH_SESSION=8; fi
 fi
 QWEN_MTP="${QWEN_MTP:-1}"
+# Prefill chunk used while another generation is in flight (server default: 128).
+# Raising it trades interleaving frequency for prefill throughput: a bigger slice
+# means FEWER interleaved decode steps, so instantaneous decode t/s during a
+# concurrent prefill can be lower, but the prefill finishes several times sooner and
+# decode stops being starved sooner.  Measured with 128: a resumed 137k-token session
+# re-prefilled 88479 tokens in 74.3 s (~1200 t/s when the engine is idle, ~400 t/s
+# when a generation is active).  Set QWEN_MIXED_QUANTUM=128 to restore upstream
+# behaviour.  GLM-5.3 already floors this at 1024 in the server, so 512 is well inside
+# the supported range for that family.
+QWEN_MIXED_QUANTUM="${QWEN_MIXED_QUANTUM:-512}"
 QWEN_PORT="${QWEN_PORT:-8002}"
 QWEN_PID_FILE="./ds4-server-qwen.pid"
 QWEN_KV_DIR="${QWEN_KV_DIR:-/Volumes/FireCuda520/ds4-kv-qwen}"
@@ -318,7 +328,8 @@ start_server() {
     if [ "$QWEN_MTP" != "0" ]; then
       VISION_ARGS+=(--mtp)
     fi
-    echo "Qwen3.8: vision encoder $QWEN_VISION, batched-session $QWEN_BATCH_SESSION, mtp $QWEN_MTP"
+    VISION_ARGS+=(--mixed-prefill-quantum "$QWEN_MIXED_QUANTUM")
+    echo "Qwen3.8: vision encoder $QWEN_VISION, batched-session $QWEN_BATCH_SESSION, mtp $QWEN_MTP, mixed-prefill-quantum $QWEN_MIXED_QUANTUM"
   elif [[ "${model_path:-}" == *Vision-Exp* ]]; then
     # Explicit Vision-Exp path (e.g. while ds4flash.gguf points at Qwen3.8).
     if [ ! -f "$VISION_ENCODER" ]; then

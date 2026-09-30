@@ -1433,3 +1433,25 @@ Operator-facing summary. Design detail and measurements live in
   caller falls back to the next candidate.
 - Deferred on evidence rather than skipped: the P2.1 middle-retire re-anchor.
   Trigger metrics are in `.codebase-memory/OVERNIGHT-20260928.md`.
+
+## Tuning: mixed-prefill-quantum 128 -> 512 (fork launcher only)
+
+The server default is 128 (upstream, and the unit suite asserts it). The fork
+launcher now passes 512 for Qwen3.8 via `QWEN_MIXED_QUANTUM`, overridable with
+`QWEN_MIXED_QUANTUM=128 ./ds4-server.sh start-qwen`. No code default changed, so
+there is no upstream divergence and no test edit.
+
+Why: the quantum is the prefill chunk used while another generation is in flight. A
+bigger slice interleaves decode LESS often, so instantaneous decode during a
+concurrent prefill can be lower - but the prefill finishes several times sooner, and
+decode stops being starved sooner. That trade is the right one here because the
+operator's measured steady state is ~30 t/s per slot with two concurrent decode
+streams, which is acceptable, while a stalled prefill is not: a resumed 137k-token
+session re-prefilled 88479 tokens in 74.3 s at 128 (~400 t/s with a generation active,
+against ~1200 t/s idle). Shortening that window matters more than the interleaving
+frequency inside it. GLM-5.3 already floors this value at 1024 server-side, so 512 is
+well inside the supported range.
+
+Confirm by watching decode t/s during a concurrent prefill, and whether the ladder
+rebuild (see .codebase-memory/OVERNIGHT-20260928.md 3h/3i) now lands rungs above the
+resume frontier instead of repeated siblings of one 131072-parented delta.
