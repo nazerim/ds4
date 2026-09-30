@@ -1158,3 +1158,31 @@ argument for that work than it looked when it was deferred.
   already carries merge burden. No shipped path changed at any point.
 - 03:55 P8 declined with a recorded recommendation (untracking two committed test
   binaries is the operator's call, not an overnight one).
+
+## 3i. Snap-down follow-through: resume cannot write a retrograde rung
+
+Two additions after deploying the snap-down fix, both verified rather than assumed.
+
+**Retrograde write was already prevented, by design.** A resumed slot restores
+`continued_last_store_tokens` to the loaded frontier (`ds4_server.c:15280`, carrying a
+comment saying so: "so we do not re-fire a continued store at tokens already on
+disk"). I checked this instead of adding a fix for it. It matters for the snap rule:
+a frontier is off-grid by construction, so a naive snap from `live` could land *below*
+the frontier and re-serialise rows that are already durable, for no restore benefit.
+The watermark makes that impossible. Now asserted in the suite with the measured
+resume frontier (watermark 306163, doubled grid 16384): live 310000 and 311295 yield
+no target, 311296 yields 311296, and after that rung exists the next target is 327680 -
+ordinary one-step spans. Honest cost statement: the FIRST rung after a resume is still
+fat (~6 GiB), because no `%4`-compliant ancestor exists between 131072 and it. Every
+rung after that is ~0.6 GiB instead of a ~5.5 GiB frontier store each time.
+
+**An orphaned test is now wired in.** `test_kv_cache_head_divergence_anchor_depth`
+was defined but never called - the compiler reported it as an unused function - so its
+coverage did not exist. Registered in `ds4_server_unit_tests_run()`; it passes, so it
+was not stale, just disconnected. `make test-server-logic` is green.
+
+**Corrected blade figures (15:08, post map-fix).** 388 objects, 508.9 GiB. P2.1
+reclaimable is **180.1 GiB in 255 files**. The 171.7 GiB figure quoted earlier came
+from the run BEFORE the reason-map fix, when the reclaimable filter excluded
+agent-system instead of shutdown stores; use 180.1 GiB. Engine has served zero traffic
+since the fix deployed, so the ladder's field evidence is still pending a real turn.

@@ -1,0 +1,80 @@
+{
+  "theme": "catppuccin-mocha",
+  "defaultProvider": "qwen-token-plan-individual",
+  "defaultModel": "qwen3.8-flash",
+  "defaultThinkingLevel": "medium",
+  "defaultTools": [
+    "read",
+    "bash",
+    "edit",
+    "write",
+    "grep",
+    "find"
+  ],
+  "httpIdleTimeoutMs": 1800000,
+  "compaction": {
+    "enabled": true,
+    "reserveTokens": 65536,
+    "keepRecentTokens": 4096,
+    "modelOverrides": {
+      "llama.local/qwen3.8-27b": {
+        "reserveTokens": 32768
+      },
+      "llama.local/qwen3.8-27b-4s": {
+        "reserveTokens": 32768
+      },
+      "llama.local/qwen3.8-27b-4xl": {
+        "reserveTokens": 32768
+      },
+      "llama.win/qwen3.8-27b-l": {
+        "reserveTokens": 32768
+      },
+      "llama.win/qwen3.8-27b": {
+        "reserveTokens": 32768
+      },
+      "llama.win/qwen3.8-27b-4s": {
+        "reserveTokens": 32768
+      },
+      "llama.win/qwen3.8-27b-4xl": {
+        "reserveTokens": 32768
+      },
+      "ds4-lan/qwen3.8-flash-next": {
+        "reserveTokens": 32768
+      },
+      "ds4-lan/deepseek-v4-flash": {
+        "reserveTokens": 65536
+      }
+    }
+  },
+  "retry": {
+    "enabled": true,
+    "maxRetries": 3,
+    "baseDelayMs": 2000,
+    "provider": {
+      "maxRetries": 0,
+      "maxRetryDelayMs": 60000
+    }
+  },
+  "packages": [
+    "npm:pi-mcp-adapter",
+    {
+      "source": "git:github.com/obra/superpowers",
+      "extensions": []
+    },
+    "npm:pi-subagents"
+  ],
+  "hideThinkingBlock": false,
+  "enableSkillCommands": true,
+  "enabledModels": [
+    "qwen-token-plan-individual/qwen3.8-flash",
+    "qwen-token-plan-individual/qwen3.8-max",
+    "llama.win/qwen3.8-27b",
+    "ds4-lan/qwen3.8-flash-next",
+    "ds4-lan/deepseek-v4-flash",
+    "llama.win/qwen3.8-27b-l"
+  ],
+  "lastChangelogVersion": "0.86.1",
+  "modelThinkingLevels": {
+    "ds4-lan/qwen3.8-flash-next": "medium"
+  }
+}

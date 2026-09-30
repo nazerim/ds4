@@ -23923,6 +23923,25 @@ static void test_kv_cache_continued_uses_aligned_frontiers(void) {
     TEST_ASSERT(kv_cache_continued_store_target(&kc, 263089) == 0);
     TEST_ASSERT(kv_cache_continued_store_target(&kc, 262144) == 262144);
     unsetenv("DS4_KV_CONTINUED_SNAP");
+
+    /* A resumed slot restores its watermark to the loaded frontier, which is
+     * off-grid because frontier stores write the exact live length.  Snapping must
+     * never write a rung BELOW that watermark - it would re-serialise rows that are
+     * already durable, for no restore benefit.  So the first rung after a resume
+     * lands on the next boundary above the frontier, and every later rung is a
+     * normal one-step span.  Numbers are the measured 306163 resume frontier and
+     * the doubled grid (16384) above 49152. */
+    kc.opt = kv_cache_default_options();
+    kc.continued_last_store_tokens = 306163;
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 310000) == 0);
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 311295) == 0);
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 311296) == 311296);
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 315000) == 311296);
+    /* Steady state once that rung exists: successive rungs are one step apart. */
+    kc.continued_last_store_tokens = 311296;
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 320000) == 0);
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 327680) == 327680);
+    TEST_ASSERT(kv_cache_continued_store_target(&kc, 340000) == 327680);
 }
 
 static void test_kv_cache_cold_store_suppresses_duplicate_continued_boundary(void) {
@@ -27665,6 +27684,9 @@ static void ds4_server_unit_tests_run(void) {
     test_kv_cache_model_fp_routing();
     test_kv_cache_eviction_legacy_lru_evicts_oldest();
     test_kv_cache_small_dense_divergent_prune();
+    /* Was defined but never called: the compiler flagged it as an unused
+     * function, so its coverage did not exist.  Verified it passes once wired in. */
+    test_kv_cache_head_divergence_anchor_depth();
     test_dsml_bare_parameters_parse_as_unknown_call();
     test_strip_dsml_keep_prefix();
     test_clamp_live_stream_positions();
