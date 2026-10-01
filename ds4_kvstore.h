@@ -153,6 +153,14 @@ typedef struct {
     const char *log_name;
     void *log_ud;
     void (*log)(void *ud, ds4_kvstore_log_type type, const char *msg);
+    /* Deferral backoff table (see ds4_kvstore.c): sha of nodes whose delete
+     * was deferred with live children (reasons: redundant,
+     * redundant-divergent, conversation-retired), so the rescan-driven
+     * victim proposal loop skips them until their state changes or a pass
+     * counter expires.  Eviction proposals only; never mutates a checkpoint. */
+    void *defer_tbl;
+    int defer_len;
+    int defer_cap;
     uint64_t model_fp;   /* set once at open from the loaded weights */
     /* Private: sha-keyed text cache for lineage grouping (see text_ref).
      * Pruned to the on-disk set at refresh; freed at close. */

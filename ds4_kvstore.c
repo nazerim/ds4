@@ -680,6 +680,7 @@ bool ds4_kvstore_read_entry_file(const char *path, const char sha[41],
 }
 
 static void kv_text_refs_prune(ds4_kvstore *kc);
+static void kv_defer_backoff_prune(ds4_kvstore *kc);
 
 static void kv_cache_refresh(ds4_kvstore *kc) {
     if (!kc->enabled) return;
@@ -709,6 +710,7 @@ static void kv_cache_refresh(ds4_kvstore *kc) {
         }
     }
     kv_text_refs_prune(kc);
+    kv_defer_backoff_prune(kc);
 }
 
 bool ds4_kvstore_touch_file(const char *path, uint32_t hits, bool stale,
@@ -1078,6 +1080,27 @@ static bool kv_cache_conv_is_kept(ds4_kvstore *kc, const kv_chain_rel *r,
     return false;
 }
 
+typedef struct kv_defer_backoff_entry {
+    char sha[41];
+    uint32_t children;
+    uint64_t last_used;
+    int pass;
+} kv_defer_backoff_entry;
+
+/* True while the node's deferral is still fresh (state unchanged and the
+ * pass counter has not expired).  Skips ALL victim-proposal sites: the
+ * PHASE A redundant picker, the divergent-duplicate sweep, and
+ * kv_cache_find_lru_leaf — a deferred node is usually its own lineage leaf
+ * (test chain texts are pairwise non-prefixing), so without the leaf-level
+ * skip the retirement path re-proposes the same blocked node every pass and
+ * re-recording resets the expiry clock (rows never age, spam never stops). */
+static bool kv_defer_is_blocked(const ds4_kvstore *kc, const char *sha) {
+    const kv_defer_backoff_entry *tbl = kc->defer_tbl;
+    for (int i = 0; i < kc->defer_len; i++)
+        if (memcmp(tbl[i].sha, sha, 41) == 0) return true;
+    return false;
+}
+
 /* Pick a redundant victim deterministically: the redundant entry with the
  * smallest bucket (oldest position first — plan §3.3 "oldest bucket first
  * within a conversation"), tie-broken by tokens.  Evicting smallest-first keeps
@@ -1087,6 +1110,7 @@ static int kv_cache_find_redundant(ds4_kvstore *kc, const kv_chain_rel *r) {
     int best = -1;
     for (int i = 0; i < kc->len; i++) {
         if (kv_cache_conv_is_kept(kc, r, i)) continue;
+        if (kv_defer_is_blocked(kc, kc->entry[i].sha)) continue;
         if (best < 0) { best = i; continue; }
         const ds4_kvstore_entry *b = &kc->entry[best];
         if (kc->entry[i].bucket < b->bucket ||
@@ -1134,6 +1158,7 @@ static int kv_cache_find_lru_leaf(ds4_kvstore *kc, const kv_chain_rel *r,
         if (!kv_rel_is_leaf(r, i)) continue;
         if (kv_cache_entry_is_legacy(&kc->entry[i])) continue;
         if (r->active[i]) continue;
+        if (kv_defer_is_blocked(kc, kc->entry[i].sha)) continue;
         int cnt = 0;
         int64_t branch_recency = 0;
         for (int j = 0; j < r->len; j++) {
@@ -1251,6 +1276,78 @@ static int kv_cache_find_lru_legacy(ds4_kvstore *kc) {
     return best;
 }
 
+/* ---- deferral backoff ----------------------------------------------------
+ * A delete deferred with children>0 keeps its FILE on disk, and
+ * kv_cache_refresh() rescans disk at the top of every eviction pass.  The
+ * same blocked parents therefore became victims again on every store that
+ * ran eviction — in one production hour: 2,065 "delete deferred" lines over
+ * 228 distinct files, i.e. 22-25 re-proposals per node that provably cannot
+ * be deleted yet.  Backoff: after a deferral, stop re-proposing the node
+ * until either its state changes (children died => children count drops; a
+ * touch moves last_used) or KV_DEFER_BACKOFF_PASSES eviction passes expire.
+ * The pass expiry is mandatory: a node whose last child dies changes state
+ * and is dropped from the table, but if only the PARENT's on-disk state
+ * shifts (or a future reason class defers without children), the node would
+ * otherwise stay unreclaimable for the lifetime of the process.
+ * This mutates eviction PROPOSALS only; checkpoint bytes are never touched. */
+#define KV_DEFER_BACKOFF_PASSES 8
+
+static void kv_defer_backoff_record(ds4_kvstore *kc, const ds4_kvstore_entry *e) {
+    kv_defer_backoff_entry *tbl = kc->defer_tbl;
+    for (int i = 0; i < kc->defer_len; i++) {
+        if (memcmp(tbl[i].sha, e->sha, 41) != 0) continue;
+        tbl[i].children = e->children;
+        tbl[i].last_used = e->last_used;
+        tbl[i].pass = 0;
+        return;
+    }
+    if (kc->defer_len == kc->defer_cap) {
+        int cap = kc->defer_cap ? kc->defer_cap * 2 : 64;
+        tbl = kv_xrealloc(tbl, (size_t)cap * sizeof(tbl[0]));
+        kc->defer_tbl = tbl;
+        kc->defer_cap = cap;
+    }
+    kv_defer_backoff_entry *b = &tbl[kc->defer_len++];
+    memcpy(b->sha, e->sha, 41);
+    b->children = e->children;
+    b->last_used = e->last_used;
+    b->pass = 0;
+}
+
+/* Drop table rows whose node vanished (file deleted => state moved on) or
+ * whose recorded state no longer matches the fresh scan (children died,
+ * entry touched).  Called at refresh, so "state changed" unblocks a node
+ * within one eviction pass. */
+static void kv_defer_backoff_prune(ds4_kvstore *kc) {
+    kv_defer_backoff_entry *tbl = kc->defer_tbl;
+    for (int i = 0; i < kc->defer_len; ) {
+        bool alive = false;
+        for (int j = 0; j < kc->len; j++) {
+            if (memcmp(kc->entry[j].sha, tbl[i].sha, 41) != 0) continue;
+            alive = kc->entry[j].children == tbl[i].children &&
+                    kc->entry[j].last_used == tbl[i].last_used;
+            break;
+        }
+        if (alive) { i++; continue; }
+        memmove(&tbl[i], &tbl[i + 1],
+                (size_t)(kc->defer_len - i - 1) * sizeof(tbl[0]));
+        kc->defer_len--;
+    }
+}
+
+/* One eviction pass completed: age every row; expire the stubborn ones so
+ * no node is permanently unreclaimable even if its recorded state never
+ * moves. */
+static void kv_defer_backoff_advance(ds4_kvstore *kc) {
+    kv_defer_backoff_entry *tbl = kc->defer_tbl;
+    for (int i = 0; i < kc->defer_len; ) {
+        if (++tbl[i].pass < KV_DEFER_BACKOFF_PASSES) { i++; continue; }
+        memmove(&tbl[i], &tbl[i + 1],
+                (size_t)(kc->defer_len - i - 1) * sizeof(tbl[0]));
+        kc->defer_len--;
+    }
+}
+
 static void kv_cache_unlink_entry(ds4_kvstore *kc, int victim,
                                   uint64_t *total, const char *reason) {
     ds4_kvstore_entry e = kc->entry[victim];
@@ -1263,6 +1360,7 @@ static void kv_cache_unlink_entry(ds4_kvstore *kc, int victim,
                 "%s: kv cache delete deferred reason=%s tokens=%u children=%u file=%s",
                 kv_log_name(kc), reason, (unsigned)e.tokens, (unsigned)e.children,
                 e.path ? e.path : "?");
+        kv_defer_backoff_record(kc, &e);
         ds4_kvstore_entry_free(&e);
         memmove(kc->entry + victim, kc->entry + victim + 1,
                 (size_t)(kc->len - victim - 1) * sizeof(kc->entry[0]));
@@ -1347,6 +1445,7 @@ void ds4_kvstore_sweep_small_dense_divergents(ds4_kvstore *kc,
         const ds4_kvstore_entry *e = &kc->entry[i];
         if (kv_cache_entry_is_legacy(e)) continue;
         if (e->tokens > (uint32_t)kc->opt.small_dense_tokens) continue;
+        if (kv_defer_is_blocked(kc, e->sha)) continue;
         if (kv_cache_entry_in_active_chain(kc, i, active_text, active_len)) continue;
         bool dup = false;
         for (int j = 0; j < kc->len && !dup; j++) {
@@ -1474,6 +1573,10 @@ void ds4_kvstore_evict(ds4_kvstore *kc, const ds4_tokens *live,
         kv_chain_rel_free(&r);
         continue;
     }
+    /* Pass done: age the deferral-backoff table so stubborn blocked nodes
+     * expire after KV_DEFER_BACKOFF_PASSES passes instead of staying
+     * unreclaimable forever. */
+    kv_defer_backoff_advance(kc);
 }
 
 static int kv_cache_continued_step(const ds4_kvstore *kc);
@@ -1599,6 +1702,7 @@ void ds4_kvstore_close(ds4_kvstore *kc) {
     ds4_kvstore_clear(kc);
     for (int i = 0; i < kc->text_ref_len; i++) free(kc->text_refs[i].text);
     free(kc->text_refs);
+    free(kc->defer_tbl);
     free(kc->dir);
     memset(kc, 0, sizeof(*kc));
 }

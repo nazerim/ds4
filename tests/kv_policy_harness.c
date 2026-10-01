@@ -41,9 +41,28 @@ static int g_failures = 0;
     } \
 } while (0)
 
+/* Mirrors KV_DEFER_BACKOFF_PASSES in ds4_kvstore.c; keep in sync. */
+#define HARNESS_DEFER_BACKOFF_PASSES 8
+
+/* ---- deferral-backoff instrumentation ----------------------------------
+ * Count "delete deferred" log lines per node text so Scenario E can assert
+ * the pass-loop stops re-proposing blocked parents. */
+static const char *g_defer_dir = NULL;
+static const char *g_defer_texts[4];
+static int g_defer_counts[4];
+
 static void log_cb(void *ud, ds4_kvstore_log_type type, const char *msg) {
     (void)ud;
     if (type == DS4_KVSTORE_LOG_WARNING) fprintf(stderr, "WARN: %s\n", msg);
+    if (strstr(msg, "delete deferred") && g_defer_dir) {
+        for (int i = 0; i < 4; i++) {
+            if (!g_defer_texts[i]) continue;
+            char sha[41];
+            ds4_kvstore_sha1_bytes_hex(g_defer_texts[i],
+                                       strlen(g_defer_texts[i]), sha);
+            if (strstr(msg, sha)) g_defer_counts[i]++;
+        }
+    }
 }
 
 /* ---- stub file writer (mirrors the unit-test stub; sha-named) ---- */
@@ -331,11 +350,88 @@ static void scenario_divergence_logic(void) {
     ds4_kvstore_close(&kc);
 }
 
+/* Scenario E: deferral backoff.  A delta parent whose delete was deferred
+ * (live children) stays ON disk, and kv_cache_refresh() re-scans disk at the
+ * top of every eviction pass — so without backoff the same blocked node is
+ * re-proposed every pass (production: 2,065 deferrals / 228 files / hour).
+ * The fix must (1) skip re-proposals while the node's state is unchanged,
+ * (2) unblock immediately when the state DOES change (child died), and
+ * (3) expire after HARNESS_DEFER_BACKOFF_PASSES passes so nothing becomes
+ * permanently unreclaimable.  Same chain layout as scenario D. */
+static void scenario_deferral_backoff(void) {
+    printf("== Scenario E: deferral backoff (no re-proposal spam) ==\n");
+    char dir[] = "/tmp/kv-harness-e.XXXXXX";
+    if (!mkdtemp(dir)) { perror("mkdtemp"); exit(1); }
+
+    const uint64_t now = (uint64_t)time(NULL);
+    const char *y1 = "backoff chain anchor text one (root)";
+    const char *y2 = "backoff chain anchor text two (child of one)";
+    const char *y3 = "backoff chain frontier text three (child of two)";
+
+    stub_file(dir, y1, 7, 1, 40960, now - 100000, 4000);
+    stub_file_v3(dir, y2, y1, 2, 81920, 40960, now - 100000, 4000);
+    stub_file_v3(dir, y3, y2, 2, 122880, 81920, now - 10, 4000);
+
+    g_defer_dir = dir;
+    g_defer_texts[0] = y1; g_defer_texts[1] = y2;
+    g_defer_counts[0] = g_defer_counts[1] = g_defer_counts[2] = g_defer_counts[3] = 0;
+
+    ds4_kvstore kc = {0};
+    ds4_kvstore_options opt = ds4_kvstore_default_options();
+    if (!ds4_kvstore_open(&kc, dir, 1, false, 0, opt,
+                          "harness", log_cb, NULL)) {
+        fprintf(stderr, "open failed\n");
+        exit(1);
+    }
+    kc.budget_bytes = 6000;
+    ds4_kvstore_eviction_context inc = {
+        .text = "incoming unrelated request text",
+        .text_len = 31,
+        .model_id = 0, .quant_bits = 2, .ctx_size = 32768,
+        .reject_different_quant = false,
+    };
+    ds4_kvstore_evict(&kc, NULL, 0, &inc);
+    CHECK(g_defer_counts[0] == 1, "root deferred exactly once on first pass");
+    CHECK(file_exists(dir, y1), "root file survives its deferral");
+
+    /* Storm: repeated budget-pressure passes with the chain state FROZEN.
+     * Each evict() is one pass (the in-pass main loop terminates at PHASE D).
+     * Without backoff every pass re-proposes y1/y2: counts would climb to 5.
+     * With backoff the counts stay flat until expiry. */
+    for (int i = 0; i < 4; i++) ds4_kvstore_evict(&kc, NULL, 0, &inc);
+    CHECK(g_defer_counts[0] == 1, "no re-proposal of the blocked root across 4 frozen passes");
+
+    /* Expiry path: enough passes to expire HARNESS_DEFER_BACKOFF_PASSES rows.
+     * The node MUST become proposable again — nothing is permanently
+     * unreclaimable — and eventually the whole chain is reclaimed once the
+     * frontier dies. */
+    for (int i = 0; i < HARNESS_DEFER_BACKOFF_PASSES + 2; i++)
+        ds4_kvstore_evict(&kc, NULL, 0, &inc);
+    CHECK(g_defer_counts[0] >= 2, "blocked root re-proposed after backoff expiry (nothing permanently unreclaimable)");
+    unlink_text(dir, y3);
+    /* After y2/y3 die, only y1 remains; under its old budget it FITS (total
+     * < target) and is correctly kept.  Tighten the budget so reclamation is
+     * actually required: y1 must now flow through the same backoff expiry
+     * into retirement. */
+    kc.budget_bytes = 3000;
+    for (int i = 0; i < HARNESS_DEFER_BACKOFF_PASSES + 4; i++)
+        ds4_kvstore_evict(&kc, NULL, 0, &inc);
+    CHECK(!file_exists(dir, y1), "root reclaimed via expiry-unblock after frontier death");
+    CHECK(!file_exists(dir, y2), "middle reclaimed after frontier death");
+
+    ds4_kvstore_close(&kc);
+    g_defer_dir = NULL;
+    const char *texts[] = {y1, y2, y3};
+    for (int i = 0; i < 3; i++) unlink_text(dir, texts[i]);
+    rmdir(dir);
+}
+
 int main(void) {
     scenario_switch_churn();
     scenario_idle_retired();
     scenario_delta_parent_deferred();
     scenario_divergence_logic();
+    scenario_deferral_backoff();
     if (g_failures) {
         fprintf(stderr, "kv_policy_harness: %d failure(s)\n", g_failures);
         return 1;
