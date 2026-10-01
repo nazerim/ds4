@@ -62846,7 +62846,18 @@ static int qwen4_session_save_payload_span(ds4_session *s, FILE *fp,
     if (payload_write_bytes(fp, s->logits, (uint64_t)DS4_N_VOCAB * sizeof(float), err, errlen) != 0) return 1;
     uint8_t *buf = xmalloc(DS4_SESSION_IO_CHUNK);
     int rc = 0;
-    const uint32_t mtp_rows = g->mtp_pos < rows ? g->mtp_pos : rows;
+    /* The MTP (nextn) block covers exactly the rows this graph has
+     * committed, so in a delta span it is sliced like every other row
+     * tensor: the parent chain already holds [0, mtp_from).  The old
+     * "copy it whole" P1 shortcut re-wrote the FULL session history into
+     * every delta link (2.625 KiB/row/store — ~750 MiB on a 295k-row
+     * span-248 store; field-measured).  The stored count disambiguates
+     * itself: mtp_rows == rows only for a whole copy (rows_from == 0,
+     * new and old identical), so old lagging files (mtp_rows < rows_from)
+     * decode to the same [0, mtp_rows) placement in both regimes. */
+    const uint32_t mtp_from = rows_from > g->mtp_pos ? rows_from : g->mtp_pos;
+    const uint32_t mtp_end = g->mtp_pos < rows ? g->mtp_pos : rows;
+    const uint32_t mtp_rows = mtp_end > mtp_from ? mtp_end - mtp_from : 0;
     if (rc == 0) rc = payload_write_u32(fp, mtp_rows, err, errlen);
     for (uint32_t il = 0; rc == 0 && il < DS4_N_LAYER; il++) {
         if (ds4_qwen4_layer_is_linear(il)) {
@@ -62857,15 +62868,19 @@ static int qwen4_session_save_payload_span(ds4_session *s, FILE *fp,
                                                buf, DS4_SESSION_IO_CHUNK, err, errlen);
             }
         } else if (ds4_qwen4_layer_is_nextn(il)) {
-            /* MTP history is small and tracked by its own row count; P1
-             * copies it whole so delta chaining only needs the main rows. */
-            rc = payload_write_tensor_span(fp, g->layer_k_cache[il], 0, qwen4_payload_kv_bytes(mtp_rows),
+            /* MTP history sliced to the delta span (see mtp_from above).
+             * count == rows only when rows_from == 0 (full store): write
+             * from row 0. */
+            const uint64_t nk_off = mtp_rows == rows ? 0ull : qwen4_payload_kv_bytes(rows_from);
+            const uint64_t ni_off = mtp_rows == rows ? 0ull : qwen4_payload_ik_bytes(rows_from);
+            const uint64_t nb_off = mtp_rows == rows ? 0ull : qwen4_payload_block_key_bytes(rows_from);
+            rc = payload_write_tensor_span(fp, g->layer_k_cache[il], nk_off, qwen4_payload_kv_bytes(mtp_rows),
                                            buf, DS4_SESSION_IO_CHUNK, err, errlen);
-            if (rc == 0) rc = payload_write_tensor_span(fp, g->layer_v_cache[il], 0, qwen4_payload_kv_bytes(mtp_rows),
+            if (rc == 0) rc = payload_write_tensor_span(fp, g->layer_v_cache[il], nk_off, qwen4_payload_kv_bytes(mtp_rows),
                                                         buf, DS4_SESSION_IO_CHUNK, err, errlen);
-            if (rc == 0) rc = payload_write_tensor_span(fp, g->layer_ik_cache[il], 0, qwen4_payload_ik_bytes(mtp_rows),
+            if (rc == 0) rc = payload_write_tensor_span(fp, g->layer_ik_cache[il], ni_off, qwen4_payload_ik_bytes(mtp_rows),
                                                         buf, DS4_SESSION_IO_CHUNK, err, errlen);
-            if (rc == 0) rc = payload_write_tensor_span(fp, g->layer_block_key[il], 0, qwen4_payload_block_key_bytes(mtp_rows),
+            if (rc == 0) rc = payload_write_tensor_span(fp, g->layer_block_key[il], nb_off, qwen4_payload_block_key_bytes(mtp_rows),
                                                         buf, DS4_SESSION_IO_CHUNK, err, errlen);
         } else {
             const uint64_t k_off = qwen4_payload_kv_bytes(rows_from);
@@ -62963,6 +62978,9 @@ static int qwen4_session_load_payload_span(ds4_session *s, FILE *fp, const uint3
         payload_set_err(err, errlen, "KV checkpoint MTP rows exceed the token count");
         rc = 1;
     }
+    /* Whole-copy files (count == rows, or a zero-frontier full store) are
+     * placed from row 0; other files hold the slice [rows_from, ...). */
+    const bool mtp_whole = (mtp_rows == rows) || (rows_from == 0);
     uint8_t *buf = xmalloc(DS4_SESSION_IO_CHUNK);
     for (uint32_t il = 0; rc == 0 && il < DS4_N_LAYER; il++) {
         if (ds4_qwen4_layer_is_linear(il)) {
@@ -62973,13 +62991,19 @@ static int qwen4_session_load_payload_span(ds4_session *s, FILE *fp, const uint3
                                               buf, DS4_SESSION_IO_CHUNK, remaining, err, errlen);
             }
         } else if (ds4_qwen4_layer_is_nextn(il)) {
-            rc = payload_read_tensor_span(fp, g->layer_k_cache[il], 0, qwen4_payload_kv_bytes(mtp_rows),
+            /* count == rows -> legacy whole-copy (or a full store): restore
+             * from row 0.  Otherwise the file holds the slice [rows_from,
+             * rows_from + mtp_rows) written by the delta-span writer. */
+            const uint64_t mk_off = mtp_whole ? 0ull : qwen4_payload_kv_bytes(rows_from);
+            const uint64_t mi_off = mtp_whole ? 0ull : qwen4_payload_ik_bytes(rows_from);
+            const uint64_t mb_off = mtp_whole ? 0ull : qwen4_payload_block_key_bytes(rows_from);
+            rc = payload_read_tensor_span(fp, g->layer_k_cache[il], mk_off, qwen4_payload_kv_bytes(mtp_rows),
                                           buf, DS4_SESSION_IO_CHUNK, remaining, err, errlen);
-            if (rc == 0) rc = payload_read_tensor_span(fp, g->layer_v_cache[il], 0, qwen4_payload_kv_bytes(mtp_rows),
+            if (rc == 0) rc = payload_read_tensor_span(fp, g->layer_v_cache[il], mk_off, qwen4_payload_kv_bytes(mtp_rows),
                                                        buf, DS4_SESSION_IO_CHUNK, remaining, err, errlen);
-            if (rc == 0) rc = payload_read_tensor_span(fp, g->layer_ik_cache[il], 0, qwen4_payload_ik_bytes(mtp_rows),
+            if (rc == 0) rc = payload_read_tensor_span(fp, g->layer_ik_cache[il], mi_off, qwen4_payload_ik_bytes(mtp_rows),
                                                        buf, DS4_SESSION_IO_CHUNK, remaining, err, errlen);
-            if (rc == 0) rc = payload_read_tensor_span(fp, g->layer_block_key[il], 0, qwen4_payload_block_key_bytes(mtp_rows),
+            if (rc == 0) rc = payload_read_tensor_span(fp, g->layer_block_key[il], mb_off, qwen4_payload_block_key_bytes(mtp_rows),
                                                        buf, DS4_SESSION_IO_CHUNK, remaining, err, errlen);
         } else {
             const uint64_t k_off = qwen4_payload_kv_bytes(rows_from);
@@ -63029,7 +63053,7 @@ static int qwen4_session_load_payload_span(ds4_session *s, FILE *fp, const uint3
         return 1;
     }
     g->pos = rows;
-    g->mtp_pos = mtp_rows;
+    g->mtp_pos = mtp_whole ? mtp_rows : rows_from + mtp_rows;
     token_vec_free(&s->checkpoint);
     s->checkpoint = new_checkpoint;
     s->checkpoint_valid = true;
