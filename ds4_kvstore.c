@@ -3317,7 +3317,7 @@ static int kv_cache_try_load_one(ds4_kvstore *kc, ds4_engine *engine,
     int lrc;
     if (nchain == 1) {
         lrc = ds4_session_load_payload_span(session, fp, hdr.payload_bytes, 0,
-                                            err, sizeof(err));
+                                            true, err, sizeof(err));
     } else {
         fclose(fp);
         fp = NULL;
@@ -3344,6 +3344,7 @@ static int kv_cache_try_load_one(ds4_kvstore *kc, ds4_engine *engine,
             if (ds4_session_load_payload_span(session, lf,
                                               chain[k].payload_bytes,
                                               chain[k].delta_from,
+                                              k == nchain - 1,
                                               err, sizeof(err)) != 0) {
                 fclose(lf);
                 lrc = 1;

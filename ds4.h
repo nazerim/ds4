@@ -673,6 +673,35 @@ uint64_t ds4_session_payload_bytes(ds4_session *s);
  * depends on it. */
 uint32_t ds4_qwen4_mtp_slice_rows(uint32_t mtp_pos, uint32_t rows,
                                   uint32_t rows_from);
+/* Payload region split for one link of a delta chain (R2b resume-read trim,
+ * .codebase-memory/omlx-v070-cache-policy.md §3.2).  A NON-TERMINAL link's
+ * load may SEEK past the regions later links overwrite wholesale (whole
+ * tokens/logits arrays, per-linear-layer GDN state+hist, PLE hist/prev/
+ * mrope); every link must read the header, mtp_rows and the attention/
+ * nextn/pos3 row slices (disjoint [rows_from, rows) offsets - the actual
+ * chain payload).  skip_bytes + keep_bytes == total_bytes == the stored
+ * payload size for (rows, mtp_rows); the loader cross-checks total_bytes
+ * against the file on every link.  Requires the Qwen3.8 shape selected
+ * (ds4_test_begin_qwen4_shape for model-free use); swept model-free by
+ * ds4_test --payload-trim. */
+typedef struct {
+    uint64_t header_bytes;     /* 13 u32 payload header */
+    uint64_t tokens_bytes;     /* rows x u32 (terminal-wins) */
+    uint64_t logits_bytes;     /* vocab x f32 (terminal-wins) */
+    uint64_t gdn_bytes;        /* linear layers x (state + conv hist) */
+    uint64_t ple_bytes;        /* ple_hist + n-gram prev + mrope delta */
+    uint64_t kept_rows_bytes;  /* mtp_rows u32 + attention/nextn/pos3 slices */
+    uint64_t skip_bytes;       /* tokens + logits + gdn + ple */
+    uint64_t keep_bytes;       /* header + kept_rows */
+    uint64_t total_bytes;      /* skip + keep == stored payload_bytes */
+} ds4_qwen4_payload_split;
+void ds4_qwen4_payload_link_split(uint32_t rows, uint32_t mtp_rows,
+                                  uint32_t rows_from,
+                                  ds4_qwen4_payload_split *out);
+/* Shape swap for model-free Qwen3.8 arithmetic tests (same pattern as
+ * ds4_test_qwen4_placement: save, select QWEN4_EXP, restore). */
+void ds4_test_begin_qwen4_shape(void);
+void ds4_test_end_qwen4_shape(void);
 int ds4_session_stage_payload(ds4_session *s, ds4_session_payload_file *out,
                               char *err, size_t errlen);
 int ds4_session_write_staged_payload(const ds4_session_payload_file *payload,
@@ -687,7 +716,8 @@ bool ds4_session_supports_delta(const ds4_session *s);
 int ds4_session_stage_payload_span(ds4_session *s, ds4_session_payload_file *out,
                                    uint32_t rows_from, char *err, size_t errlen);
 int ds4_session_load_payload_span(ds4_session *s, FILE *fp, uint64_t payload_bytes,
-                                  uint32_t rows_from, char *err, size_t errlen);
+                                  uint32_t rows_from, bool terminal_link,
+                                  char *err, size_t errlen);
 int ds4_session_payload_token_span(FILE *fp, uint32_t n_tokens,
                                    const int *tokens,
                                    char *err, size_t errlen);

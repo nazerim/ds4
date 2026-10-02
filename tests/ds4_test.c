@@ -7910,6 +7910,79 @@ static void test_mtp_slice_formula(void) {
             }
 }
 
+#if !defined(DS4_NO_GPU) && !defined(DS4_ROCM_BUILD)
+/* R2b resume-read trim (.codebase-memory/omlx-v070-cache-policy.md §3.2):
+ * model-free exhaustive sweep of the intermediate-link payload split.  The
+ * chain loader must seek past exactly skip_bytes on every non-terminal link
+ * and read keep_bytes; the loader additionally cross-checks total_bytes
+ * against each file's stored payload size, so writer/reader/split can never
+ * drift silently. */
+static void test_payload_trim_formula(void) {
+    ds4_test_begin_qwen4_shape();
+    for (uint32_t rows = 0; rows <= 64; rows++) {
+        for (uint32_t rows_from = 0; rows_from <= rows; rows_from++) {
+            const uint32_t span = rows - rows_from;
+            for (uint32_t mtp_rows = 0; mtp_rows <= span; mtp_rows++) {
+                ds4_qwen4_payload_split sp;
+                ds4_qwen4_payload_link_split(rows, mtp_rows, rows_from, &sp);
+                /* region sums must reconcile with the totals */
+                TEST_ASSERT(sp.skip_bytes ==
+                            sp.tokens_bytes + sp.logits_bytes + sp.gdn_bytes + sp.ple_bytes);
+                TEST_ASSERT(sp.total_bytes == sp.skip_bytes + sp.keep_bytes);
+                TEST_ASSERT(sp.keep_bytes == sp.header_bytes + sp.kept_rows_bytes);
+                TEST_ASSERT(sp.header_bytes == 13u * 4u);
+                TEST_ASSERT(sp.tokens_bytes == (uint64_t)rows * 4u);
+                /* the skip set depends on rows alone - never on the slice
+                 * origin or the nextn slice size ... */
+                ds4_qwen4_payload_split sp0;
+                ds4_qwen4_payload_link_split(rows, 0, 0, &sp0);
+                TEST_ASSERT(sp0.skip_bytes == sp.skip_bytes);
+                /* ... but kept rows and total do, strictly, when the span
+                 * carries nextn rows */
+                if (mtp_rows > 0) {
+                    ds4_qwen4_payload_split spn;
+                    ds4_qwen4_payload_link_split(rows, 0, rows_from, &spn);
+                    TEST_ASSERT(sp.keep_bytes > spn.keep_bytes);
+                    TEST_ASSERT(sp.total_bytes > spn.total_bytes);
+                }
+                /* a full store's split (rows_from=0) keeps every attention
+                 * row; a delta link keeps only the span's rows, so total
+                 * must shrink by exactly the parent's attention+pos3 bytes
+                 * per 4-row-aligned origin step */
+                if (rows_from >= 4) {
+                    ds4_qwen4_payload_split sa, sb;
+                    ds4_qwen4_payload_link_split(rows, mtp_rows, rows_from - 4, &sa);
+                    ds4_qwen4_payload_link_split(rows, mtp_rows, rows_from, &sb);
+                    const uint64_t d1 = sa.keep_bytes - sb.keep_bytes;
+                    TEST_ASSERT(d1 > 0);
+                    if (rows_from >= 8) {
+                        ds4_qwen4_payload_split sc;
+                        ds4_qwen4_payload_link_split(rows, mtp_rows, rows_from - 8, &sc);
+                        /* constant per-4-row origin cost: keep(rf-4)-keep(rf)
+                         * == keep(rf-8)-keep(rf-4) */
+                        TEST_ASSERT(sc.keep_bytes - sa.keep_bytes == d1);
+                    }
+                }
+                /* every intermediate link must be seekable past the fixed
+                 * GDN state+hist floor (QWEN4_EXP: 36 linear x 3,268,608 B
+                 * = 112.2 MiB) plus the logits array */
+                TEST_ASSERT(sp.skip_bytes > (uint64_t)100 * 1024 * 1024);
+            }
+        }
+    }
+    /* skip is exactly linear in rows (the tokens array is its only
+     * rows-dependent region) */
+    ds4_qwen4_payload_split s0;
+    ds4_qwen4_payload_link_split(0, 0, 0, &s0);
+    for (uint32_t rows = 1; rows <= 64; rows++) {
+        ds4_qwen4_payload_split sr;
+        ds4_qwen4_payload_link_split(rows, 0, 0, &sr);
+        TEST_ASSERT(sr.skip_bytes - s0.skip_bytes == (uint64_t)rows * 4u);
+    }
+    ds4_test_end_qwen4_shape();
+}
+#endif
+
 static void test_server_unit_group(void) {
     ds4_server_unit_tests_run();
 }
@@ -7951,6 +8024,9 @@ static const ds4_test_entry test_entries[] = {
     {"--server", "server", "server parser/rendering/cache unit tests", test_server_unit_group, false},
     {"--kv-head-divergence", "kv-head-divergence", "synthetic AGENTS.md head-divergence anchor-depth regression (see DS4FORK.md KVCACHE — Deep Divergence Investigation)", test_kv_cache_head_divergence_anchor_depth, false},
     {"--mtp-slice", "mtp-slice", "exhaustive model-free sweep of the V2 nextn-slice row formula (C1 regression pin)", test_mtp_slice_formula, false},
+#if !defined(DS4_NO_GPU) && !defined(DS4_ROCM_BUILD)
+    {"--payload-trim", "payload-trim", "exhaustive model-free sweep of the R2b intermediate-link payload split (resume-read trim)", test_payload_trim_formula, false},
+#endif
 };
 
 static void test_print_help(const char *prog) {

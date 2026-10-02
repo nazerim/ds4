@@ -60828,6 +60828,36 @@ static DS4_MAYBE_UNUSED int payload_skip_bytes(FILE *fp, uint64_t bytes,
     return 0;
 }
 
+/* Seek-based skip for payload regions a non-terminal delta-chain link does
+ * not need to materialize (R2b resume-read trim): unlike payload_skip_bytes
+ * this does NOT read-and-discard, so the skipped bytes never hit memory -
+ * that is the whole point ((D-1) x 112.2 MiB saved per depth-D chain walk).
+ * Falls back to read-discard on unseekable streams so the accounting stays
+ * exact either way. */
+static DS4_MAYBE_UNUSED int payload_seek_skip_bytes(FILE *fp, uint64_t bytes,
+                                                    uint8_t *buf, size_t cap,
+                                                    uint64_t *remaining,
+                                                    char *err, size_t errlen) {
+    if (remaining && *remaining < bytes) {
+        payload_set_err(err, errlen, "truncated session payload");
+        return 1;
+    }
+    uint64_t done = 0;
+    while (done < bytes) {
+        const uint64_t left = bytes - done;
+        const long chunk = left > (uint64_t)LONG_MAX ? LONG_MAX : (long)left;
+        if (fseek(fp, chunk, SEEK_CUR) != 0) break;
+        done += (uint64_t)chunk;
+    }
+    if (done < bytes) {
+        uint64_t rest = bytes - done;
+        if (payload_skip_bytes(fp, rest, buf, cap, &rest, err, errlen) != 0)
+            return 1;
+    }
+    if (remaining) *remaining -= bytes;
+    return 0;
+}
+
 static DS4_MAYBE_UNUSED int payload_write_u32(FILE *fp, uint32_t v, char *err, size_t errlen) {
     uint8_t b[4];
     payload_put_u32(b, v);
@@ -62843,6 +62873,68 @@ static uint64_t qwen4_payload_tensor_bytes(uint32_t rows, uint32_t mtp_rows) {
     return bytes;
 }
 
+/* R2b resume-read trim (.codebase-memory/omlx-v070-cache-policy.md §3.2):
+ * regions of a NON-TERMINAL chain link whose bytes a later link overwrites
+ * wholesale, so this link's load may seek past them:
+ *   tokens (rows u32) + logits (V f32)          [terminal-wins arrays]
+ *   per linear layer: GDN state + conv hist     [same GPU tensor, offset 0]
+ *   ple_hist + ple_prev + mrope_delta           [terminal-wins]
+ * Kept from every link: the 13-u32 header, mtp_rows u32, and the
+ * attention/nextn/pos3 row slices (disjoint [rows_from, rows) offsets - the
+ * actual chain payload).  The loader must skip exactly these bytes and no
+ * more; ds4_test --payload-trim sweeps this split model-free. */
+void ds4_qwen4_payload_link_split(uint32_t rows, uint32_t mtp_rows,
+                                  uint32_t rows_from,
+                                  ds4_qwen4_payload_split *out) {
+    ds4_qwen4_payload_split sp = {0};
+    sp.header_bytes = (uint64_t)DS4_SESSION_PAYLOAD_U32_FIELDS * sizeof(uint32_t);
+    sp.tokens_bytes = (uint64_t)rows * sizeof(uint32_t);
+    sp.logits_bytes = (uint64_t)DS4_N_VOCAB * sizeof(float);
+    uint64_t attn_bytes = 0, nextn_bytes = 0;
+    for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
+        if (ds4_qwen4_layer_is_linear(il)) {
+            sp.gdn_bytes += qwen4_payload_lin_state_bytes() + qwen4_payload_lin_hist_bytes();
+        } else if (ds4_qwen4_layer_is_nextn(il)) {
+            nextn_bytes += 2u * qwen4_payload_kv_bytes(mtp_rows) +
+                           qwen4_payload_ik_bytes(mtp_rows) +
+                           qwen4_payload_block_key_bytes(mtp_rows);
+        } else {
+            /* delta links store the slice [rows_from, rows) of every
+             * attention tensor - the parent chain holds [0, rows_from). */
+            attn_bytes += 2u * (qwen4_payload_kv_bytes(rows) - qwen4_payload_kv_bytes(rows_from)) +
+                          (qwen4_payload_ik_bytes(rows) - qwen4_payload_ik_bytes(rows_from)) +
+                          (qwen4_payload_block_key_bytes(rows) - qwen4_payload_block_key_bytes(rows_from));
+        }
+    }
+    sp.ple_bytes = qwen4_payload_ple_hist_bytes() +
+                   (uint64_t)DS4_MAX_PLE_NGRAM * sizeof(uint32_t) + sizeof(uint32_t);
+    /* kept from every link: the mtp_rows u32 plus the row-sliced regions */
+    sp.kept_rows_bytes = sizeof(uint32_t) + attn_bytes + nextn_bytes +
+                         (uint64_t)(rows - rows_from) * 16u;   /* pos3 slice */
+    sp.skip_bytes = sp.tokens_bytes + sp.logits_bytes + sp.gdn_bytes + sp.ple_bytes;
+    sp.keep_bytes = sp.header_bytes + sp.kept_rows_bytes;
+    sp.total_bytes = sp.skip_bytes + sp.keep_bytes;
+    if (out) *out = sp;
+}
+
+static ds4_shape g_ds4_test_saved_shape;
+static int g_ds4_test_shape_saved;
+
+/* Model-free shape selection for pure-arithmetic Qwen3.8 tests (same
+ * save/select/restore contract as ds4_test_qwen4_placement). */
+void ds4_test_begin_qwen4_shape(void) {
+    g_ds4_test_saved_shape = g_ds4_shape;
+    g_ds4_test_shape_saved = 1;
+    g_ds4_shape = DS4_SHAPE_QWEN4_EXP;
+}
+
+void ds4_test_end_qwen4_shape(void) {
+    if (g_ds4_test_shape_saved) {
+        g_ds4_shape = g_ds4_test_saved_shape;
+        g_ds4_test_shape_saved = 0;
+    }
+}
+
 
 static int qwen4_session_save_payload_span(ds4_session *s, FILE *fp,
                                            uint32_t rows_from,
@@ -62968,6 +63060,7 @@ static int qwen4_session_save_payload(ds4_session *s, FILE *fp, char *err, size_
 
 static int qwen4_session_load_payload_span(ds4_session *s, FILE *fp, const uint32_t *h,
                                            uint64_t *remaining, uint32_t rows_from,
+                                           bool terminal_link,
                                            char *err, size_t errlen) {
     if (!s->qwen4_graph_ready) {
         payload_set_err(err, errlen, "Qwen3.8 graph is not ready for restore");
@@ -62975,6 +63068,10 @@ static int qwen4_session_load_payload_span(ds4_session *s, FILE *fp, const uint3
     }
     ds4_qwen4_gpu_graph *g = &s->qwen4_graph;
     const uint32_t rows = h[7];
+    /* The dispatcher already consumed the 13-u32 header: full payload size
+     * for the three-way writer/reader/split agreement check below. */
+    const uint64_t payload_total =
+        *remaining + (uint64_t)DS4_SESSION_PAYLOAD_U32_FIELDS * sizeof(uint32_t);
     /* Dual-accept format: V1 files always stored the nextn block whole
      * (offset 0), V2 files always store the span slice (offset rows_from).
      * The tag - not the row count - is the discriminator, because a V1
@@ -62995,19 +63092,38 @@ static int qwen4_session_load_payload_span(ds4_session *s, FILE *fp, const uint3
         payload_set_err(err, errlen, "KV delta span is not row-aligned or exceeds the checkpoint");
         return 1;
     }
+    /* Non-terminal chain links: the whole tokens/logits arrays, every GDN
+     * state+hist block and the PLE tail are overwritten wholesale by later
+     * links of the same walk, so seek past them instead of reading
+     * ((D-1) x 112.2 MiB saved per depth-D resume; the split arithmetic is
+     * ds4_qwen4_payload_link_split, pinned by ds4_test --payload-trim).
+     * The terminal link revalidates every token/n-gram over [0, rows). */
+    const bool skip_overwritten = !terminal_link;
+    uint8_t *buf = xmalloc(DS4_SESSION_IO_CHUNK);
     token_vec new_checkpoint = {0};
-    for (uint32_t i = 0; i < rows; i++) {
-        uint32_t tok;
-        if (payload_read_u32(fp, &tok, remaining, err, errlen) != 0) {
-            token_vec_free(&new_checkpoint);
+    if (skip_overwritten) {
+        if (payload_seek_skip_bytes(fp, (uint64_t)rows * sizeof(uint32_t),
+                                    buf, DS4_SESSION_IO_CHUNK,
+                                    remaining, err, errlen) != 0) {
+            free(buf);
             return 1;
         }
-        if (tok >= DS4_N_VOCAB) {
-            token_vec_free(&new_checkpoint);
-            payload_set_err(err, errlen, "KV checkpoint token id is outside the vocabulary");
-            return 1;
+    } else {
+        for (uint32_t i = 0; i < rows; i++) {
+            uint32_t tok;
+            if (payload_read_u32(fp, &tok, remaining, err, errlen) != 0) {
+                token_vec_free(&new_checkpoint);
+                free(buf);
+                return 1;
+            }
+            if (tok >= DS4_N_VOCAB) {
+                token_vec_free(&new_checkpoint);
+                free(buf);
+                payload_set_err(err, errlen, "KV checkpoint token id is outside the vocabulary");
+                return 1;
+            }
+            token_vec_push(&new_checkpoint, (int)tok);
         }
-        token_vec_push(&new_checkpoint, (int)tok);
     }
     /* From the first write onward, failure must leave no reusable checkpoint.
      * Verifier snapshots belong to the old transcript, even at the same row. */
@@ -63016,12 +63132,20 @@ static int qwen4_session_load_payload_span(ds4_session *s, FILE *fp, const uint3
     s->glm_mtp_have = 0;
     s->glm_mtp_have2 = false;
     g->snap_valid = g->snap2_valid = g->snap0_valid = false;
-    if (payload_read_bytes(fp, s->logits, (uint64_t)DS4_N_VOCAB * sizeof(float), remaining, err, errlen) != 0) {
+    const int logits_rc = skip_overwritten
+        ? payload_seek_skip_bytes(fp, (uint64_t)DS4_N_VOCAB * sizeof(float),
+                                  buf, DS4_SESSION_IO_CHUNK,
+                                  remaining, err, errlen)
+        : payload_read_bytes(fp, s->logits, (uint64_t)DS4_N_VOCAB * sizeof(float),
+                             remaining, err, errlen);
+    if (logits_rc != 0) {
         token_vec_free(&new_checkpoint);
+        free(buf);
         return 1;
     }
     if (ds4_gpu_synchronize() == 0) {
         token_vec_free(&new_checkpoint);
+        free(buf);
         payload_set_err(err, errlen, "failed to synchronize accelerator before Qwen3.8 restore");
         return 1;
     }
@@ -63041,14 +63165,32 @@ static int qwen4_session_load_payload_span(ds4_session *s, FILE *fp, const uint3
         payload_set_err(err, errlen, "KV checkpoint MTP slice exceeds the delta span");
         rc = 1;
     }
-    uint8_t *buf = xmalloc(DS4_SESSION_IO_CHUNK);
+    /* Three-way agreement: the split's total (derived from the writer's
+     * estimator) must equal this file's stored payload size.  A mismatch
+     * means writer/reader layout drift or corruption - fail closed before
+     * seeking or reading a single tensor byte. */
+    ds4_qwen4_payload_split split;
+    ds4_qwen4_payload_link_split(rows, mtp_rows, rows_from, &split);
+    if (rc == 0 && split.total_bytes != payload_total) {
+        payload_set_err(err, errlen, "KV checkpoint payload size does not match its header");
+        rc = 1;
+    }
     for (uint32_t il = 0; rc == 0 && il < DS4_N_LAYER; il++) {
         if (ds4_qwen4_layer_is_linear(il)) {
-            rc = payload_read_tensor_span(fp, g->layer_lin_state[il], 0, qwen4_payload_lin_state_bytes(),
-                                          buf, DS4_SESSION_IO_CHUNK, remaining, err, errlen);
-            if (rc == 0) {
-                rc = payload_read_tensor_span(fp, g->layer_lin_hist[il], 0, qwen4_payload_lin_hist_bytes(),
+            if (skip_overwritten) {
+                /* state and hist are adjacent in the payload and land in the
+                 * same GPU tensors (offset 0) that the next link rewrites:
+                 * one seek covers both. */
+                rc = payload_seek_skip_bytes(fp,
+                        qwen4_payload_lin_state_bytes() + qwen4_payload_lin_hist_bytes(),
+                        buf, DS4_SESSION_IO_CHUNK, remaining, err, errlen);
+            } else {
+                rc = payload_read_tensor_span(fp, g->layer_lin_state[il], 0, qwen4_payload_lin_state_bytes(),
                                               buf, DS4_SESSION_IO_CHUNK, remaining, err, errlen);
+                if (rc == 0) {
+                    rc = payload_read_tensor_span(fp, g->layer_lin_hist[il], 0, qwen4_payload_lin_hist_bytes(),
+                                                  buf, DS4_SESSION_IO_CHUNK, remaining, err, errlen);
+                }
             }
         } else if (ds4_qwen4_layer_is_nextn(il)) {
             /* count == rows -> legacy whole-copy (or a full store): restore
@@ -63082,11 +63224,19 @@ static int qwen4_session_load_payload_span(ds4_session *s, FILE *fp, const uint3
                                                        buf, DS4_SESSION_IO_CHUNK, remaining, err, errlen);
         }
     }
-    if (rc == 0) {
+    if (rc == 0 && skip_overwritten) {
+        /* ple_hist + ple_prev + mrope are adjacent and terminal-wins; the
+         * terminal link revalidates every n-gram id. */
+        rc = payload_seek_skip_bytes(fp,
+                qwen4_payload_ple_hist_bytes() +
+                (uint64_t)DS4_MAX_PLE_NGRAM * sizeof(uint32_t) + sizeof(uint32_t),
+                buf, DS4_SESSION_IO_CHUNK, remaining, err, errlen);
+    }
+    if (rc == 0 && !skip_overwritten) {
         rc = payload_read_tensor_span(fp, g->ple_hist, 0, qwen4_payload_ple_hist_bytes(),
                                       buf, DS4_SESSION_IO_CHUNK, remaining, err, errlen);
     }
-    for (uint32_t i = 0; rc == 0 && i < DS4_MAX_PLE_NGRAM; i++) {
+    for (uint32_t i = 0; rc == 0 && !skip_overwritten && i < DS4_MAX_PLE_NGRAM; i++) {
         uint32_t v;
         rc = payload_read_u32(fp, &v, remaining, err, errlen);
         if (rc == 0 && v >= DS4_N_VOCAB) {
@@ -63095,7 +63245,7 @@ static int qwen4_session_load_payload_span(ds4_session *s, FILE *fp, const uint3
         }
         if (rc == 0) g->ple_prev[i] = (int)v;
     }
-    if (rc == 0) {
+    if (rc == 0 && !skip_overwritten) {
         uint32_t v;
         rc = payload_read_u32(fp, &v, remaining, err, errlen);
         if (rc == 0) g->mrope_delta = (int32_t)v;
@@ -63114,9 +63264,15 @@ static int qwen4_session_load_payload_span(ds4_session *s, FILE *fp, const uint3
     }
     g->pos = rows;
     g->mtp_pos = mtp_whole ? mtp_rows : rows_from + mtp_rows;
-    token_vec_free(&s->checkpoint);
-    s->checkpoint = new_checkpoint;
-    s->checkpoint_valid = true;
+    if (skip_overwritten) {
+        /* Intermediate link: session checkpoint and its validity belong to
+         * the terminal link, whose whole token array is the survivor. */
+        token_vec_free(&new_checkpoint);
+    } else {
+        token_vec_free(&s->checkpoint);
+        s->checkpoint = new_checkpoint;
+        s->checkpoint_valid = true;
+    }
     s->qwen4_rewound = false;
     return 0;
 }
@@ -63526,11 +63682,12 @@ bool ds4_session_supports_delta(const ds4_session *s) {
 }
 
 int ds4_session_load_payload(ds4_session *s, FILE *fp, uint64_t payload_bytes, char *err, size_t errlen) {
-    return ds4_session_load_payload_span(s, fp, payload_bytes, 0, err, errlen);
+    return ds4_session_load_payload_span(s, fp, payload_bytes, 0, true, err, errlen);
 }
 
 int ds4_session_load_payload_span(ds4_session *s, FILE *fp, uint64_t payload_bytes,
-                                  uint32_t rows_from, char *err, size_t errlen) {
+                                  uint32_t rows_from, bool terminal_link,
+                                  char *err, size_t errlen) {
     if (!s || !fp) {
         payload_set_err(err, errlen, "invalid session payload load");
         return 1;
@@ -63597,7 +63754,8 @@ int ds4_session_load_payload_span(ds4_session *s, FILE *fp, uint64_t payload_byt
         payload_set_err(err, errlen, "graph backend support is not compiled in");
         return 1;
 #else
-        return qwen4_session_load_payload_span(s, fp, h, &remaining, rows_from, err, errlen);
+        return qwen4_session_load_payload_span(s, fp, h, &remaining, rows_from,
+                                               terminal_link, err, errlen);
 #endif
     }
     if (ds4_session_is_glm(s)) {
