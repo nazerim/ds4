@@ -2032,6 +2032,7 @@ static int kv_store_pick_parent(ds4_kvstore *kc, ds4_engine *engine,
             if ((o->tokens % 4u) != 0u) continue;
             if (o->quant_bits != (uint8_t)quant_bits) continue;
             if (o->model_id != (uint8_t)model_id) continue;
+            if (o->model_fp && o->model_fp != kc->model_fp) continue;
             if (o->text_bytes == 0 || o->text_bytes > (uint64_t)text_len) continue;
             bool skipped = false;
             for (int k = 0; k < skip_len; k++)
@@ -2056,7 +2057,13 @@ static int kv_store_pick_parent(ds4_kvstore *kc, ds4_engine *engine,
             rej = "header";
             if (ds4_kvstore_read_header(fp, &ph, &ptb) &&
                 ph.tokens == o->tokens && ptb > 0 &&
-                (uint64_t)ptb <= (uint64_t)text_len) {
+                (uint64_t)ptb <= (uint64_t)text_len &&
+                /* Parent must carry the current weights' fingerprint: a
+                 * pre-swap parent has unchanged text + tokfp but old-weights
+                 * rows, and chaining onto it splices stale KV under fresh
+                 * (full-engine review H-1; same guard find_text_prefix_skip
+                 * and existing_compatible already apply to roots). */
+                (!ph.model_fp || ph.model_fp == kc->model_fp)) {
                 char *pt = kv_xmalloc((size_t)ptb + 1);
                 rej = "text-prefix";
                 bool text_ok = pt &&
@@ -2946,6 +2953,11 @@ static int kv_cache_try_load_one(ds4_kvstore *kc, ds4_engine *engine,
                 ph.tokens == cur.delta_from &&
                 ph.quant_bits == cur.quant_bits &&
                 ph.model_id == cur.model_id &&
+                /* H-1 load side: a child chained (by a pre-fix pick_parent)
+                 * onto a pre-swap parent would splice stale-weights rows
+                 * under the fresh child's.  Declining the chain falls back
+                 * to a cold rebuild; the child itself stays on disk. */
+                (!ph.model_fp || ph.model_fp == kc->model_fp) &&
                 ptb > 0 && (uint64_t)ptb <= (uint64_t)text_bytes) {
                 char *pt = kv_xmalloc((size_t)ptb + 1);
                 link_ok = pt &&
