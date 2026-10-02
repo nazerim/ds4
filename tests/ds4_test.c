@@ -6353,8 +6353,8 @@ static bool test_fill_local_golden_case(FILE *fp, test_local_golden_case *tc) {
             return false;
         }
         TEST_ASSERT(rank == seen);
-        TEST_ASSERT(seen < tc->ntop);
-        if (seen >= tc->ntop) return false;
+        TEST_ASSERT(seen < tc->ntop && seen < TEST_LOCAL_GOLDEN_MAX_TOP);
+        if (seen >= tc->ntop || seen >= TEST_LOCAL_GOLDEN_MAX_TOP) return false;
         tc->top[seen].id = id;
         tc->top[seen].logit = logit;
         seen++;
@@ -6388,11 +6388,18 @@ static float test_local_golden_max_abs(const test_local_golden_case *tc,
     return max_abs;
 }
 
-static void test_local_golden_case_run(ds4_engine *engine,
-                                       const test_local_golden_case *tc) {
+/*
+ * Replay one fixture case through a fresh session and return the full
+ * candidate logits at the frontier token (malloc'd, caller frees) with the
+ * top-k ids written to cand_top. NULL means the case could not run; the
+ * relevant assertions already fired.
+ */
+static float *test_local_golden_case_logits(ds4_engine *engine,
+                                            const test_local_golden_case *tc,
+                                            int *cand_top) {
     char *prompt_text = test_read_file(tc->prompt_path);
     TEST_ASSERT(prompt_text != NULL);
-    if (!prompt_text) return;
+    if (!prompt_text) return NULL;
 
     ds4_tokens prompt = {0};
     if (!strcmp(tc->mode, "text")) {
@@ -6403,12 +6410,14 @@ static void test_local_golden_case_run(ds4_engine *engine,
         ds4_encode_chat_prompt(engine, "", prompt_text, DS4_THINK_NONE, &prompt);
     } else {
         TEST_ASSERT(!"unknown local golden prompt mode");
+        free(prompt_text);
+        return NULL;
     }
     free(prompt_text);
     TEST_ASSERT(prompt.len >= tc->frontier);
     if (prompt.len < tc->frontier) {
         ds4_tokens_free(&prompt);
-        return;
+        return NULL;
     }
 
     ds4_tokens prefix = {
@@ -6421,7 +6430,7 @@ static void test_local_golden_case_run(ds4_engine *engine,
     TEST_ASSERT(ds4_session_create(&session, engine, tc->ctx) == 0);
     if (!session) {
         ds4_tokens_free(&prompt);
-        return;
+        return NULL;
     }
 
     char err[160];
@@ -6432,104 +6441,314 @@ static void test_local_golden_case_run(ds4_engine *engine,
     TEST_ASSERT(cand_logits != NULL);
     if (cand_logits &&
         ds4_session_copy_logits(session, cand_logits, vocab) == vocab) {
-        int cand_top[TEST_LOCAL_GOLDEN_MAX_TOP];
         const int ntop = tc->ntop < TEST_LOCAL_GOLDEN_MAX_TOP ?
                          tc->ntop : TEST_LOCAL_GOLDEN_MAX_TOP;
         test_logits_topk(cand_logits, vocab, cand_top, ntop);
-
-        const int top5_overlap = test_local_golden_overlap(tc, cand_top, 5);
-        const int top20_overlap = test_local_golden_overlap(tc, cand_top, 20);
-        const int top64_overlap = test_local_golden_overlap(tc, cand_top, 64);
-        const float top20_max_abs =
-            test_local_golden_max_abs(tc, cand_logits, 20);
-
-        fprintf(stderr,
-                "ds4-test: local golden %s top1 ref=%d cand=%d "
-                "top5_overlap=%d/5 top20_overlap=%d/20 top64_overlap=%d/64 "
-                "top20_max_abs=%g\n",
-                tc->id, tc->top[0].id, cand_top[0],
-                top5_overlap, top20_overlap, top64_overlap, top20_max_abs);
-
-        /*
-         * This is intentionally tolerant: it is meant to catch substantial
-         * backend drift (wrong tiling, skipped work, bad dispatch), not tiny
-         * floating-point differences from otherwise sane kernel changes.
-         */
-        TEST_ASSERT(cand_top[0] == tc->top[0].id);
-        TEST_ASSERT(top5_overlap >= 4);
-        TEST_ASSERT(top20_overlap >= 15);
-        TEST_ASSERT(top64_overlap >= 40);
-        TEST_ASSERT(top20_max_abs <= 8.0f);
     } else {
         TEST_ASSERT(false);
+        if (cand_logits) free(cand_logits);
+        cand_logits = NULL;
     }
 
-    free(cand_logits);
     ds4_session_free(session);
     ds4_tokens_free(&prompt);
+    return cand_logits;
+}
+
+static void test_local_golden_case_run(ds4_engine *engine,
+                                       const test_local_golden_case *tc) {
+    int cand_top[TEST_LOCAL_GOLDEN_MAX_TOP];
+    float *cand_logits = test_local_golden_case_logits(engine, tc, cand_top);
+    if (!cand_logits) return;
+
+    const int top5_overlap = test_local_golden_overlap(tc, cand_top, 5);
+    const int top20_overlap = test_local_golden_overlap(tc, cand_top, 20);
+    const int top64_overlap = test_local_golden_overlap(tc, cand_top, 64);
+    const float top20_max_abs = test_local_golden_max_abs(tc, cand_logits, 20);
+
+    fprintf(stderr,
+            "ds4-test: local golden %s top1 ref=%d cand=%d "
+            "top5_overlap=%d/5 top20_overlap=%d/20 top64_overlap=%d/64 "
+            "top20_max_abs=%g\n",
+            tc->id, tc->top[0].id, cand_top[0],
+            top5_overlap, top20_overlap, top64_overlap, top20_max_abs);
+
+    /*
+     * This is intentionally tolerant: it is meant to catch substantial
+     * backend drift (wrong tiling, skipped work, bad dispatch), not tiny
+     * floating-point differences from otherwise sane kernel changes.
+     */
+    TEST_ASSERT(cand_top[0] == tc->top[0].id);
+    TEST_ASSERT(top5_overlap >= 4);
+    TEST_ASSERT(top20_overlap >= 15);
+    TEST_ASSERT(top64_overlap >= 40);
+    TEST_ASSERT(top20_max_abs <= 8.0f);
+
+    free(cand_logits);
+}
+
+static bool test_local_golden_case_capture(ds4_engine *engine,
+                                           const test_local_golden_case *tc,
+                                           FILE *out) {
+    /* The reader's ntop clamp asserts non-fatally; refuse to emit past the
+     * cand_top array on a hand-corrupted input fixture. */
+    TEST_ASSERT(tc->ntop <= TEST_LOCAL_GOLDEN_MAX_TOP);
+    if (tc->ntop > TEST_LOCAL_GOLDEN_MAX_TOP) return false;
+    int cand_top[TEST_LOCAL_GOLDEN_MAX_TOP];
+    float *cand_logits = test_local_golden_case_logits(engine, tc, cand_top);
+    if (!cand_logits) return false;
+
+    fprintf(out, "case %s %s %d %d %s %d\n", tc->id, tc->mode, tc->ctx,
+            tc->frontier, tc->prompt_path, tc->ntop);
+    for (int i = 0; i < tc->ntop; i++) {
+        /* %.9g round-trips a float bit-exactly; the reader parses %f. */
+        fprintf(out, "top %d %d %.9g\n", i, cand_top[i],
+                cand_logits[cand_top[i]]);
+    }
+    fputs("end\n", out);
+    free(cand_logits);
+    return true;
+}
+
+static void test_local_golden_verify(ds4_engine *engine, const char *path) {
+    FILE *fp = fopen(path, "rb");
+    TEST_ASSERT(fp != NULL);
+    if (!fp) return;
+    test_local_golden_case tc;
+    while (test_read_local_golden_case(fp, &tc)) {
+        if (!test_fill_local_golden_case(fp, &tc)) break;
+        test_local_golden_case_run(engine, &tc);
+    }
+    fclose(fp);
 }
 
 /*
- * The upstream fixture was captured from the 0731 Q2 imatrix GGUF. Running
- * it against different weights (our default ds4flash.gguf is a symlink to
- * Vision-Exp) reports that foreign checkpoint as drift, so the test only
- * runs when the operator pins DS4_TEST_LOCAL_GOLDEN_MODEL to the same model
- * DS4_TEST_MODEL loads. Paths compare by realpath so symlinked or relative
- * spellings of one file still match.
+ * Capture records the fixture's model in a "# model <path>" header comment
+ * (readers ignore # lines, so the upstream grammar is unchanged). Verify
+ * runs only when the loaded model matches: the header for fixtures that
+ * carry one, else the DS4_TEST_LOCAL_GOLDEN_MODEL anchor the upstream
+ * fixture needs. realpath comparison tolerates symlinks and relative
+ * spellings of the same file.
  */
-static bool test_local_golden_model_pinned(void) {
-    const char *want = getenv("DS4_TEST_LOCAL_GOLDEN_MODEL");
+static bool test_local_golden_fixture_model(const char *path, char *out,
+                                            size_t n) {
+    out[0] = '\0';
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return false;
+    char line[2048];
+    while (fgets(line, sizeof(line), fp)) {
+        char *p = test_trim_line(line);
+        if (!p[0]) continue;
+        if (p[0] != '#') break;
+        char model[512];
+        if (sscanf(p, "# model %511s", model) == 1 && !out[0])
+            snprintf(out, n, "%s", model);
+    }
+    fclose(fp);
+    return out[0] != '\0';
+}
+
+static bool test_local_golden_model_match(const char *want) {
     if (!want || !want[0]) return false;
     char a[PATH_MAX], b[PATH_MAX];
     if (!realpath(want, a) || !realpath(test_model_path(), b)) return false;
     return strcmp(a, b) == 0;
 }
 
-static void test_local_golden_vectors(void) {
-    if (!test_local_golden_model_pinned()) {
-        puts("local-golden-vectors: fixture model not pinned "
-             "(DS4_TEST_LOCAL_GOLDEN_MODEL must match DS4_TEST_MODEL), skipped");
-        return;
-    }
+static const char *test_local_golden_path(void) {
     const char *path = getenv("DS4_TEST_LOCAL_GOLDEN_FILE");
-    if (!path || !path[0]) {
+    if (!path || !path[0])
         path = "tests/test-vectors/flash-0731/local-golden.vec";
-    }
-    FILE *fp = fopen(path, "rb");
-    TEST_ASSERT(fp != NULL);
-    if (!fp) return;
+    return path;
+}
 
-    char *saved_prefill_chunk = test_save_env("DS4_METAL_PREFILL_CHUNK");
-    char *saved_disable_metal4 = test_save_env("DS4_METAL_DISABLE_METAL4");
-    char *saved_moe_tile_max = test_save_env("DS4_METAL_MOE_TILE_MAX");
-    test_streaming_prefill_env saved_canonical_streaming_prefill =
-        test_force_canonical_streaming_prefill();
+/* Record the model for the "# model" header: repo-relative when the
+ * resolved file lives under the cwd (keeps fixtures portable), else the
+ * absolute realpath so a symlinked name can't silently retarget later. */
+static void test_local_golden_record_model(char *out, size_t n) {
+    const char *model = test_model_path();
+    char resolved[PATH_MAX], cwd[PATH_MAX];
+    if (realpath(model, resolved) && getcwd(cwd, sizeof(cwd))) {
+        const size_t clen = strlen(cwd);
+        if (!strncmp(resolved, cwd, clen) && resolved[clen] == '/') {
+            snprintf(out, n, "%s", resolved + clen + 1);
+            return;
+        }
+    }
+    snprintf(out, n, "%s", model);
+}
+
+static void test_local_golden_apply_canonical_env(char **saved_prefill_chunk,
+                                                  char **saved_disable_metal4,
+                                                  char **saved_moe_tile_max,
+                                                  test_streaming_prefill_env *saved_streaming) {
+    *saved_prefill_chunk = test_save_env("DS4_METAL_PREFILL_CHUNK");
+    *saved_disable_metal4 = test_save_env("DS4_METAL_DISABLE_METAL4");
+    *saved_moe_tile_max = test_save_env("DS4_METAL_MOE_TILE_MAX");
+    *saved_streaming = test_force_canonical_streaming_prefill();
     setenv("DS4_METAL_PREFILL_CHUNK", "4096", 1);
     setenv("DS4_METAL_DISABLE_METAL4", "1", 1);
     unsetenv("DS4_METAL_MOE_TILE_MAX");
+}
 
-    ds4_engine *engine = test_open_engine(false);
-    if (!engine) {
-        test_restore_canonical_streaming_prefill(saved_canonical_streaming_prefill);
-        test_restore_env("DS4_METAL_MOE_TILE_MAX", saved_moe_tile_max);
-        test_restore_env("DS4_METAL_DISABLE_METAL4", saved_disable_metal4);
-        test_restore_env("DS4_METAL_PREFILL_CHUNK", saved_prefill_chunk);
-        fclose(fp);
-        return;
-    }
-
-    test_local_golden_case tc;
-    while (test_read_local_golden_case(fp, &tc)) {
-        if (!test_fill_local_golden_case(fp, &tc)) break;
-        test_local_golden_case_run(engine, &tc);
-    }
-
-    ds4_engine_close(engine);
-    test_restore_canonical_streaming_prefill(saved_canonical_streaming_prefill);
+static void test_local_golden_restore_canonical_env(char *saved_prefill_chunk,
+                                                    char *saved_disable_metal4,
+                                                    char *saved_moe_tile_max,
+                                                    test_streaming_prefill_env saved_streaming) {
+    test_restore_canonical_streaming_prefill(saved_streaming);
     test_restore_env("DS4_METAL_MOE_TILE_MAX", saved_moe_tile_max);
     test_restore_env("DS4_METAL_DISABLE_METAL4", saved_disable_metal4);
     test_restore_env("DS4_METAL_PREFILL_CHUNK", saved_prefill_chunk);
-    fclose(fp);
+}
+
+/*
+ * Fork-versioned golden capture: replays the input fixture's case prompts
+ * through the canonical streaming prefill path and writes a fixture for the
+ * model DS4_TEST_MODEL points at, stamped with a "# model" header. Requires
+ * the engine stopped. The freshly written file is re-verified against the
+ * same engine before closing (capture->verify no-op pin): a bad emit
+ * grammar or a nondeterministic run fails the capture itself, and the
+ * verify guard self-activates on the correct model without extra env.
+ */
+static void test_local_golden_capture(void) {
+    const char *out_path = getenv("DS4_TEST_LOCAL_GOLDEN_CAPTURE");
+    if (!out_path || !out_path[0]) {
+        TEST_ASSERT(!"local-golden-capture: DS4_TEST_LOCAL_GOLDEN_CAPTURE=FILE required");
+        return;
+    }
+    const char *in_path = test_local_golden_path();
+    char in_real[PATH_MAX], out_real[PATH_MAX];
+    const bool same_path = strcmp(in_path, out_path) == 0 ||
+        (realpath(in_path, in_real) && realpath(out_path, out_real) &&
+         strcmp(in_real, out_real) == 0);
+    TEST_ASSERT(!same_path);
+    if (same_path) return;
+    FILE *in = fopen(in_path, "rb");
+    TEST_ASSERT(in != NULL);
+    if (!in) return;
+
+    char *saved_prefill_chunk;
+    char *saved_disable_metal4;
+    char *saved_moe_tile_max;
+    test_streaming_prefill_env saved_canonical_streaming_prefill;
+    test_local_golden_apply_canonical_env(&saved_prefill_chunk,
+                                          &saved_disable_metal4,
+                                          &saved_moe_tile_max,
+                                          &saved_canonical_streaming_prefill);
+
+    ds4_engine *engine = test_open_engine(false);
+    if (!engine) {
+        test_local_golden_restore_canonical_env(saved_prefill_chunk,
+                                                saved_disable_metal4,
+                                                saved_moe_tile_max,
+                                                saved_canonical_streaming_prefill);
+        fclose(in);
+        return;
+    }
+
+    /* Build into <out>.tmp and only rename over the destination once the
+     * capture AND its verify pin are clean: a failing capture must leave the
+     * previous good fixture in place. */
+    char tmp_path[PATH_MAX + 8];
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", out_path);
+    FILE *out = fopen(tmp_path, "wb");
+    TEST_ASSERT(out != NULL);
+    if (!out) {
+        ds4_engine_close(engine);
+        test_local_golden_restore_canonical_env(saved_prefill_chunk,
+                                                saved_disable_metal4,
+                                                saved_moe_tile_max,
+                                                saved_canonical_streaming_prefill);
+        fclose(in);
+        return;
+    }
+    const int failures_before = test_failures;
+
+    char model[512];
+    test_local_golden_record_model(model, sizeof(model));
+    fputs("# ds4-local-golden-v1\n", out);
+    fprintf(out, "# captured by ds4_test --local-golden-capture from %s.\n", model);
+    fprintf(out, "# model %s\n", model);
+    fputs("# ('# model' resolves relative to the cwd; run ds4_test from the repo root)\n", out);
+    fputs("# case <id> <mode> <ctx> <frontier> <prompt-file> <top-count>\n", out);
+    fputs("# top <rank> <token-id> <logit>\n", out);
+
+    int cases = 0;
+    test_local_golden_case tc;
+    while (test_read_local_golden_case(in, &tc)) {
+        if (!test_fill_local_golden_case(in, &tc)) break;
+        if (test_local_golden_case_capture(engine, &tc, out)) cases++;
+    }
+    fclose(in);
+    TEST_ASSERT(cases > 0);
+    if (ferror(out)) {
+        TEST_ASSERT(!"local-golden-capture: write error");
+        fclose(out);
+        ds4_engine_close(engine);
+        test_local_golden_restore_canonical_env(saved_prefill_chunk,
+                                                saved_disable_metal4,
+                                                saved_moe_tile_max,
+                                                saved_canonical_streaming_prefill);
+        return;
+    }
+    fclose(out);
+    /* Capture->verify no-op pin: the freshly written fixture must pass its
+     * own thresholds against the still-open engine, or the emit grammar or
+     * the backend determinism broke. */
+    if (cases > 0) test_local_golden_verify(engine, tmp_path);
+    if (cases > 0 && test_failures == failures_before) {
+        if (rename(tmp_path, out_path) != 0) {
+            perror("local-golden-capture: rename");
+            TEST_ASSERT(false);
+        }
+    } else {
+        fprintf(stderr, "local-golden-capture: fixture not installed, "
+                "candidate kept at %s\n", tmp_path);
+    }
+
+    ds4_engine_close(engine);
+    test_local_golden_restore_canonical_env(saved_prefill_chunk,
+                                            saved_disable_metal4,
+                                            saved_moe_tile_max,
+                                            saved_canonical_streaming_prefill);
+}
+
+static void test_local_golden_vectors(void) {
+    const char *path = test_local_golden_path();
+    FILE *probe = fopen(path, "rb");
+    TEST_ASSERT(probe != NULL);
+    if (probe) fclose(probe);
+    else return;
+    char want[PATH_MAX];
+    if (!test_local_golden_fixture_model(path, want, sizeof(want))) {
+        const char *anchor = getenv("DS4_TEST_LOCAL_GOLDEN_MODEL");
+        if (anchor && anchor[0]) snprintf(want, sizeof(want), "%s", anchor);
+    }
+    if (!test_local_golden_model_match(want)) {
+        puts("local-golden-vectors: fixture model not loaded "
+             "(# model header or DS4_TEST_LOCAL_GOLDEN_MODEL must match DS4_TEST_MODEL), skipped");
+        return;
+    }
+
+    char *saved_prefill_chunk;
+    char *saved_disable_metal4;
+    char *saved_moe_tile_max;
+    test_streaming_prefill_env saved_canonical_streaming_prefill;
+    test_local_golden_apply_canonical_env(&saved_prefill_chunk,
+                                          &saved_disable_metal4,
+                                          &saved_moe_tile_max,
+                                          &saved_canonical_streaming_prefill);
+
+    ds4_engine *engine = test_open_engine(false);
+    if (engine) {
+        test_local_golden_verify(engine, path);
+        ds4_engine_close(engine);
+    }
+
+    test_local_golden_restore_canonical_env(saved_prefill_chunk,
+                                            saved_disable_metal4,
+                                            saved_moe_tile_max,
+                                            saved_canonical_streaming_prefill);
 }
 
 #define TEST_MPP_EQ_MAX_CASES 8
@@ -7702,34 +7921,36 @@ typedef struct {
     const char *name;
     const char *desc;
     test_fn fn;
+    bool opt_in; /* set: excluded from --all (side-effecting tools) */
 } ds4_test_entry;
 
 static const ds4_test_entry test_entries[] = {
 #ifndef DS4_NO_GPU
-    {"--qwen4-prefill-checkpoints", "qwen4-prefill-checkpoints", "Qwen chunk checkpoints restore matching logits and state", test_qwen_prefill_checkpoints},
-    {"--kv-delta", "kv-delta", "Qwen delta-chained continued stores match full checkpoints", test_kv_delta_parity},
-    {"--qwen4-restore-reuse", "qwen4-restore-reuse", "Qwen restore discards old verifier state and rejects truncated payloads", test_qwen_restore_reused_session},
-    {"--session-snapshot", "session-snapshot", "session snapshot and recurrent-state round trip", test_session_snapshot_roundtrip},
-    {"--session-rewind", "session-rewind", "Qwen3.8 rewind by snapshot restore and by replay", test_session_rewind_replay},
-    {"--session-rewind-resample", "session-rewind-resample", "exact-sampling tool-boundary resample rewind restores the block-start state", test_session_rewind_resample_boundary},
-    {"--long-context", "long-context", "long-context story fact-recall regression", test_long_story_fact_recall},
-    {"--tool-call-quality", "tool-call-quality", "model tool call and post-result stop regression", test_tool_call_quality},
-    {"--think-tool-recovery", "think-tool-recovery", "recover a complete tool call emitted inside unclosed reasoning", test_think_tool_recovery},
-    {"--logprob-vectors", "logprob-vectors", "official API top-logprob vector comparison on the standard Metal path", test_official_logprob_vectors},
-    {"--metal-ssd-streaming-cache-pressure", "metal-ssd-streaming-cache-pressure", "Metal SSD-streaming layer-batched decode cache-pressure repro for issue #384", test_metal_ssd_streaming_cache_pressure},
-    {"--local-golden-vectors", "local-golden-vectors", "local top-k/logit drift regression for long Metal prefill", test_local_golden_vectors},
-    {"--metal-short-prefill", "metal-short-prefill", "Metal ratio-4 short prefill regression", test_metal_short_prefill_ratio4},
-    {"--glm53-continued-prefill", "glm53-continued-prefill", "GLM 5.3 resumed prefill latency, throughput, progress, and cold-path agreement", test_glm53_continued_prefill},
-    {"--metal-kernels", "metal-kernels", "isolated Metal kernel numeric regressions", test_metal_kernel_group},
-    {"--metal-tensor-equivalence", "metal-tensor-equivalence", "fast/quality Metal prompt-logit and greedy equivalence", test_metal_mpp_equivalence},
-    {"--streaming-decode-prefill-correctness", "streaming-decode-prefill-correctness", "streaming decode-style cold prefill drift and repeatability", test_streaming_decode_prefill_correctness},
-    {"--mtp-verify-depth", "mtp-verify-depth", "MTP speculative verify commits autoregressive-identical tokens at draft depth > 2", test_mtp_verify_depth},
-    {"--dspark-verify-depth", "dspark-verify-depth", "DSpark speculative verify commits autoregressive-identical tokens at draft depth > 2", test_dspark_verify_depth},
-    {"--dsml-token-suppression", "dsml-token-suppression", "ds4_session_sample_excluding never returns the excluded DSML token id", test_dsml_token_suppression_excludes_id},
+    {"--qwen4-prefill-checkpoints", "qwen4-prefill-checkpoints", "Qwen chunk checkpoints restore matching logits and state", test_qwen_prefill_checkpoints, false},
+    {"--kv-delta", "kv-delta", "Qwen delta-chained continued stores match full checkpoints", test_kv_delta_parity, false},
+    {"--qwen4-restore-reuse", "qwen4-restore-reuse", "Qwen restore discards old verifier state and rejects truncated payloads", test_qwen_restore_reused_session, false},
+    {"--session-snapshot", "session-snapshot", "session snapshot and recurrent-state round trip", test_session_snapshot_roundtrip, false},
+    {"--session-rewind", "session-rewind", "Qwen3.8 rewind by snapshot restore and by replay", test_session_rewind_replay, false},
+    {"--session-rewind-resample", "session-rewind-resample", "exact-sampling tool-boundary resample rewind restores the block-start state", test_session_rewind_resample_boundary, false},
+    {"--long-context", "long-context", "long-context story fact-recall regression", test_long_story_fact_recall, false},
+    {"--tool-call-quality", "tool-call-quality", "model tool call and post-result stop regression", test_tool_call_quality, false},
+    {"--think-tool-recovery", "think-tool-recovery", "recover a complete tool call emitted inside unclosed reasoning", test_think_tool_recovery, false},
+    {"--logprob-vectors", "logprob-vectors", "official API top-logprob vector comparison on the standard Metal path", test_official_logprob_vectors, false},
+    {"--metal-ssd-streaming-cache-pressure", "metal-ssd-streaming-cache-pressure", "Metal SSD-streaming layer-batched decode cache-pressure repro for issue #384", test_metal_ssd_streaming_cache_pressure, false},
+    {"--local-golden-vectors", "local-golden-vectors", "local top-k/logit drift regression for long Metal prefill", test_local_golden_vectors, false},
+    {"--local-golden-capture", "local-golden-capture", "write a golden fixture for DS4_TEST_MODEL to DS4_TEST_LOCAL_GOLDEN_CAPTURE, then verify it", test_local_golden_capture, true},
+    {"--metal-short-prefill", "metal-short-prefill", "Metal ratio-4 short prefill regression", test_metal_short_prefill_ratio4, false},
+    {"--glm53-continued-prefill", "glm53-continued-prefill", "GLM 5.3 resumed prefill latency, throughput, progress, and cold-path agreement", test_glm53_continued_prefill, false},
+    {"--metal-kernels", "metal-kernels", "isolated Metal kernel numeric regressions", test_metal_kernel_group, false},
+    {"--metal-tensor-equivalence", "metal-tensor-equivalence", "fast/quality Metal prompt-logit and greedy equivalence", test_metal_mpp_equivalence, false},
+    {"--streaming-decode-prefill-correctness", "streaming-decode-prefill-correctness", "streaming decode-style cold prefill drift and repeatability", test_streaming_decode_prefill_correctness, false},
+    {"--mtp-verify-depth", "mtp-verify-depth", "MTP speculative verify commits autoregressive-identical tokens at draft depth > 2", test_mtp_verify_depth, false},
+    {"--dspark-verify-depth", "dspark-verify-depth", "DSpark speculative verify commits autoregressive-identical tokens at draft depth > 2", test_dspark_verify_depth, false},
+    {"--dsml-token-suppression", "dsml-token-suppression", "ds4_session_sample_excluding never returns the excluded DSML token id", test_dsml_token_suppression_excludes_id, false},
 #endif
-    {"--server", "server", "server parser/rendering/cache unit tests", test_server_unit_group},
-    {"--kv-head-divergence", "kv-head-divergence", "synthetic AGENTS.md head-divergence anchor-depth regression (see DS4FORK.md KVCACHE — Deep Divergence Investigation)", test_kv_cache_head_divergence_anchor_depth},
-    {"--mtp-slice", "mtp-slice", "exhaustive model-free sweep of the V2 nextn-slice row formula (C1 regression pin)", test_mtp_slice_formula},
+    {"--server", "server", "server parser/rendering/cache unit tests", test_server_unit_group, false},
+    {"--kv-head-divergence", "kv-head-divergence", "synthetic AGENTS.md head-divergence anchor-depth regression (see DS4FORK.md KVCACHE — Deep Divergence Investigation)", test_kv_cache_head_divergence_anchor_depth, false},
+    {"--mtp-slice", "mtp-slice", "exhaustive model-free sweep of the V2 nextn-slice row formula (C1 regression pin)", test_mtp_slice_formula, false},
 };
 
 static void test_print_help(const char *prog) {
@@ -7752,6 +7973,10 @@ static void test_print_help(const char *prog) {
     puts("  --kv-head-divergence");
     puts("      Synthetic AGENTS.md head-divergence anchor-depth regression.");
     puts("      Not part of --server; run explicitly (fast, no model needed).");
+    puts("  --local-golden-capture");
+    puts("      Capture golden vectors for DS4_TEST_MODEL into");
+    puts("      DS4_TEST_LOCAL_GOLDEN_CAPTURE and verify the fresh fixture.");
+    puts("      Needs the engine stopped; rewrites files; never part of --all.");
     puts("\nEnvironment:");
     puts("  DS4_TEST_MODEL=FILE        Model path. Default: ds4flash.gguf");
     puts("  DS4_TEST_BACKEND=cpu       Run model tests on CPU instead of Metal/CUDA.");
@@ -7766,7 +7991,8 @@ static void test_print_help(const char *prog) {
     puts("  DS4_TEST_LONG_PROMPT=FILE  Rendered long-context story fact prompt.");
     puts("  DS4_TEST_VECTOR_FILE=FILE  Official fixture. Default: flash-0731/official.vec.");
     puts("  DS4_TEST_LOCAL_GOLDEN_FILE=FILE  Local fixture. Default: flash-0731/local-golden.vec.");
-    puts("  DS4_TEST_LOCAL_GOLDEN_MODEL=FILE  Fixture's model. Required, must match DS4_TEST_MODEL, else the test skips.");
+    puts("  DS4_TEST_LOCAL_GOLDEN_MODEL=FILE  Fixture's model, for fixtures without a '# model' header. Must match DS4_TEST_MODEL, else the test skips.");
+    puts("  DS4_TEST_LOCAL_GOLDEN_CAPTURE=FILE  Output fixture for --local-golden-capture.");
     puts("  DS4_TEST_MPP_EQ_CASE=NAME  Run only Tensor equivalence cases whose id contains NAME.");
     puts("  DS4_TEST_MTP=FILE         Legacy MTP support GGUF for --mtp-verify-depth.");
     puts("  DS4_TEST_DSPARK=FILE      DSpark support GGUF for --dspark-verify-depth.");
@@ -7844,6 +8070,7 @@ int main(int argc, char **argv) {
 
     if (run_all) {
         for (size_t i = 0; i < sizeof(test_entries) / sizeof(test_entries[0]); i++) {
+            if (test_entries[i].opt_in) continue;
             test_run_entry(&test_entries[i]);
         }
     } else {
