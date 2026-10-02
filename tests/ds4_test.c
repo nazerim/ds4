@@ -4,6 +4,8 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <stdlib.h>
+#include <limits.h>
 #include "../ds4_server.c"
 #ifndef DS4_NO_GPU
 #include "../ds4_gpu.h"
@@ -6467,7 +6469,28 @@ static void test_local_golden_case_run(ds4_engine *engine,
     ds4_tokens_free(&prompt);
 }
 
+/*
+ * The upstream fixture was captured from the 0731 Q2 imatrix GGUF. Running
+ * it against different weights (our default ds4flash.gguf is a symlink to
+ * Vision-Exp) reports that foreign checkpoint as drift, so the test only
+ * runs when the operator pins DS4_TEST_LOCAL_GOLDEN_MODEL to the same model
+ * DS4_TEST_MODEL loads. Paths compare by realpath so symlinked or relative
+ * spellings of one file still match.
+ */
+static bool test_local_golden_model_pinned(void) {
+    const char *want = getenv("DS4_TEST_LOCAL_GOLDEN_MODEL");
+    if (!want || !want[0]) return false;
+    char a[PATH_MAX], b[PATH_MAX];
+    if (!realpath(want, a) || !realpath(test_model_path(), b)) return false;
+    return strcmp(a, b) == 0;
+}
+
 static void test_local_golden_vectors(void) {
+    if (!test_local_golden_model_pinned()) {
+        puts("local-golden-vectors: fixture model not pinned "
+             "(DS4_TEST_LOCAL_GOLDEN_MODEL must match DS4_TEST_MODEL), skipped");
+        return;
+    }
     const char *path = getenv("DS4_TEST_LOCAL_GOLDEN_FILE");
     if (!path || !path[0]) {
         path = "tests/test-vectors/flash-0731/local-golden.vec";
@@ -7743,6 +7766,7 @@ static void test_print_help(const char *prog) {
     puts("  DS4_TEST_LONG_PROMPT=FILE  Rendered long-context story fact prompt.");
     puts("  DS4_TEST_VECTOR_FILE=FILE  Official fixture. Default: flash-0731/official.vec.");
     puts("  DS4_TEST_LOCAL_GOLDEN_FILE=FILE  Local fixture. Default: flash-0731/local-golden.vec.");
+    puts("  DS4_TEST_LOCAL_GOLDEN_MODEL=FILE  Fixture's model. Required, must match DS4_TEST_MODEL, else the test skips.");
     puts("  DS4_TEST_MPP_EQ_CASE=NAME  Run only Tensor equivalence cases whose id contains NAME.");
     puts("  DS4_TEST_MTP=FILE         Legacy MTP support GGUF for --mtp-verify-depth.");
     puts("  DS4_TEST_DSPARK=FILE      DSpark support GGUF for --dspark-verify-depth.");
