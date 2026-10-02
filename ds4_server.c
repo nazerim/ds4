@@ -15623,6 +15623,10 @@ decode_again:
     size_t stop_scan_from = 0;
     const char *finish = "length";
     int completion = 0;
+    /* Hoisted out of the token loop: environ does not change mid-request, and
+     * the per-token getenv scan showed up in the #3975-analog audit
+     * (.codebase-memory/TOKENIZER-AUDIT-20261003.md fix #5). */
+    const bool mtp_spec_disabled = getenv("DS4_MTP_SPEC_DISABLE") != NULL;
     int room = ds4_session_ctx(slot->session) - ds4_session_pos(slot->session);
     int max_tokens = server_decode_budget(j->req.max_tokens,
                                           recovery_completion, room);
@@ -15709,7 +15713,7 @@ decode_again:
         if (!s->batched_mode &&
             dsml_token_id < 0 &&
             ds4_engine_mtp_draft_tokens(s->engine) > 1 &&
-            getenv("DS4_MTP_SPEC_DISABLE") == NULL)
+            !mtp_spec_disabled)
         {
             if (j->req.ignore_eos) {
                 ntok = ds4_session_eval_speculative_argmax_ignoring_eos(
@@ -15731,7 +15735,7 @@ decode_again:
         } else if (s->batched_mode && s->qwen4_batch_mtp &&
                    max_tokens - completion >= 2 && !j->req.ignore_eos &&
                    (!ds4_engine_mtp_exact_sampling(s->engine) || temperature == 0.0f) &&
-                   getenv("DS4_MTP_SPEC_DISABLE") == NULL) {
+                   !mtp_spec_disabled) {
             if (server_eval_tokens(s, slot, token, true, toks, &ntok, err, sizeof(err)) != 0) {
                 finish = "error";
                 break;

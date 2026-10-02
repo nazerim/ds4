@@ -42570,20 +42570,43 @@ static void utf8_put(char **p, uint32_t cp) {
     }
 }
 
-static uint32_t gpt2_byte_to_codepoint(uint8_t b) {
-    if ((b >= 33 && b <= 126) || (b >= 161 && b <= 172) || (b >= 174)) {
-        return b;
-    }
+/* GPT-2 byte-level BPE maps raw bytes to printable codepoints so merges can
+ * operate on UTF-8 strings without losing byte identity.  The mapping is a
+ * process constant: printable bytes (33-126, 161-172, 174-255) map to
+ * themselves; the other 68 bytes (0-32, 127-160, 173) map to 256 + their
+ * ascending index among the non-printables.  Both directions used to
+ * recompute this with an O(256) scan per byte/codepoint on every
+ * tokenization and detokenization (~130-170 iterations per UTF-8
+ * continuation byte); the tables below are the same values, exhaustively
+ * cross-checked against the old scans over the full input domains
+ * (.codebase-memory/TOKENIZER-AUDIT-20261003.md fixes #1). */
+static const uint16_t gpt2_b2cp[256] = {
+    256, 257, 258, 259, 260, 261, 262, 263, 264, 265, 266, 267, 268, 269, 270, 271,
+    272, 273, 274, 275, 276, 277, 278, 279, 280, 281, 282, 283, 284, 285, 286, 287,
+    288, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
+    48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63,
+    64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79,
+    80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95,
+    96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111,
+    112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 289,
+    290, 291, 292, 293, 294, 295, 296, 297, 298, 299, 300, 301, 302, 303, 304, 305,
+    306, 307, 308, 309, 310, 311, 312, 313, 314, 315, 316, 317, 318, 319, 320, 321,
+    322, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 323, 174, 175,
+    176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191,
+    192, 193, 194, 195, 196, 197, 198, 199, 200, 201, 202, 203, 204, 205, 206, 207,
+    208, 209, 210, 211, 212, 213, 214, 215, 216, 217, 218, 219, 220, 221, 222, 223,
+    224, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239,
+    240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253, 254, 255,
+};
+static const uint8_t gpt2_cp2b[68] = {
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+    17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 127,
+    128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144,
+    145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 173,
+};
 
-    uint32_t n = 0;
-    for (uint32_t x = 0; x < 256; x++) {
-        if ((x >= 33 && x <= 126) || (x >= 161 && x <= 172) || (x >= 174)) {
-            continue;
-        }
-        if (x == b) return 256 + n;
-        n++;
-    }
-    return b;
+static uint32_t gpt2_byte_to_codepoint(uint8_t b) {
+    return gpt2_b2cp[b];
 }
 
 /* GPT-2 byte-level BPE first maps raw bytes to printable Unicode codepoints
@@ -43851,17 +43874,14 @@ static uint32_t utf8_decode_one(const char *s, uint64_t len, uint64_t *pos) {
 }
 
 static int gpt2_codepoint_to_byte(uint32_t cp) {
-    if ((cp >= 33 && cp <= 126) || (cp >= 161 && cp <= 172) || (cp >= 174 && cp <= 255)) {
-        return (int)cp;
-    }
-
-    uint32_t n = 0;
-    for (uint32_t b = 0; b < 256; b++) {
-        if ((b >= 33 && b <= 126) || (b >= 161 && b <= 172) || (b >= 174)) {
-            continue;
+    if (cp < 256) {
+        if ((cp >= 33 && cp <= 126) || (cp >= 161 && cp <= 172) || cp >= 174) {
+            return (int)cp;
         }
-        if (cp == 256 + n) return (int)b;
-        n++;
+        return -1; /* non-printable cp < 256 is never a mapped codepoint */
+    }
+    if (cp < 256 + (uint32_t)(sizeof(gpt2_cp2b) / sizeof(gpt2_cp2b[0]))) {
+        return (int)gpt2_cp2b[cp - 256];
     }
     return -1;
 }
