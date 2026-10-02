@@ -168,6 +168,11 @@ typedef struct {
     ds4_kvstore_text_ref *text_refs;
     int text_ref_len;
     int text_ref_cap;
+    /* Total cached text bytes (sum of text_refs[i].text_len+1), bounded by
+     * KV_TEXT_CACHE_MAX_BYTES in ds4_kvstore.c: oldest refs are dropped FIFO
+     * when the cap is exceeded (pure cache: a dropped ref is re-read from
+     * disk on next use; never a correctness loss). */
+    size_t text_ref_bytes;
     /* Lifetime store telemetry, logged every KV_STORE_STATS_EVERY stores and at
      * close.  The point is to answer "is chaining actually saving space, and how
      * fast is this cache growing" from the log, instead of needing an offline

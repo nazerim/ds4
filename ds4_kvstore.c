@@ -44,6 +44,9 @@
 #define KV_CACHE_DEFAULT_BOUNDARY_ALIGN_TOKENS 2048
 #define KV_CACHE_DEFAULT_CONTINUED_INTERVAL_TOKENS 10000
 
+/* Hard cap on the sha-keyed text cache (see kv_cache_entry_text). */
+#define KV_TEXT_CACHE_MAX_BYTES (256ull << 20)
+
 typedef struct {
     char *ptr;
     size_t len;
@@ -766,9 +769,22 @@ bool ds4_kvstore_touch_file(const char *path, uint32_t hits, bool stale,
 
 /* -- sha-keyed text cache (files are content-addressed; text is immutable) -- */
 
+/* LRU: a hit is promoted to the tail (the freshest slot), so the two most
+ * recently fetched texts always sit at refs[len-1] and refs[len-2].  The
+ * cap eviction (see kv_cache_entry_text) protects exactly those two slots —
+ * that is what makes the rel_build pattern "fetch at, fetch dt, then use
+ * at" safe: at is never behind the evictable head. */
 static ds4_kvstore_text_ref *kv_text_ref_find(ds4_kvstore *kc, const char sha[41]) {
-    for (int i = 0; i < kc->text_ref_len; i++)
-        if (memcmp(kc->text_refs[i].sha, sha, 41) == 0) return &kc->text_refs[i];
+    for (int i = 0; i < kc->text_ref_len; i++) {
+        if (memcmp(kc->text_refs[i].sha, sha, 41) != 0) continue;
+        if (i != kc->text_ref_len - 1) {
+            ds4_kvstore_text_ref promoted = kc->text_refs[i];
+            memmove(&kc->text_refs[i], &kc->text_refs[i + 1],
+                    (size_t)(kc->text_ref_len - 1 - i) * sizeof(kc->text_refs[0]));
+            kc->text_refs[kc->text_ref_len - 1] = promoted;
+        }
+        return &kc->text_refs[kc->text_ref_len - 1];
+    }
     return NULL;
 }
 
@@ -783,6 +799,7 @@ static void kv_text_refs_prune(ds4_kvstore *kc) {
             }
         }
         if (used) { i++; continue; }
+        kc->text_ref_bytes -= kc->text_refs[i].text_len + 1;
         free(kc->text_refs[i].text);
         memmove(&kc->text_refs[i], &kc->text_refs[i + 1],
                 (size_t)(kc->text_ref_len - i - 1) * sizeof(kc->text_refs[0]));
@@ -827,6 +844,23 @@ static const char *kv_cache_entry_text(ds4_kvstore *kc, int idx) {
     memcpy(slot->sha, e->sha, 41);
     slot->text = buf;
     slot->text_len = text_bytes;
+    kc->text_ref_bytes += (size_t)text_bytes + 1;
+    /* Review M-1: the cache is a pure accelerator, so it must never grow
+     * unbounded with the directory.  Over the cap, drop refs from the HEAD
+     * (LRU order: kv_text_ref_find promotes hits to the tail, inserts land
+     * at the tail, so head = least-recently-used).  The loop stops at two
+     * held refs: find/insert just placed the caller's text in the newest
+     * slot, and kv_chain_rel_build may still hold the SECOND newest (it
+     * fetches `at`, fetches `dt` — which may reload and trigger this
+     * eviction — then memcmps both).  Evicting below two would be the
+     * dangling-pointer class this cap must not introduce. */
+    while (kc->text_ref_bytes > KV_TEXT_CACHE_MAX_BYTES && kc->text_ref_len > 2) {
+        kc->text_ref_bytes -= kc->text_refs[0].text_len + 1;
+        free(kc->text_refs[0].text);
+        memmove(kc->text_refs, kc->text_refs + 1,
+                (size_t)(kc->text_ref_len - 1) * sizeof(kc->text_refs[0]));
+        kc->text_ref_len--;
+    }
     return buf;
 }
 
@@ -847,13 +881,28 @@ static int64_t kv_cache_entry_last_used(const ds4_kvstore_entry *e);
 static int kv_cache_leaf_exclusive_count(ds4_kvstore *kc, const kv_chain_rel *r,
                                          int leaf);
 
-static void kv_chain_rel_build(ds4_kvstore *kc, kv_chain_rel *r,
+/* Returns false on allocation failure (the rel matrix is len*len bytes; on a
+ * huge directory that is a real failure mode).  The callers skip the lineage
+ * passes for this eviction cycle — review M-1: this runs with the server's
+ * kv_mu held, so kv_die/exit here would abort the process while request
+ * threads block on the lock.  Legacy LRU still yields nothing this pass
+ * (phases are lineage-driven); the next store retries. */
+static bool kv_chain_rel_build(ds4_kvstore *kc, kv_chain_rel *r,
                                const char *active_text, size_t active_len,
                                const char *protect_text, size_t protect_len) {
     r->len = kc->len;
-    r->rel = kv_xmalloc((size_t)r->len * (size_t)r->len);
-    r->active = kv_xmalloc((size_t)r->len);
-    memset(r->rel, 0, (size_t)r->len * (size_t)r->len);
+    const size_t rel_bytes = (size_t)r->len * (size_t)r->len;
+    r->rel = malloc(rel_bytes ? rel_bytes : 1);
+    r->active = malloc((size_t)r->len ? (size_t)r->len : 1);
+    if (!r->rel || !r->active) {
+        free(r->rel); free(r->active);
+        r->rel = NULL; r->active = NULL; r->len = 0;
+        kv_logf(kc, DS4_KVSTORE_LOG_WARNING,
+                "%s: kv cache lineage pass skipped: allocation failure for %d entries",
+                kv_log_name(kc), kc->len);
+        return false;
+    }
+    memset(r->rel, 0, rel_bytes);
     memset(r->active, 0, (size_t)r->len);
     for (int i = 0; i < r->len; i++) {
         r->rel[(size_t)i * r->len + i] = 1;
@@ -878,6 +927,7 @@ static void kv_chain_rel_build(ds4_kvstore *kc, kv_chain_rel *r,
                 r->rel[(size_t)anc * r->len + desc] = 1;
         }
     }
+    return true;
 }
 
 static void kv_chain_rel_free(kv_chain_rel *r) {
@@ -1459,7 +1509,13 @@ void ds4_kvstore_sweep_small_dense_divergents(ds4_kvstore *kc,
      * indices stay valid.  Only the active-chain member (the live branch) or,
      * failing that, the most-recently-used member of each (conv_id, tokens)
      * bucket survives; the rest are divergent-branch duplicates. */
-    int *victims = kv_xmalloc((size_t)kc->len * sizeof(int));
+    int *victims = malloc((size_t)kc->len * sizeof(int));
+    if (!victims) {
+        kv_logf(kc, DS4_KVSTORE_LOG_WARNING,
+                "%s: kv cache divergent sweep skipped: allocation failure",
+                kv_log_name(kc));
+        return;
+    }
     int n = 0;
     for (int i = 0; i < kc->len; i++) {
         const ds4_kvstore_entry *e = &kc->entry[i];
