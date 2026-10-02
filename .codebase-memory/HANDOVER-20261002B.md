@@ -1,5 +1,10 @@
 # HANDOVER 2026-10-02B — golden-vectors follow-ups (tasks 2 & 3)
 
+> DONE same day: task 2 shipped as `addae6c` (env-anchor guard), task 3 as
+> `2c580eb` (`--local-golden-capture`, `# model` header self-activation,
+> capture->verify pin, qwen38-flashnext fixture; 3 cold-boot captures
+> bit-identical). Text below kept as the design record.
+
 > Fresh-session entry point for the `--local-golden-vectors` work only.
 > Everything else from Oct-2 (fixes deployed, cache state, decisions) is in
 > HANDOVER-20261002.md — that file stays authoritative; this one supersedes
