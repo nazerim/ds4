@@ -49,21 +49,31 @@ sites, parallel gate_up env nsg :10162.
   unqueried; RISK-6 ×1) + 3 env-conditional families (RISK-3/-4/-7). RISK-1 and
   RISK-2 are the true #4063 analogs.
 
-## Fix plan (cheapest systematic)
+## Fix plan (cheapest systematic) — STATUS 2026-10-03 overnight
 
-1. **qwen4 chokepoint clamp** in `qwen4_dispatch_resident` (:48480): clamp
-   `tg.width` to `pipeline.maxTotalThreadsPerThreadgroup` rounded down to
-   `threadExecutionWidth`; bail-with-message when the kernel requires an exact
-   width (reduce-style). Covers all 73 qwen4 calls (RISK-2/-3/-4/-7) in one
-   place. Width-generic kernels only — the qwen4 set qualifies (all RISK rows
-   are strided/ntg-driven).
-2. **RISK-5**: swap the 8 sites to the queried twin (:5752). One-liners.
-3. **RISK-1** (dsv4): design note only tonight — needs nwg re-creation plumbing
-   at :3893/:3946 + a fallback; dsv4 is not the served model in this window and
-   the fix is the most invasive. Upstream-issue candidate (matches #4063's
-   audience).
-4. Optional hardening: declare `maxTotalThreadsPerThreadgroup` via descriptor
-   for ≤256 kernels to make the contract explicit (:3338 pattern).
+1. **qwen4 chokepoint clamp** — DEFERRED as clamping (needs per-kernel
+   width-invariance proofs: strided/ntg-generic vs width-baked reductions vs
+   function-constant-specialized nsg PSOs at :48502 where clamping the width
+   would contradict the baked constant). **SHIPPED instead (`555ee22`): a
+   fail-closed width guard** in `qwen4_dispatch_resident` — `tg.width >
+   pipeline.maxTotalThreadsPerThreadgroup` ⇒ one loud stderr line per kernel
+   + return 0 (callers fail the request; loud beats silently truncated
+   threadgroups). Never fires on M5 (limits ≥ widths there); converts
+   RISK-2/-3/-4/-7 on older GPUs from maybe-silent to definitely-loud.
+2. **RISK-5**: SHIPPED (`555ee22`) — all 6 dsv4 sites (:22262 plain,
+   :22390 scale, :22482 weighted, :22546 add, :22632 fused q/kv, :22861
+   fused q/kv norm+RoPE incl. the deferred-kv-task copy) now use the
+   queried twin `ds4_gpu_rms_norm_pipeline_threads`.
+3. **RISK-1** (dsv4 flash reduce @1024): design note only — needs nwg
+   re-creation plumbing at :3893/:3946 + fallback; dsv4 not served in this
+   window. Upstream-issue candidate (matches #4063's audience). NOT STARTED.
+4. **Diagnostic SHIPPED (`555ee22`)**: `DS4_METAL_LOG_TG_LIMITS=1` logs
+   `maxTotalThreadsPerThreadgroup`/`threadExecutionWidth` once per pipeline
+   at creation in `ds4_gpu_get_pipeline` — answers open question #2 on any
+   target GPU (specialized function-constant PSOs are covered at dispatch
+   time by the guard's message instead).
+5. Optional hardening (declare limits via descriptor for ≤256 kernels):
+   NOT STARTED, superseded in value by 1+4.
 
 ## Open questions
 

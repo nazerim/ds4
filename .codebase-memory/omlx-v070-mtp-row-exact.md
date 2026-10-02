@@ -135,9 +135,12 @@ of byte-identity pins. T=1-only gaps (a)/(e) need the same stop-list for their
 depth tests.
 
 ## Open questions
-1. Qwen4 nextn-head marginal accept at depth 3/4+ — no file measures it;
-   gates the whole wide-T business case (DSpark was closed net-negative WITH
-   replay costs; snapshot-swap verify is cheaper).
+1. ~~Qwen4 nextn-head marginal accept at depth 3/4+~~ — **MEASURED 2026-10-03**
+   (`.codebase-memory/MTP-ACCEPTANCE-20261003.md`): P(a2|a1)=70.5% (n=1176,
+   coding-leaning mix) but forced depth-3 is net-NEGATIVE on wall time
+   (+26.6% tokens/cycle, +2% wall) because the T=3 sub-batch-split verify
+   costs >26.6% more than T=2. The lift is re-gated on making fused T=3
+   verify ≈ C2 first; widths beyond 3 stay unmeasurable until it exists.
 2. Option-(b) replay-launch cost (rows re-walked once, in registers) unpriced.
 3. Device portability: `DS4_QWEN4_DECODE_FUSIONS` default is device-name
    matched ("M3 Ultra", ds4_metal.m:48606-48608); row-geometry defaults mix
