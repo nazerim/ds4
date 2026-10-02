@@ -1473,21 +1473,71 @@ static void kv_cache_unlink_entry(ds4_kvstore *kc, int victim,
     kc->len--;
 }
 
+/* Delta-chain distance to the root via parent_sha links.  Capped at the
+ * entry count so a corrupt cycle terminates the walk. */
+static int kv_entry_delta_depth(ds4_kvstore *kc, int idx) {
+    int depth = 0;
+    char cur[41];
+    memcpy(cur, kc->entry[idx].parent_sha, 41);
+    while (kc->entry[idx].delta_from > 0 && cur[0] && depth <= kc->len) {
+        int parent = -1;
+        for (int i = 0; i < kc->len; i++)
+            if (strcmp(kc->entry[i].sha, cur) == 0) { parent = i; break; }
+        if (parent < 0) break;
+        depth++;
+        idx = parent;
+        memcpy(cur, kc->entry[parent].parent_sha, 41);
+    }
+    return depth;
+}
+
+typedef struct { char sha[41]; int depth; } kv_retire_victim;
+
 /* Retire one lineage: unlink the entries exclusive to its leaf (the leaf
  * itself always qualifies).  Shared ancestors survive while another branch
  * extends them.  Victims are collected before any unlink: unlinking shifts
  * indices, and removing victims can never create new victims (a shared
- * ancestor stays shared — no other branch's leaf is retired here). */
-static void kv_cache_retire_leaf(ds4_kvstore *kc, const kv_chain_rel *r,
+ * ancestor stays shared — no other branch's leaf is retired here).
+ *
+ * Victims are unlinked in descending delta-chain depth (leaf-ward first;
+ * review H-2): a chain parent whose every child is in the victim set then
+ * finds children==0 when its own turn comes and is FREED in the same pass.
+ * Array-index order deferred such parents (their children were still in
+ * memory when the parent was picked), and the deferral kept the file, so
+ * retiring a chained ladder converged only ~1 file per eviction pass.
+ * Parents with a live child outside the victim set still defer — the
+ * Scenario D/E doctrine is unchanged. */
+static bool kv_cache_retire_leaf(ds4_kvstore *kc, const kv_chain_rel *r,
                                  int leaf, uint64_t *total) {
-    int *victims = kv_xmalloc((size_t)r->len * sizeof(int));
+    kv_retire_victim *v = malloc((size_t)(r->len + 1) * sizeof(v[0]));
+    if (!v) {
+        kv_logf(kc, DS4_KVSTORE_LOG_WARNING,
+                "%s: kv cache lineage retire skipped: allocation failure",
+                kv_log_name(kc));
+        return false;
+    }
     int n = 0;
-    for (int i = 0; i < r->len; i++)
-        if (kv_rel_exclusive_to(kc, r, i, leaf)) victims[n++] = i;
-    /* Unlink from the highest index so lower indices stay valid. */
-    for (int k = n - 1; k >= 0; k--)
-        kv_cache_unlink_entry(kc, victims[k], total, "conversation-retired");
-    free(victims);
+    for (int i = 0; i < r->len; i++) {
+        if (!kv_rel_exclusive_to(kc, r, i, leaf)) continue;
+        memcpy(v[n].sha, kc->entry[i].sha, 41);
+        v[n].depth = kv_entry_delta_depth(kc, i);
+        n++;
+    }
+    while (n > 0) {
+        int best = 0;
+        for (int i = 1; i < n; i++)
+            if (v[i].depth > v[best].depth) best = i;
+        int idx = -1;
+        for (int i = 0; i < kc->len; i++)
+            if (memcmp(kc->entry[i].sha, v[best].sha, 41) == 0) { idx = i; break; }
+        if (idx >= 0)
+            kv_cache_unlink_entry(kc, idx, total, "conversation-retired");
+        memmove(&v[best], &v[best + 1],
+                (size_t)(n - best - 1) * sizeof(v[0]));
+        n--;
+    }
+    free(v);
+    return true;
 }
 
 /* Opportunistically prune divergent small-dense branches EVEN when under
@@ -1564,21 +1614,24 @@ void ds4_kvstore_evict(ds4_kvstore *kc, const ds4_tokens *live,
     if (kc->opt.max_conversations > 0) {
         for (;;) {
             kv_chain_rel r;
-            kv_chain_rel_build(kc, &r, active_text, active_len,
-                               protect_text, protect_len);
+            if (!kv_chain_rel_build(kc, &r, active_text, active_len,
+                                    protect_text, protect_len))
+                break; /* allocation failure: skip lineage passes (M-1) */
             const bool over =
                 kv_cache_count_lineages(kc, &r) > kc->opt.max_conversations;
             int leaf = over ? kv_cache_find_lru_leaf(kc, &r, 1, true) : -1;
-            if (leaf >= 0) kv_cache_retire_leaf(kc, &r, leaf, &total);
+            bool retired = leaf >= 0 &&
+                kv_cache_retire_leaf(kc, &r, leaf, &total);
             kv_chain_rel_free(&r);
-            if (!over || leaf < 0) break;
+            if (!over || leaf < 0 || !retired) break;
         }
     }
 
     while (total > target && kc->len > 0) {
         kv_chain_rel r;
-        kv_chain_rel_build(kc, &r, active_text, active_len,
-                           protect_text, protect_len);
+        if (!kv_chain_rel_build(kc, &r, active_text, active_len,
+                                protect_text, protect_len))
+            break; /* allocation failure: skip lineage passes (M-1) */
         /* PHASE A: drop redundant (applies to all lineages incl. the active
          * one — its frontier+tail+small are always in the keep-set, so only
          * its redundant middle/compaction-collapse is dropped here; active
@@ -1645,8 +1698,9 @@ void ds4_kvstore_evict(ds4_kvstore *kc, const ds4_tokens *live,
             kv_chain_rel_free(&r);
             continue;
         }
-        kv_cache_retire_leaf(kc, &r, leaf, &total);
+        const bool retired = kv_cache_retire_leaf(kc, &r, leaf, &total);
         kv_chain_rel_free(&r);
+        if (!retired) break; /* allocation failure: stop this cycle (M-1) */
         continue;
     }
     /* Pass done: age the deferral-backoff table so stubborn blocked nodes
