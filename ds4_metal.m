@@ -2749,6 +2749,19 @@ static id<MTLComputePipelineState> ds4_gpu_get_pipeline(
         return nil;
     }
 
+    /* Opt-in per-pipeline limit dump (THREADGROUP-LIMITS-20261003.md open
+     * question #2): turns "theoretical limit < dispatched width" rows into
+     * facts on any target GPU.  Once per pipeline name (creation is cached). */
+    static int log_tg_limits = -1;
+    if (log_tg_limits < 0)
+        log_tg_limits = getenv("DS4_METAL_LOG_TG_LIMITS") != NULL ? 1 : 0;
+    if (log_tg_limits)
+        fprintf(stderr,
+                "ds4: metal pipeline %s: maxTotalThreadsPerThreadgroup=%lu threadExecutionWidth=%lu\n",
+                function_name,
+                (unsigned long)[pipeline maxTotalThreadsPerThreadgroup],
+                (unsigned long)[pipeline threadExecutionWidth]);
+
     [g_pipeline_cache setObject:pipeline forKey:key];
     return pipeline;
 }
@@ -22259,7 +22272,7 @@ int ds4_gpu_rms_norm_plain_rows_tensor(
         [enc setBuffer:outbuf offset:ds4_gpu_tensor_offset(out) atIndex:4];
         [enc setThreadgroupMemoryLength:32u * sizeof(float) atIndex:0];
         [enc dispatchThreadgroups:MTLSizeMake(rows, 1, 1)
-             threadsPerThreadgroup:MTLSizeMake(ds4_gpu_rms_norm_threads(n), 1, 1)];
+             threadsPerThreadgroup:MTLSizeMake(ds4_gpu_rms_norm_pipeline_threads(n, g_rms_norm_plain_pipeline), 1, 1)];
         ds4_gpu_end_compute_encoder(cb, enc);
 
         if (!ds4_gpu_finish_command_buffer(cb, owned, "plain RMS norm")) return 0;
@@ -22387,7 +22400,7 @@ int ds4_gpu_hc_rms_scale_project_f16_tensor(
         [enc setThreadgroupMemoryLength:32u * sizeof(float) atIndex:0];
         [enc dispatchThreadgroups:MTLSizeMake(n_rows, 1, 1)
              threadsPerThreadgroup:MTLSizeMake(
-                 ds4_gpu_rms_norm_threads(in_dim), 1, 1)];
+                 ds4_gpu_rms_norm_pipeline_threads(in_dim, scale_pipeline), 1, 1)];
         ds4_gpu_end_compute_encoder(cb, enc);
 
         ds4_gpu_mul_mm_args mm_args = ds4_gpu_make_mm_args(
@@ -22479,7 +22492,7 @@ int ds4_gpu_rms_norm_weight_rows_tensor(
         [enc setBuffer:outbuf offset:ds4_gpu_tensor_offset(out) atIndex:4];
         [enc setThreadgroupMemoryLength:32u * sizeof(float) atIndex:0];
         [enc dispatchThreadgroups:MTLSizeMake(rows, 1, 1)
-             threadsPerThreadgroup:MTLSizeMake(ds4_gpu_rms_norm_threads(n), 1, 1)];
+             threadsPerThreadgroup:MTLSizeMake(ds4_gpu_rms_norm_pipeline_threads(n, g_rms_norm_pipeline), 1, 1)];
         ds4_gpu_end_compute_encoder(cb, enc);
 
         if (!ds4_gpu_finish_command_buffer(cb, owned, "weighted RMS norm")) return 0;
@@ -22543,7 +22556,7 @@ int ds4_gpu_add_rms_norm_weight_tensor(
         [enc setBuffer:normbuf offset:ds4_gpu_tensor_offset(norm_out) atIndex:5];
         [enc setThreadgroupMemoryLength:32u * sizeof(float) atIndex:0];
         [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1)
-             threadsPerThreadgroup:MTLSizeMake(ds4_gpu_rms_norm_threads(n), 1, 1)];
+             threadsPerThreadgroup:MTLSizeMake(ds4_gpu_rms_norm_pipeline_threads(n, g_add_rms_norm_pipeline), 1, 1)];
         ds4_gpu_end_compute_encoder(cb, enc);
 
         if (!ds4_gpu_finish_command_buffer(cb, owned, "add+RMS norm")) return 0;
@@ -22629,7 +22642,7 @@ int ds4_gpu_dsv4_qkv_rms_norm_rows_tensor(
         [enc setBuffer:kvoutbuf offset:ds4_gpu_tensor_offset(kv_out) atIndex:6];
         [enc setThreadgroupMemoryLength:32u * sizeof(float) atIndex:0];
         [enc dispatchThreadgroups:MTLSizeMake(rows, 2, 1)
-             threadsPerThreadgroup:MTLSizeMake(ds4_gpu_rms_norm_threads(q_n), 1, 1)];
+             threadsPerThreadgroup:MTLSizeMake(ds4_gpu_rms_norm_pipeline_threads(q_n, g_dsv4_qkv_rms_norm_pipeline), 1, 1)];
         ds4_gpu_end_compute_encoder(cb, enc);
 
         if (!ds4_gpu_finish_command_buffer(cb, owned, "fused q/kv RMS norm")) return 0;
@@ -22858,7 +22871,7 @@ int ds4_gpu_dsv4_qkv_rms_norm_kv_rope_fp8_store_tensor(
         [enc setBuffer:kvoutbuf offset:ds4_gpu_tensor_offset(kv_out) atIndex:8];
         [enc setBuffer:rawbuf offset:ds4_gpu_tensor_offset(raw_cache) atIndex:9];
         [enc setThreadgroupMemoryLength:(32u + 64u) * sizeof(float) atIndex:0];
-        const NSUInteger norm_threads = ds4_gpu_rms_norm_threads(q_n);
+        const NSUInteger norm_threads = ds4_gpu_rms_norm_pipeline_threads(q_n, pipeline);
         const bool defer_kv = g_qkv_norm_defer_kv && !g_kv_task.pending;
         g_qkv_norm_defer_kv = 0;
         if (defer_kv) {
@@ -48556,6 +48569,28 @@ static int qwen4_dispatch_resident(int kernel, const void *args, size_t args_len
                 }
             }
             pipeline = g_qwen4_pipelines[kernel];
+        }
+        /* Fail-closed threadgroup-width guard (oMLX #4063 bug class; see
+         * .codebase-memory/THREADGROUP-LIMITS-20261003.md).  A dispatch wider
+         * than the pipeline's own limit either errors every step or silently
+         * truncates the threadgroup, depending on driver/GPU; refusing loudly
+         * keeps wrong-output off the table.  On M5-class GPUs the limit is
+         * never below the dispatched widths, so this never fires there.
+         * Width-adaptive clamping needs per-kernel width-invariance proofs
+         * (strided vs width-baked reductions) and is a deliberate follow-up. */
+        if (tg.width > [pipeline maxTotalThreadsPerThreadgroup]) {
+            static uint8_t width_refused[QWEN4_K_COUNT];
+            if (!width_refused[kernel]) {
+                width_refused[kernel] = 1;
+                fprintf(stderr,
+                        "ds4: Qwen kernel '%s' dispatch width %lu exceeds its Metal pipeline\n"
+                        "ds4: limit %lu on this GPU; refusing the dispatch (loud failure beats\n"
+                        "ds4: silently truncated threadgroups).  Lower the matching\n"
+                        "ds4: DS4_QWEN4_*_NSG / *_THREADS env if this kernel has one.\n",
+                        qwen4_kernel_names[kernel], (unsigned long)tg.width,
+                        (unsigned long)[pipeline maxTotalThreadsPerThreadgroup]);
+            }
+            return 0;
         }
         int owned = 0;
         id<MTLCommandBuffer> cb = ds4_gpu_command_buffer(&owned);
