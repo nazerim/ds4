@@ -62,19 +62,38 @@ FLOOR-20261001.md, MTP-20261001.md.
   via PHASE C legacy-LRU (:1700-1717) — any surviving V1 file elsewhere keeps
   its duplicate bytes until LRU reaches it.
 - (R2, structural) Every rung carries the full fixed GDN `[state][hist]` + PLE
-  hist at offset 0 independent of `rows_from` (ds4.c:62886-62893, :62928-62939)
-  = **140.3 MiB floor/store** (FLOOR:12-19; 45 linear × 3.117 MiB). Unlike
-  omlx, this is NOT dead-by-policy: any rung can be a resume endpoint
-  (`find_text_prefix` lands on keep-set members), so the floor is load-bearing
-  for the two retained frontier-adjacent rungs — but it is pure dead weight in
-  rungs that only ever serve as intermediate chain links. Quantified waste:
-  (a) **superseded off-grid frontier stores** (~150 MiB V2 each at 295k rows;
-  evict/shutdown/cold spans) linger until `total > target`
+  hist at offset 0 independent of `rows_from` (ds4.c:62886-62893, :62928-62939).
+  **Floor corrected 2026-10-03: 112.2 MiB state+hist (36 linear layers ×
+  3.1172 MiB — QWEN4_EXP n_layer=49, not the 45/140.3 figure FLOOR-20261001
+  derived from the wrong shape; see its CORRECTION block) / ≈113.5 MiB total
+  fixed incl. logits+ple_hist.** Unlike omlx, this is NOT dead-by-policy: any
+  rung can be a resume endpoint (`find_text_prefix` lands on keep-set members),
+  so the floor is load-bearing for the two retained frontier-adjacent rungs —
+  but it is pure dead weight in rungs that only ever serve as intermediate
+  chain links. Quantified waste:
+  (a) **superseded off-grid frontier stores** (~114 MiB fixed + rows-term each;
+  evict/shutdown spans) linger until `total > target`
   (ds4_kvstore.c:1615, :1648) — omlx prunes **eagerly at store time**
-  (prefix_cache.py:1582-1587); (b) chain-walk resume re-reads every link's
-  140.3 MiB although only the last link's state survives the sequential load
-  (ds4_kvstore.c:3229-3258 + ds4.c:63026-63031) = **(D−1)×140.3 MiB redundant
-  READ bytes per depth-D resume** (disk→GPU, load latency, not capacity).
+  (prefix_cache.py:1582-1587); **FIXED by Scenario L / `460ab6b`** (§3.1).
+  (b) chain-walk resume re-reads every link's fixed GDN block although only
+  the last link's state survives the sequential load — **(D−1)×112.2 MiB
+  redundant READ bytes per depth-D resume** (latency, not capacity).
+  **INVESTIGATED 2026-10-03 (R2b lane, read-only): skip confirmed SAFE —
+  loader overwrites the same GPU tensors per link (ds4.c:63045-63052), no
+  consumer reads intermediate states (chain validation is header-only
+  :3239-3257; pick_parent verifies token spans only ds4.c:63480-63515;
+  trailer rewrite never touches payload). Design: read-side only, thread a
+  `terminal` flag through `ds4_session_load_payload_span`, 36 paired
+  fseek-skips per intermediate link (state 3.000 MiB + hist 0.117 MiB,
+  interleaved with kept attention slices — no single jump), tokens/logits/
+  ple blocks also skippable (terminal-wins), estimator untouched (store-side).
+  Win: D=22 → 2.3 GiB (0.6 s warm / 2.0 s cold); field max D=28 → 3.0 GiB
+  (~25% of the 10 s resume budget at cold 1.13 GiB/s); cap D=64 → 6.9 GiB.
+  Test plan: export the skip arithmetic as a pure formula (87e11f3 precedent)
+  + model-free `--payload-trim` sweep + byte-counter behavioral pin; GREEN
+  gates `--kv-delta` / `--qwen4-restore-reuse` (engine stopped). NOT
+  IMPLEMENTED yet — full risk register + offsets in the R2b lane output
+  (this doc's git history / overnight summary).**
 
 ## 3. Actionable items — #1 SHIPPED 2026-10-03 (`460ab6b`)
 

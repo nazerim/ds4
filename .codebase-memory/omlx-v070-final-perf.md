@@ -19,7 +19,7 @@ taken this pass.
 | #4038/#4039/#4024/#3912 Decode fusions | fused one-token MoE/DeltaNet/attention; two-launch routed experts (was five); deferred HC writes + one-row MoE combine | Decode-side only. Our "ds4 wins the decode rows" claim (rc1 §4.9, 47–68 t/s vs ~32.9 per-stream) predates all of it — re-baseline before re-citing |
 | #3958 Spec decode incl. non-NAX | +3.5k lines (`qwen35_verify_qmm`, `qwen35_verify_sdpa_split`, new `qwen35_gdn_verify_fused`, batch_generator, dflash_drafter); Flash-Next no longer falls back to plain decode at 64K on M3 Ultra; **after a performance park MTP resumes with its full head history, not an empty one** | The park→empty-history recovery is exactly the DSpark auto-revert problem class we solve on the :8005 side (3 commits @ tip). Design reference for ds4 spec-decode lifecycle under memory pressure |
 | #3908 Split-GDN exact prefix state | stable system/tool prefixes stop being re-prefilled per request; `omlx/cache/prefix_cache.py` persists exact GDN prefix state in split mode | This is the rc1-recon §"Separate, non-kernel" item (partial-block caching / prefix resume at GDN boundaries, line 80): upgraded from idea to shipped upstream implementation to study |
-| a28e5a87 SSD cache tails | tip-lineage pruning only ran on rotating-layer models, so hybrid recurrent layouts (GDN, QSA, GLM-5 linear, DSv4.1) piled **one full-state tail per turn**; now the two-turns-back tail + its GDN sidecar (split mode) are deleted, previous turn kept as edited-turn fallback | Pure retention-policy fix of the same cost class that killed our P2.1 (floor ~140 MiB/store from GDN state, FLOOR-20261001). Audit item: does our V2 ladder carry an analogous per-rung full-state waste on the GDN `[state][hist]` fixed slices? |
+| a28e5a87 SSD cache tails | tip-lineage pruning only ran on rotating-layer models, so hybrid recurrent layouts (GDN, QSA, GLM-5 linear, DSv4.1) piled **one full-state tail per turn**; now the two-turns-back tail + its GDN sidecar (split mode) are deleted, previous turn kept as edited-turn fallback | Pure retention-policy fix of the same cost class that killed our P2.1 (floor ~112 MiB/store from GDN state — figure corrected 2026-10-03, see FLOOR-20261001 CORRECTION). Audit item: does our V2 ladder carry an analogous per-rung full-state waste on the GDN `[state][hist]` fixed slices? |
 | #3933 + #4124 memory guard rebuild | guard could refuse with memory to spare or try without; rebuilt (tiers keep ~20%/8%/2% free); post-eviction requests now refresh the memory sample before final admission | oMLX independently hit-and-fixed our deferral-backoff bug class (7da74ea/dfd9652, 3,157 deferrals/day root cause = churn re-opening rows). Confirms the transition-only-logging + re-check-after-evict design. Our analogue of "refresh after eviction before admission" = the kv_mu re-scan path |
 | #3955 Vision feature cache | per-image encode cache on qwen4_exp, partial-miss encode, 1 GiB byte-budgeted LRU; follow-up TTFT 3.32 s → 0.33 s in a 4-turn screenshot conversation | Direct template for the ds4 vision-cache ADR (Sep 3, encoder cache). Companion lesson from #4118: prefix cache must key on content (two clips with same prompt shared a cached transcript). Also live on :8005 now (serves qwen4_exp via VLM fallback) |
 | #3975 detokenizer once/tokenizer | ~45 ms/request saved on Qwen3.8 | Cheap ds4-server candidate: audit per-request tokenizer/detokenizer setup cost |
@@ -82,12 +82,12 @@ it strengthens it.
    T=1-only, snapshot depth (rows-recorded + deferred-commit is the answer),
    two-launch HC; priced sketch for T<=8 behind a per-cycle env gate.
 2. **Audit V2 ladder for a full-state-tail-per-rung analog** of a28e5a87 —
-   pure policy fix, hits the 140 MiB floor directly; check the GDN
+   pure policy fix, hits the 112 MiB GDN floor directly; check the
    `[state][hist]` fixed slices and the edited-turn fallback need.
    → DONE (lane 1): `.codebase-memory/omlx-v070-cache-policy.md` — retention
    waste structurally absent (rung grid is 8192/16384, not 512; keep-set is
    already frontier+2); live residue = superseded off-grid frontier stores
-   reclaiming only under budget (Scenario L pins the fix) + (D-1)x140.3 MiB
+   reclaiming only under budget (Scenario L pins the fix) + (D-1)x112.2 MiB
    redundant state RE-READS per depth-D chain resume.
 3. **Cheap server wins**: per-request detokenizer/tokenizer setup audit
    (#3975 analog); idle-TTFT probe on :8002 (first token after >5 min idle;
