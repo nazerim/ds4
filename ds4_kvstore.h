@@ -382,5 +382,13 @@ void ds4_kvstore_le_put32(uint8_t *p, uint32_t v);
 uint32_t ds4_kvstore_le_get32(const uint8_t *p);
 
 bool ds4_kvstore_quant_bits_supported(int quant_bits);
+/* Subset of supported() the load path can restore ({2,4}); the store gate
+ * mirrors it so unreachable quantizations are never written (review M-3). */
+bool ds4_kvstore_quant_bits_loadable(int quant_bits);
+
+/* Rebuild the entry index from the on-disk directory (children index, text
+ * cache prune, deferral-table prune included).  Exposed for the server's
+ * post-store divergent sweep (review M-5); callers hold their own lock. */
+void ds4_kvstore_refresh(ds4_kvstore *kc);
 
 #endif

@@ -467,6 +467,15 @@ bool ds4_kvstore_quant_bits_supported(int quant_bits) {
            quant_bits == 6 || quant_bits == 8;
 }
 
+/* The subset the LOAD path can actually restore (the engine's routed-expert
+ * dequantizers; see ds4_kvstore_try_load_text and the chain-walk).  Files at
+ * other supported quantizations stay indexed and budget-charged but never
+ * load, so the STORE path must not produce them: admitting a store the load
+ * gate rejects turns q5+ checkpoints into write-only waste (review M-3). */
+bool ds4_kvstore_quant_bits_loadable(int quant_bits) {
+    return quant_bits == 2 || quant_bits == 4;
+}
+
 /* v2 header: the base 48 bytes (identical to v1) plus 24 extra bytes carrying
  * the conversation lineage, weight fingerprint, bucket, and halving level. */
 void ds4_kvstore_fill_header_v2(
@@ -2464,7 +2473,11 @@ bool ds4_kvstore_store_live_prefix_text(ds4_kvstore *kc,
     ds4_kvstore_tokens_copy_prefix(&store_tokens, tokens, store_len);
 
     const int quant_bits = ds4_engine_routed_quant_bits(engine);
-    if (!ds4_kvstore_quant_bits_supported(quant_bits)) {
+    /* Review M-3: mirror the load gate.  Files outside the loadable set
+     * would index and consume budget but never restore — write-only waste.
+     * (Today ds4_engine_routed_quant_bits only emits {0,2,4}; this is
+     * fail-closed hardening, not a live behavior change.) */
+    if (!ds4_kvstore_quant_bits_loadable(quant_bits)) {
         ds4_tokens_free(&store_tokens);
         return false;
     }
@@ -3278,7 +3291,7 @@ int ds4_kvstore_try_load_text(ds4_kvstore *kc,
     if (effective_prompt) effective_prompt->len = 0;
     if (!kc->enabled || !prompt_text) return 0;
     const int quant_bits = ds4_engine_routed_quant_bits(engine);
-    if (quant_bits != 2 && quant_bits != 4) return 0;
+    if (!ds4_kvstore_quant_bits_loadable(quant_bits)) return 0;
     const int model_id = ds4_engine_model_id(engine);
     const size_t prompt_bytes = strlen(prompt_text);
     const int ctx_size = ds4_session_ctx(session);
