@@ -76,30 +76,55 @@ FLOOR-20261001.md, MTP-20261001.md.
   (ds4_kvstore.c:3229-3258 + ds4.c:63026-63031) = **(D−1)×140.3 MiB redundant
   READ bytes per depth-D resume** (disk→GPU, load latency, not capacity).
 
-## 3. Actionable items (priced, NOT started — engine busy)
+## 3. Actionable items — #1 SHIPPED 2026-10-03 (`460ab6b`)
 
-1. **Scenario L — eager supersede of off-grid frontier rungs** (a28e5a87
-   parity; pins R2a). Policy: after each store, per lineage, among off-grid
-   frontier rungs (`reason ∈ {cold,evict,shutdown,turn}`, tokens % step ≠ 0,
-   children==0, outside keep-set) unlink all but the two newest (frontier +
-   edited-turn fallback). Mirrors the existing under-budget sweep shape
-   (`ds4_kvstore_sweep_small_dense_divergents`, ds4_kvstore.h:280-287) but
-   budget-independent. Harness sketch (H–K style): stub full root @16384 +
-   F1@17032(evict) F2@17780(shutdown) F3@18444(cold) F4@19200(frontier);
-   refresh+sweep ⇒ F1 gone (`frontier-superseded`), F2–F4 kept, zero defer
-   lines; store F5 ⇒ F2 drops next. **RED today**: evict early-returns when
-   total ≤ target ⇒ F1 survives. Frees ~150 MiB per superseded frontier per
-   long session without waiting for budget pressure.
+1. **Scenario L — eager supersede of off-grid frontier rungs** — IMPLEMENTED
+   as `ds4_kvstore_sweep_superseded_frontiers` (ds4_kvstore.c, exported in
+   ds4_kvstore.h), hooked in `ds4_kvstore_evict` right after
+   `kv_cache_refresh` — one hook covers open (:1844 calls evict), every store
+   (store_live_prefix_text calls evict internally :2695 with the incoming
+   text as active-chain protection), and server-initiated evicts. RED
+   verified pre-fix (4 harness failures), GREEN post-fix; full harness +
+   `--mtp-slice` pass. Design refinements made during implementation:
+   - **Candidates = reason EVICT/SHUTDOWN only.** The lane-1 sketch included
+     COLD; implementation excludes it because divergence anchors are stored
+     as reason=cold (branch-reuse contract, max_divergence_anchors) —
+     eagerly dropping a fired anchor would force full re-prefill of the
+     diverged branch it exists to serve. Continued rungs excluded (reuse
+     ladder). Legacy v1 excluded (legacy-LRU path owns them).
+   - **children==0 is structurally limiting, and correctly so.** On a V3
+     delta chain every superseded snapshot is the next rung's parent
+     (rows start at its frontier), so mid-chain snapshots are protected by
+     construction — the deferral/retire machinery owns them. The sweep
+     fires on FULL-store snapshots: weight-swap epochs (H-1 model_fp guard
+     forces full writes), delta-staging fallbacks (:2622-2649), and diverged
+     branch chains of snapshots. Each hit frees a ~150 MiB GDN-floor file
+     that the 128 GiB-default budget (ds4-server.sh:23) would otherwise
+     never reclaim.
+   - **"Newer" = strict text-prefix extension among candidates** (pairwise,
+     no rel matrix — candidate counts stay small; text fetched pairwise per
+     the two-slot cache protection contract at ds4_kvstore.c:790-794).
+     keep = max(1, tail_anchors) per lineage; diverged branch tips prefix
+     nothing and keep their own window.
+   - **One-store lag**: the pre-store sweep sees state before the new
+     snapshot commits, so steady state is keep+1 snapshots alive between
+     stores; converges on the next evict/open. oMLX prunes AT store time;
+     the lag is the price of hooking the existing evict choke point instead
+     of threading a post-commit callback.
+   - Harness: `scenario_frontier_supersede` pins drop-at-open-under-zero-
+     pressure, window advance on the next snapshot, continued-rung and
+     zero-deferral invariants, and exactly-one-unlink log discipline
+     (`reason=frontier-superseded`).
 2. **(R2b) Resume-read trim** — chain-walk loads state from every link. Cheap
    fix candidate: skip payload read for non-terminal links whose state is
    overwritten downstream. CAVEAT: only valid when each link's stored state is
    provably recomputable from later links (V3 delta assumption) — needs a read
    pass over `ds4_kvstore_load` chain semantics + tokfp gating before scoping;
-   also a disk-READ (latency) win, not a capacity win.
+   also a disk-READ (latency) win, not a capacity win. NOT STARTED.
 3. **(R1) V1 sweep exemption** — decide: keep legacy singletons out of the
    redundancy sweep (status quo, exits via legacy-LRU) or add a
    `quant_bits_loadable`-style write-only gate. Likely fine as-is; the live dir
-   is pure V2.
+   is pure V2. NOT STARTED.
 
 ## Open questions
 - How many V1-tagged files survive in non-rebuilt dirs (e.g. DeepSeek-era
