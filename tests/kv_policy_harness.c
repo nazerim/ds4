@@ -55,10 +55,15 @@ static int g_defer_counts[4];
  * chained retire produces ZERO of these — review H-2). */
 static int g_any_defer_lines = 0;
 
+/* "frontier-superseded" unlink lines (Scenario L: eager off-grid frontier
+ * sweep, oMLX 0.7.0 a28e5a87 parity). */
+static int g_supersede_lines = 0;
+
 static void log_cb(void *ud, ds4_kvstore_log_type type, const char *msg) {
     (void)ud;
     if (type == DS4_KVSTORE_LOG_WARNING) fprintf(stderr, "WARN: %s\n", msg);
     if (strstr(msg, "delete deferred")) g_any_defer_lines++;
+    if (strstr(msg, "frontier-superseded")) g_supersede_lines++;
     if (strstr(msg, "delete deferred") && g_defer_dir) {
         for (int i = 0; i < 4; i++) {
             if (!g_defer_texts[i]) continue;
@@ -752,6 +757,78 @@ static void scenario_quant_gates(void) {
           "file-visibility set unchanged (q5+ files stay indexed, budget-charged)");
 }
 
+/* ---- Scenario L: eager frontier-supersede of off-grid snapshots ----
+ * oMLX 0.7.0 a28e5a87 parity (.codebase-memory/omlx-v070-cache-policy.md
+ * §3.1).  Evict/shutdown frontier snapshots each carry the full fixed GDN
+ * [state][hist] floor (~140 MiB on Qwen3.8, FLOOR-20261001.md); once the
+ * lineage frontier moved on, snapshots older than the newest tail_anchors
+ * are dead weight — and with the 128 GiB default budget the pressure pass
+ * effectively never runs, so nothing ever reclaims them.  The budget-
+ * independent sweep (at open and ahead of every store's eviction pass)
+ * must drop them, keep the newest tail_anchors per byte-prefix lineage,
+ * and never touch continued ladder rungs, cold divergence anchors, delta
+ * parents (children>0) or legacy files.  RED before the fix: the sweep
+ * did not exist, so s1 survived the open. */
+static void scenario_frontier_supersede(void) {
+    printf("== Scenario L: eager frontier-supersede sweep ==\n");
+    char dir[] = "/tmp/kv-harness-l.XXXXXX";
+    if (!mkdtemp(dir)) { perror("mkdtemp"); exit(1); }
+
+    const uint64_t now = (uint64_t)time(NULL);
+    /* Byte-prefix chain: each snapshot text extends the previous one, so
+     * "newer same-lineage snapshot" == strict text-prefix extension. */
+    const char *root = "scenario L lineage prompt root";
+    char s1[160], s2[160], s3[160], s4[160];
+    snprintf(s1, sizeof(s1), "%s evict snapshot one", root);
+    snprintf(s2, sizeof(s2), "%s shutdown snapshot two", s1);
+    snprintf(s3, sizeof(s3), "%s evict snapshot three", s2);
+    snprintf(s4, sizeof(s4), "%s shutdown snapshot four", s3);
+
+    stub_file(dir, root, 7, DS4_KVSTORE_REASON_CONTINUED, 16384, now - 5000, 4000);
+    stub_file(dir, s1, 7, DS4_KVSTORE_REASON_EVICT, 17032, now - 4000, 4000);
+    stub_file(dir, s2, 7, DS4_KVSTORE_REASON_SHUTDOWN, 17780, now - 3000, 4000);
+    stub_file(dir, s3, 7, DS4_KVSTORE_REASON_EVICT, 18444, now - 2000, 4000);
+
+    g_supersede_lines = 0;
+    g_any_defer_lines = 0;
+    ds4_kvstore kc = {0};
+    ds4_kvstore_options opt = ds4_kvstore_default_options();
+    opt.retire_grace_seconds = 3600;
+    /* ~97 GiB budget vs ~16 KB of stubs: no pressure pass can fire; only a
+     * budget-independent sweep may delete anything here. */
+    if (!ds4_kvstore_open(&kc, dir, 100000, false, 0, opt,
+                          "harness", log_cb, NULL)) {
+        fprintf(stderr, "open failed\n");
+        exit(1);
+    }
+    CHECK(!file_exists(dir, s1),
+          "superseded evict snapshot dropped at open under zero budget pressure");
+    CHECK(file_exists(dir, s2), "second-newest snapshot kept (fallback window)");
+    CHECK(file_exists(dir, s3), "newest snapshot kept (live frontier)");
+    CHECK(file_exists(dir, root), "continued ladder rung untouched by the sweep");
+    CHECK(g_supersede_lines == 1, "exactly one frontier-superseded unlink logged");
+    CHECK(g_any_defer_lines == 0, "children==0-only sweep produced zero deferrals");
+
+    /* Next snapshot in the same lineage: the window advances and s2 — now
+     * two snapshots back — drops on the next open-time sweep. */
+    stub_file(dir, s4, 7, DS4_KVSTORE_REASON_SHUTDOWN, 19200, now - 10, 4000);
+    g_supersede_lines = 0;
+    ds4_kvstore_close(&kc);
+    if (!ds4_kvstore_open(&kc, dir, 100000, false, 0, opt,
+                          "harness", log_cb, NULL)) {
+        fprintf(stderr, "reopen failed\n");
+        exit(1);
+    }
+    CHECK(!file_exists(dir, s2), "window advanced: s2 dropped once two newer snapshots exist");
+    CHECK(file_exists(dir, s3) && file_exists(dir, s4), "newest two snapshots kept");
+    CHECK(g_supersede_lines == 1, "exactly one further supersede logged");
+
+    ds4_kvstore_close(&kc);
+    const char *texts[] = { root, s1, s2, s3, s4 };
+    for (int i = 0; i < 5; i++) unlink_text(dir, texts[i]);
+    rmdir(dir);
+}
+
 int main(void) {
     scenario_switch_churn();
     scenario_idle_retired();
@@ -763,6 +840,7 @@ int main(void) {
     scenario_retire_convergence();
     scenario_budget_hardening();
     scenario_quant_gates();
+    scenario_frontier_supersede();
     if (g_failures) {
         fprintf(stderr, "kv_policy_harness: %d failure(s)\n", g_failures);
         return 1;

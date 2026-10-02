@@ -1608,6 +1608,92 @@ void ds4_kvstore_sweep_small_dense_divergents(ds4_kvstore *kc,
     free(victims);
 }
 
+/* Eager frontier-supersede sweep (oMLX 0.7.0 a28e5a87 parity; see
+ * .codebase-memory/omlx-v070-cache-policy.md §3).  Off-grid frontier
+ * snapshots (reason=evict/shutdown) each carry the full fixed GDN
+ * [state][hist] floor (~140 MiB on Qwen3.8, FLOOR-20261001.md).  Once the
+ * lineage frontier moved past them, snapshots older than the newest
+ * tail_anchors are dead weight — but budget-driven eviction only reclaims
+ * while total > target, and with the 128 GiB default that effectively
+ * never runs.  Sweep eagerly instead: per byte-prefix lineage, keep the
+ * newest max(1, tail_anchors) evict/shutdown snapshots and unlink older
+ * ones.  A snapshot is "superseded" when >= keep other snapshots strictly
+ * text-prefix-extend it (same lineage, frontier moved on); diverged
+ * branches do not prefix each other, so every branch tip keeps its own
+ * newest snapshots.
+ *
+ * Deliberately narrow predicate (safety over reclaim):
+ *   - reason evict/shutdown only: continued rungs are the reuse ladder and
+ *     cold stores are divergence anchors (branch-reuse contract);
+ *   - children == 0 only: a V3 delta child's rows start at this file's
+ *     frontier, so unlinking a parent would corrupt the chain walk (the
+ *     deferral machinery owns that case);
+ *   - defer-blocked entries and active-chain members are skipped (the
+ *     incoming store's about-to-be-picked delta parent must survive);
+ *   - legacy v1 envelopes are never touched (legacy-LRU path owns them).
+ * Text pointers are fetched pairwise and compared immediately: the text
+ * cache only protects its two newest slots (see kv_text_ref_find). */
+void ds4_kvstore_sweep_superseded_frontiers(ds4_kvstore *kc,
+                                            const char *active_text,
+                                            size_t active_len,
+                                            uint64_t *total) {
+    if (!kc->enabled || kc->len < 2) return;
+    const int keep = kc->opt.tail_anchors > 0 ? kc->opt.tail_anchors : 1;
+    int *cand = malloc((size_t)kc->len * sizeof(int));
+    if (!cand) {
+        kv_logf(kc, DS4_KVSTORE_LOG_WARNING,
+                "%s: kv cache frontier sweep skipped: allocation failure",
+                kv_log_name(kc));
+        return;
+    }
+    int n = 0;
+    for (int i = 0; i < kc->len; i++) {
+        const ds4_kvstore_entry *e = &kc->entry[i];
+        if (kv_cache_entry_is_legacy(e)) continue;
+        if (e->reason != DS4_KVSTORE_REASON_EVICT &&
+            e->reason != DS4_KVSTORE_REASON_SHUTDOWN) continue;
+        if (e->children > 0) continue;
+        if (kv_defer_is_blocked(kc, e->sha)) continue;
+        if (kv_cache_entry_in_active_chain(kc, i, active_text, active_len))
+            continue;
+        cand[n++] = i;
+    }
+    if (n > keep) {
+        int *victims = malloc((size_t)n * sizeof(int));
+        if (!victims) {
+            kv_logf(kc, DS4_KVSTORE_LOG_WARNING,
+                    "%s: kv cache frontier sweep skipped: allocation failure",
+                    kv_log_name(kc));
+            free(cand);
+            return;
+        }
+        int nv = 0;
+        for (int a = 0; a < n; a++) {
+            const ds4_kvstore_entry *ea = &kc->entry[cand[a]];
+            int newer = 0;
+            for (int b = 0; b < n && newer < keep; b++) {
+                if (b == a) continue;
+                const ds4_kvstore_entry *eb = &kc->entry[cand[b]];
+                if (eb->text_bytes <= ea->text_bytes) continue;
+                if (eb->tokens <= ea->tokens) continue;
+                /* Fetch both, compare immediately: the text cache protects
+                 * only its two newest slots (rel_build's safe pattern). */
+                const char *ta = kv_cache_entry_text(kc, cand[a]);
+                const char *tb = kv_cache_entry_text(kc, cand[b]);
+                if (!ta || !tb) continue;
+                if (memcmp(tb, ta, ea->text_bytes) == 0) newer++;
+            }
+            if (newer >= keep) victims[nv++] = cand[a];
+        }
+        /* Unlink from the highest index so lower indices stay valid (same
+         * discipline as the divergent sweep). */
+        for (int k = nv - 1; k >= 0; k--)
+            kv_cache_unlink_entry(kc, victims[k], total, "frontier-superseded");
+        free(victims);
+    }
+    free(cand);
+}
+
 void ds4_kvstore_evict(ds4_kvstore *kc, const ds4_tokens *live,
                        uint64_t extra_bytes,
                        const ds4_kvstore_eviction_context *incoming) {
@@ -1615,6 +1701,16 @@ void ds4_kvstore_evict(ds4_kvstore *kc, const ds4_tokens *live,
     if (!kc->enabled || kc->budget_bytes == 0) return;
     if (extra_bytes > kc->budget_bytes) return;
     kv_cache_refresh(kc);
+    /* Eager frontier-supersede sweep, budget-independent (oMLX a28e5a87
+     * parity): superseded evict/shutdown snapshots each pin a full GDN
+     * state floor, and with large budgets the pressure pass below never
+     * runs.  The incoming chain is protected so a delta parent that
+     * pick_parent is about to choose is never unlinked mid-store. */
+    uint64_t frontier_total = 0;
+    ds4_kvstore_sweep_superseded_frontiers(kc,
+                                           incoming ? incoming->text : NULL,
+                                           incoming ? incoming->text_len : 0,
+                                           &frontier_total);
     uint64_t total = 0;
     for (int i = 0; i < kc->len; i++) total += kc->entry[i].file_size;
     const uint64_t target = kc->budget_bytes - extra_bytes;

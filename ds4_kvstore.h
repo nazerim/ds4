@@ -285,6 +285,18 @@ void ds4_kvstore_sweep_small_dense_divergents(ds4_kvstore *kc,
                                               const char *active_text,
                                               size_t active_len,
                                               uint64_t *total);
+/* Eagerly drop superseded off-grid frontier snapshots (reason evict/
+ * shutdown) whose lineage has moved on: per byte-prefix lineage keep the
+ * newest max(1, tail_anchors) such snapshots, unlink the older ones when
+ * they are childless delta leaves.  Each snapshot carries the full fixed
+ * GDN-state floor (~140 MiB on Qwen3.8), and with large budgets the
+ * pressure pass never runs, so without this they linger forever (oMLX
+ * 0.7.0 a28e5a87 parity; .codebase-memory/omlx-v070-cache-policy.md).
+ * Runs regardless of budget, ahead of the eviction pressure pass. */
+void ds4_kvstore_sweep_superseded_frontiers(ds4_kvstore *kc,
+                                            const char *active_text,
+                                            size_t active_len,
+                                            uint64_t *total);
 int ds4_kvstore_find_text_prefix(ds4_kvstore *kc, const char *prompt_text,
                                  int model_id, int quant_bits, int ctx_size);
 
