@@ -1,5 +1,8 @@
 # oMLX v0.7.0rc1 prefill claims vs ds4 Qwen3.8 — reconciliation
 
+> Superseded for the rc1→final delta by `.codebase-memory/omlx-v070-final-perf.md`
+> (2026-10-02): ANE prefill and A8 were silently broken in rc1 — see its §3.
+
 Read-only pass. omlx tags fetched (v0.7.0rc1 = 35be079d, 2026-09-25); mlx-serve cloned to /tmp/mlx-serve @ 2496d200. No builds, no engine starts, no writes outside this file. Fills the v0.7.0 blind spot in `.codebase-memory/omlx-recon-3.md`.
 
 ## 1. The claims, with conditions
