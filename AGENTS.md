@@ -8,20 +8,22 @@ inference engine in C with Metal, CUDA, and ROCm backends. See `AGENT.md`
 
 - `origin` — upstream antirez/ds4
 - `nazerim` — fork at github.com/nazerim/ds4
-- Local `main` tracks upstream and carries fork work (KV cache v2 rewrite,
-  DSpark, server hardening). Integrate upstream as real merge commits, never
-  force-push to `main`.
+- Local `main` carries fork work (KV cache v2, DSpark, server hardening); integrate upstream as real merges, never force-push.
 
 ## Build & test
 
 - `make` — build all binaries (ds4, ds4-server, ds4-bench, ds4-eval, ds4-agent)
-- `make test` — unit/regression tests (needs a model and Metal on macOS)
+- `make test` / bare `./ds4_test` (needs a model + Metal on macOS) require the
+  engine STOPPED — it holds a process lock and the tests refuse mid-suite with
+  "another ds4 process is already running" (Error 2). Runbook:
+  `./ds4-server.sh stop` → tests → `./ds4-server.sh start-qwen` (also
+  `restart-qwen` to swap in a fresh binary, `status` to check). `--server` and
+  `--mtp-slice` subsets DO coexist with a running engine.
 - `make clean` — remove build artifacts
 - `make strix-halo` / `make cuda` / `make rocm` — platform-specific builds
 - `make dspark-acceptance`, `make dspark-verify-depth`, `make mtp-verify-depth` —
   specialized verification targets
-- Live server tests live in `tests/` (e.g. `tests/kv_cache_integration.py`) and
-  are only for intentional API-surface testing.
+- Live API-surface tests in `tests/` (e.g. `kv_cache_integration.py`) are only for intentional API testing.
 
 ## Workstreams
 
@@ -32,19 +34,16 @@ inference engine in C with Metal, CUDA, and ROCm backends. See `AGENT.md`
   pending #984 port, open questions, proven diagnostics).
 - Vision cache (thinking bridge, encoder cache, multimodal disk KV):
   `.codebase-memory/adr.md` (Sep 3 ADRs); server script serves Vision-Exp
-  by default (`./ds4-server.sh start`, TRACE_PATH=./log/ds4.trace for cache
-  forensics; first-mismatch window lands in log/ds4.trace on live misses)
+  by default (`./ds4-server.sh start`; TRACE_PATH=./log/ds4.trace cache-forensics setup in those ADRs)
 - DSpark: `PLAN-DSPARK-PERF.md`, `PLAN-DSPARK-TEMP-SPEC.md`
 - Fork divergence notes: `DS4FORK.md`
 
 ## Conventions
 
 - C11, no C++; Objective-C only where Metal requires it; kernels in `metal/`.
-- No binary artifacts tracked — keep `.o`/binaries out of commits. This has
-  regressed once already: `b3a4cc5` untracked four `.o.tmp` files and three test
-  binaries and added ignore rules, then the upstream merge `7d7b8cc` was an evil
-  merge that resurrected all seven *and* dropped the `.gitignore` block. After
-  every upstream merge, re-check both:
+- No binary artifacts tracked. Regressed once (`b3a4cc5` left artifacts untracked;
+  merge `7d7b8cc` resurrected them and dropped the ignore block). After every
+  upstream merge, re-check both:
   `git ls-files | grep -E '\.o\.tmp$|^tests/(kv_policy_harness|test_prompt_prefix|test_spec_rejection)$'`
   must print nothing, and `git check-ignore tests/kv_policy_harness` must match.
   `tests/kv_policy_harness` and `tests/test_prompt_prefix` are Makefile targets,
