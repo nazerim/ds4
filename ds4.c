@@ -62564,6 +62564,24 @@ static int ds41_load_payload(ds4_session *s, FILE *fp, const uint32_t *h,
     return rc;
 }
 #endif
+
+/* MTP rows a store at frontier `rows` with parent boundary `rows_from`
+ * must persist: the parent chain covers history [0, rows_from), the graph
+ * has committed [0, mtp_pos), so this store adds [rows_from, min(mtp_pos,
+ * rows)) - empty when the session has speculated nothing past the parent.
+ * A delta store's count is always < rows (rows_from > 0 caps the end at
+ * rows); only a full store can report count == rows, where "slice" and
+ * "whole" coincide at offset 0.  This is the C1 fix: the first version of
+ * the slicer computed mtp_from = max(rows_from, mtp_pos) and mtp_end =
+ * min(mtp_pos, rows), which is unsatisfiable (mtp_from >= mtp_pos >=
+ * mtp_end), so mtp_rows was identically 0 and every store dropped the whole
+ * nextn block. */
+uint32_t ds4_qwen4_mtp_slice_rows(uint32_t mtp_pos, uint32_t rows,
+                                  uint32_t rows_from) {
+    const uint32_t mtp_end = mtp_pos < rows ? mtp_pos : rows;
+    return mtp_end > rows_from ? mtp_end - rows_from : 0;
+}
+
 #ifdef DS4_HAS_QWEN4_GPU
 static uint64_t qwen4_payload_tensor_bytes(uint32_t rows, uint32_t mtp_rows);
 #endif
@@ -62579,7 +62597,10 @@ uint64_t ds4_session_payload_bytes(ds4_session *s) {
         bytes += (uint64_t)s->checkpoint.len * sizeof(uint32_t);
         bytes += (uint64_t)DS4_N_VOCAB * sizeof(float);
         const uint32_t rows = (uint32_t)s->checkpoint.len;
-        const uint32_t mtp_rows = s->qwen4_graph.mtp_pos < rows ? s->qwen4_graph.mtp_pos : rows;
+        /* Same helper the writer uses, with rows_from == 0: one formula
+         * for the estimator and the payload, so they cannot drift. */
+        const uint32_t mtp_rows = ds4_qwen4_mtp_slice_rows(s->qwen4_graph.mtp_pos,
+                                                           rows, 0);
         bytes += qwen4_payload_tensor_bytes(rows, mtp_rows);
         return bytes;
 #endif
@@ -62753,7 +62774,18 @@ int ds4_session_stage_payload_span(ds4_session *s, ds4_session_payload_file *out
  * pooled block keys (attention layers, incl. the MTP block), then the PLE
  * conv history and n-gram context.  The header's raw_live field carries the
  * family tag so a DeepSeek payload is never read as a Qwen one. */
+/* V1 (0x51573802): the nextn block was always stored whole - history rows
+ * [0, mtp_rows) at tensor offset 0 - in full AND delta files alike, so every
+ * delta link re-copied the entire MTP history (2.625 KiB/row/store; field:
+ * 862 MiB for a 248-row span store).  V2 (0x51573803): the nextn block is
+ * sliced like every other row tensor - rows [rows_from, rows_from +
+ * mtp_rows) stored at offset rows_from - and the parent chain holds the
+ * prefix.  The tag is the format discriminator: V1 files are ALWAYS read
+ * whole (a V1 lagging copy can be structurally identical to a V2 slice, so
+ * the count alone cannot tell them apart) and V2 files ALWAYS read sliced.
+ * Old loaders reject V2 loudly (re-prefill), never misplace. */
 #define DS4_QWEN4_PAYLOAD_TAG 0x51573802u
+#define DS4_QWEN4_PAYLOAD_TAG_V2 0x51573803u
 
 static uint64_t qwen4_payload_lin_state_bytes(void) {
     return (uint64_t)DS4_N_LIN_V_HEAD * DS4_N_LIN_HEAD_DIM * DS4_N_LIN_HEAD_DIM * sizeof(float);
@@ -62790,6 +62822,7 @@ static uint64_t qwen4_payload_tensor_bytes(uint32_t rows, uint32_t mtp_rows) {
     bytes += sizeof(uint32_t) + (uint64_t)rows * 16u;   /* mrope delta + positions */
     return bytes;
 }
+
 
 static int qwen4_session_save_payload_span(ds4_session *s, FILE *fp,
                                            uint32_t rows_from,
@@ -62835,7 +62868,7 @@ static int qwen4_session_save_payload_span(ds4_session *s, FILE *fp,
         DS4_N_HEAD_DIM,
         DS4_N_INDEXER_HEAD_DIM,
         DS4_N_VOCAB,
-        DS4_QWEN4_PAYLOAD_TAG,
+        DS4_QWEN4_PAYLOAD_TAG_V2,
     };
     for (uint32_t i = 0; i < DS4_SESSION_PAYLOAD_U32_FIELDS; i++) {
         if (payload_write_u32(fp, header[i], err, errlen) != 0) return 1;
@@ -62846,18 +62879,9 @@ static int qwen4_session_save_payload_span(ds4_session *s, FILE *fp,
     if (payload_write_bytes(fp, s->logits, (uint64_t)DS4_N_VOCAB * sizeof(float), err, errlen) != 0) return 1;
     uint8_t *buf = xmalloc(DS4_SESSION_IO_CHUNK);
     int rc = 0;
-    /* The MTP (nextn) block covers exactly the rows this graph has
-     * committed, so in a delta span it is sliced like every other row
-     * tensor: the parent chain already holds [0, mtp_from).  The old
-     * "copy it whole" P1 shortcut re-wrote the FULL session history into
-     * every delta link (2.625 KiB/row/store — ~750 MiB on a 295k-row
-     * span-248 store; field-measured).  The stored count disambiguates
-     * itself: mtp_rows == rows only for a whole copy (rows_from == 0,
-     * new and old identical), so old lagging files (mtp_rows < rows_from)
-     * decode to the same [0, mtp_rows) placement in both regimes. */
-    const uint32_t mtp_from = rows_from > g->mtp_pos ? rows_from : g->mtp_pos;
-    const uint32_t mtp_end = g->mtp_pos < rows ? g->mtp_pos : rows;
-    const uint32_t mtp_rows = mtp_end > mtp_from ? mtp_end - mtp_from : 0;
+    /* V2: nextn rows are sliced to this store's span [rows_from,
+     * min(mtp_pos, rows)).  See ds4_qwen4_mtp_slice_rows for the C1 fix. */
+    const uint32_t mtp_rows = ds4_qwen4_mtp_slice_rows(g->mtp_pos, rows, rows_from);
     if (rc == 0) rc = payload_write_u32(fp, mtp_rows, err, errlen);
     for (uint32_t il = 0; rc == 0 && il < DS4_N_LAYER; il++) {
         if (ds4_qwen4_layer_is_linear(il)) {
@@ -62868,12 +62892,14 @@ static int qwen4_session_save_payload_span(ds4_session *s, FILE *fp,
                                                buf, DS4_SESSION_IO_CHUNK, err, errlen);
             }
         } else if (ds4_qwen4_layer_is_nextn(il)) {
-            /* MTP history sliced to the delta span (see mtp_from above).
-             * count == rows only when rows_from == 0 (full store): write
-             * from row 0. */
-            const uint64_t nk_off = mtp_rows == rows ? 0ull : qwen4_payload_kv_bytes(rows_from);
-            const uint64_t ni_off = mtp_rows == rows ? 0ull : qwen4_payload_ik_bytes(rows_from);
-            const uint64_t nb_off = mtp_rows == rows ? 0ull : qwen4_payload_block_key_bytes(rows_from);
+            /* V2 sliced history: rows [rows_from, rows_from + mtp_rows)
+             * at the same offset the main attention tensors use.  For a
+             * full store (rows_from == 0) this is the whole block from
+             * row 0, matching V1 layout, and the loader's mtp_pos restore
+             * is identical either way. */
+            const uint64_t nk_off = qwen4_payload_kv_bytes(rows_from);
+            const uint64_t ni_off = qwen4_payload_ik_bytes(rows_from);
+            const uint64_t nb_off = qwen4_payload_block_key_bytes(rows_from);
             rc = payload_write_tensor_span(fp, g->layer_k_cache[il], nk_off, qwen4_payload_kv_bytes(mtp_rows),
                                            buf, DS4_SESSION_IO_CHUNK, err, errlen);
             if (rc == 0) rc = payload_write_tensor_span(fp, g->layer_v_cache[il], nk_off, qwen4_payload_kv_bytes(mtp_rows),
@@ -62929,7 +62955,14 @@ static int qwen4_session_load_payload_span(ds4_session *s, FILE *fp, const uint3
     }
     ds4_qwen4_gpu_graph *g = &s->qwen4_graph;
     const uint32_t rows = h[7];
-    if (h[12] != DS4_QWEN4_PAYLOAD_TAG || h[8] != DS4_N_LAYER || h[9] != DS4_N_HEAD_DIM ||
+    /* Dual-accept format: V1 files always stored the nextn block whole
+     * (offset 0), V2 files always store the span slice (offset rows_from).
+     * The tag - not the row count - is the discriminator, because a V1
+     * lagging whole copy and a V2 slice are structurally identical numbers
+     * and could otherwise be misplaced silently. */
+    const bool mtp_v2 = h[12] == DS4_QWEN4_PAYLOAD_TAG_V2;
+    if ((h[12] != DS4_QWEN4_PAYLOAD_TAG && !mtp_v2) ||
+        h[8] != DS4_N_LAYER || h[9] != DS4_N_HEAD_DIM ||
         h[10] != DS4_N_INDEXER_HEAD_DIM || h[11] != DS4_N_VOCAB || h[6] != DS4_N_EMBD * DS4_N_HC) {
         payload_set_err(err, errlen, "KV checkpoint was written by a different model family or shape");
         return 1;
@@ -62978,9 +63011,16 @@ static int qwen4_session_load_payload_span(ds4_session *s, FILE *fp, const uint3
         payload_set_err(err, errlen, "KV checkpoint MTP rows exceed the token count");
         rc = 1;
     }
-    /* Whole-copy files (count == rows, or a zero-frontier full store) are
-     * placed from row 0; other files hold the slice [rows_from, ...). */
-    const bool mtp_whole = (mtp_rows == rows) || (rows_from == 0);
+    /* V2 files hold the span slice [rows_from, rows_from + mtp_rows); V1
+     * files hold a whole copy [0, mtp_rows) regardless of rows_from (the
+     * pre-slicing writer always wrote from tensor offset 0).  The tag is
+     * the sole discriminator: counts cannot tell a V1 lagging whole copy
+     * from a V2 slice apart. */
+    const bool mtp_whole = !mtp_v2;
+    if (rc == 0 && mtp_v2 && mtp_rows > rows - rows_from) {
+        payload_set_err(err, errlen, "KV checkpoint MTP slice exceeds the delta span");
+        rc = 1;
+    }
     uint8_t *buf = xmalloc(DS4_SESSION_IO_CHUNK);
     for (uint32_t il = 0; rc == 0 && il < DS4_N_LAYER; il++) {
         if (ds4_qwen4_layer_is_linear(il)) {

@@ -7625,6 +7625,49 @@ static void test_dsml_token_suppression_excludes_id(void) {
  * text carries no tool marker and parses to zero tool_calls.  When the engine
  * exposes no DSML token (GLM, dsml_id<0) suppression is unavailable, but with no
  * tools rendered the no-tool-call guarantee must still hold. */
+/* Model-free property test for the V2 nextn-slice payload format (C1 fix
+ * for the d55b438 regression, found in independent review): the delta
+ * store's persisted MTP row count must equal span-clipped history
+ * [rows_from, min(mtp_pos, rows)), be zero exactly when the session
+ * speculated nothing past the parent boundary, and round-trip with the
+ * loader restore identity mtp_pos_resumed = rows_from + mtp_rows (V2).
+ * The first slicer used mtp_from = max(rows_from, mtp_pos), which made the
+ * result identically 0 for every input - this exhaustive sweep is exactly
+ * what would have caught it. */
+static void test_mtp_slice_formula(void) {
+    for (uint32_t rows = 0; rows <= 64; rows++) {
+        for (uint32_t rows_from = 0; rows_from <= rows; rows_from++) {
+            for (uint32_t mtp_pos = 0; mtp_pos <= 80; mtp_pos++) {
+                const uint32_t n = ds4_qwen4_mtp_slice_rows(mtp_pos, rows,
+                                                            rows_from);
+                const uint32_t want = mtp_pos > rows_from
+                    ? (mtp_pos < rows ? mtp_pos - rows_from : rows - rows_from)
+                    : 0u;
+                TEST_ASSERT(n == want);
+                TEST_ASSERT(n <= rows - rows_from);
+                /* loader round-trip identity (V2 branch) stays <= rows */
+                TEST_ASSERT(rows_from + n <= rows);
+                /* whole-region identity: rows_from == 0 must reproduce the
+                 * legacy whole-copy count min(mtp_pos, rows) exactly */
+                if (rows_from == 0)
+                    TEST_ASSERT(n == (mtp_pos < rows ? mtp_pos : rows));
+                /* a delta store never claims more rows than the span */
+                if (rows_from > 0) TEST_ASSERT(n <= rows - rows_from);
+            }
+        }
+    }
+    /* the degenerate first version, pinned: max(rf,pos)..min(pos,rows)
+     * is unsatisfiable for every input - mtp_rows was identically 0. */
+    for (uint32_t mtp_pos = 0; mtp_pos <= 80; mtp_pos++)
+        for (uint32_t rows = 0; rows <= 64; rows++)
+            for (uint32_t rf = 0; rf <= rows; rf++) {
+                const uint32_t mtp_from = rf > mtp_pos ? rf : mtp_pos;
+                const uint32_t mtp_end = mtp_pos < rows ? mtp_pos : rows;
+                TEST_ASSERT(mtp_from >= mtp_pos && mtp_pos >= mtp_end);
+                TEST_ASSERT(!(mtp_end > mtp_from)); /* C1 proof */
+            }
+}
+
 static void test_server_unit_group(void) {
     ds4_server_unit_tests_run();
 }
@@ -7663,6 +7706,7 @@ static const ds4_test_entry test_entries[] = {
 #endif
     {"--server", "server", "server parser/rendering/cache unit tests", test_server_unit_group},
     {"--kv-head-divergence", "kv-head-divergence", "synthetic AGENTS.md head-divergence anchor-depth regression (see DS4FORK.md KVCACHE — Deep Divergence Investigation)", test_kv_cache_head_divergence_anchor_depth},
+    {"--mtp-slice", "mtp-slice", "exhaustive model-free sweep of the V2 nextn-slice row formula (C1 regression pin)", test_mtp_slice_formula},
 };
 
 static void test_print_help(const char *prog) {

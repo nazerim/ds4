@@ -667,6 +667,12 @@ int ds4_session_eval_output_head_from_hc(ds4_session *s,
 #define DS4_SESSION_LAYER_PAYLOAD_U32_FIELDS 14u
 
 uint64_t ds4_session_payload_bytes(ds4_session *s);
+/* Pure nextn-slice row count for a store at frontier `rows` with parent
+ * boundary `rows_from` and graph MTP position `mtp_pos`.  Exposed for a
+ * model-free property test (ds4_test --mtp-slice); the delta payload format
+ * depends on it. */
+uint32_t ds4_qwen4_mtp_slice_rows(uint32_t mtp_pos, uint32_t rows,
+                                  uint32_t rows_from);
 int ds4_session_stage_payload(ds4_session *s, ds4_session_payload_file *out,
                               char *err, size_t errlen);
 int ds4_session_write_staged_payload(const ds4_session_payload_file *payload,
