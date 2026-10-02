@@ -1786,6 +1786,16 @@ bool ds4_kvstore_open(ds4_kvstore *kc, const char *dir, uint64_t budget_mb,
     kc->enabled = true;
     kc->dir = kv_xstrdup(dir);
     if (budget_mb == 0) budget_mb = DS4_KVSTORE_DEFAULT_MB;
+    /* Review M-2: the MiB→bytes multiplication must not wrap.  A caller
+     * passing a sign-extended int (or any MB beyond the 64-bit byte range)
+     * would otherwise land on a tiny budget — e.g. 2^44 MB wraps to exactly
+     * 0, silently disabling eviction forever, while values wrapping to a few
+     * MiB would wipe the cache on the first pass.  Clamp to the largest
+     * representable budget instead (effectively unlimited, but visible in
+     * the open log line).  The server CLI already rejects non-positive
+     * values at parse time (parse_int_arg), so this guards library callers. */
+    if (budget_mb > UINT64_MAX / (1024ull * 1024ull))
+        budget_mb = UINT64_MAX / (1024ull * 1024ull);
     kc->budget_bytes = budget_mb * 1024ull * 1024ull;
     kc->reject_different_quant = reject_different_quant;
     kc->model_fp = model_fp;
