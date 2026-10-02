@@ -444,12 +444,170 @@ static void scenario_deferral_backoff(void) {
     rmdir(dir);
 }
 
+/* ---- Scenario G: trailer rewrite must not corrupt the envelope ----------
+ * Full-engine independent review found kv_cache_rewrite_trailer (the reuse
+ * path: same sha already on disk, tool-map trailer refreshed) truncating v3
+ * files 68 bytes short (cutting the pos3 payload tail), downgrading the
+ * header v3->v1 (destroying parent link -> cascade child deletion), and
+ * writing 72 bytes over v1 files (clobbering the text-size word + text
+ * prefix with 24 uninitialized stack bytes).  Both were probe-reproduced.
+ * This scenario pins the contract: payload + text + identity untouched,
+ * trailer replaced (not appended twice), per version. */
+static bool g6_size(void *ud, const char *text, uint64_t *out) {
+    (void)ud; (void)text; *out = 64; return true;
+}
+static bool g6_write(void *ud, FILE *fp, const char *text, uint64_t *wb) {
+    (void)ud; (void)text;
+    uint8_t sec[64];
+    memcpy(sec, "KVTM", 4);
+    memset(sec + 4, 0xAB, 60);
+    if (fwrite(sec, 1, 64, fp) != 64) return false;
+    *wb = 64;
+    return true;
+}
+
+static uint64_t g6_payload_cksum(const uint8_t *p, uint64_t n) {
+    uint64_t h = 1469598103934665603ull;
+    for (uint64_t i = 0; i < n; i++) { h ^= p[i]; h *= 1099511628211ull; }
+    return h;
+}
+#define G6_PAY 4096
+static void g6_write_pattern(FILE *fp, uint64_t n) {
+    for (uint64_t i = 0; i < n; i++) fputc((int)((i * 31u + 7u) & 0xFFu), fp);
+}
+
+static uint64_t g6_file_size(const char *path) {
+    struct stat st;
+    return stat(path, &st) == 0 ? (uint64_t)st.st_size : 0;
+}
+
+static void g6_payload_cksum_at(const char *path, uint64_t off, uint64_t *out) {
+    FILE *fp = fopen(path, "rb");
+    if (!fp) { *out = 0; return; }
+    uint8_t *buf = malloc(G6_PAY);
+    fseeko(fp, (off_t)off, SEEK_SET);
+    size_t got = fread(buf, 1, G6_PAY, fp);
+    *out = got == G6_PAY ? g6_payload_cksum(buf, G6_PAY) : (uint64_t)-1;
+    free(buf);
+    fclose(fp);
+}
+
+static void scenario_trailer_rewrite(void) {
+    printf("== Scenario G: trailer rewrite envelope integrity ==\n");
+    char dir[] = "/tmp/kv-harness-g.XXXXXX";
+    if (!mkdtemp(dir)) { perror("mkdtemp"); exit(1); }
+
+    const char *ptext = "scenario G parent text";
+    const char *v3text = "scenario G v3 delta frontier text";
+    const char *v2text = "scenario G v2 checkpoint text";
+    const char *v1text = "scenario G v1 legacy text";
+    const char *texts[3] = { v3text, v2text, v1text };
+    /* layout per version: hdr(48+extra) + tb(4) + text + payload(4096) */
+    const uint64_t hdrs[3] = {
+        DS4_KVSTORE_FIXED_HEADER + DS4_KVSTORE_HEADER_V3_EXTRA + 4,
+        DS4_KVSTORE_FIXED_HEADER + DS4_KVSTORE_HEADER_V2_EXTRA + 4,
+        DS4_KVSTORE_FIXED_HEADER + 4,
+    };
+
+    char paths[3][512];
+    uint64_t cksums[3];
+    for (int v = 0; v < 3; v++) {
+        char sha[41];
+        ds4_kvstore_sha1_bytes_hex(texts[v], strlen(texts[v]), sha);
+        snprintf(paths[v], sizeof(paths[v]), "%s/%.40s.kv", dir, sha);
+        FILE *fp = fopen(paths[v], "wb");
+        if (!fp) { perror("scenario G stub"); exit(1); }
+        uint8_t h[DS4_KVSTORE_FIXED_HEADER + DS4_KVSTORE_HEADER_V3_EXTRA];
+        uint32_t tlen = (uint32_t)strlen(texts[v]);
+        uint8_t tb[4];
+        ds4_kvstore_le_put32(tb, tlen);
+        if (v == 0) {
+            char psha[41];
+            ds4_kvstore_sha1_bytes_hex(ptext, strlen(ptext), psha);
+            ds4_kvstore_fill_header_v3(h, 0, 2, 2, 0, 8192, 3, 32768,
+                                       100, 100, G6_PAY, 7, 0, 1, 0, false,
+                                       psha, 4096);
+            fwrite(h, 1, 116, fp);
+        } else if (v == 1) {
+            ds4_kvstore_fill_header_v2(h, 0, 2, 2, 0, 8192, 3, 32768,
+                                       100, 100, G6_PAY, 7, 0, 1, 0, false);
+            fwrite(h, 1, DS4_KVSTORE_FIXED_HEADER + DS4_KVSTORE_HEADER_V2_EXTRA, fp);
+        } else {
+            ds4_kvstore_fill_header(h, 0, 2, 2, 0, 8192, 3, 32768,
+                                    100, 100, G6_PAY);
+            fwrite(h, 1, DS4_KVSTORE_FIXED_HEADER, fp);
+        }
+        fwrite(tb, 1, 4, fp);
+        fwrite(texts[v], 1, strlen(texts[v]), fp);
+        g6_write_pattern(fp, G6_PAY);
+        fclose(fp);
+        g6_payload_cksum_at(paths[v], hdrs[v] + strlen(texts[v]), &cksums[v]);
+    }
+
+    ds4_kvstore kc = {0};
+    ds4_kvstore_options opt = ds4_kvstore_default_options();
+    if (!ds4_kvstore_open(&kc, dir, 1, false, 0, opt, "harness", log_cb, NULL)) {
+        fprintf(stderr, "open failed\n");
+        exit(1);
+    }
+    ds4_kvstore_trailer_hooks hooks = {0};
+    hooks.serialized_size = g6_size;
+    hooks.write = g6_write;
+    hooks.ext_flag = DS4_KVSTORE_EXT_TOOL_MAP;
+
+    const uint64_t sizes[3] = {
+        hdrs[0] + strlen(v3text) + G6_PAY + 64,
+        hdrs[1] + strlen(v2text) + G6_PAY + 64,
+        hdrs[2] + strlen(v1text) + G6_PAY + 64,
+    };
+    for (int round = 0; round < 2; round++) {
+        for (int v = 0; v < 3; v++)
+            ds4_kvstore_rewrite_trailer(&kc, paths[v], texts[v], &hooks);
+        /* Idempotence is the point of round 2: trailer replaced, not
+         * appended twice. */
+        for (int v = 0; v < 3; v++) {
+            char lbl[64];
+            snprintf(lbl, sizeof(lbl), "v%d", 3 - v);
+            FILE *fp = fopen(paths[v], "rb");
+            if (!fp) { printf("  FAIL: %s reopened\n", lbl); exit(1); }
+            uint8_t hdr[128];
+            size_t got = fread(hdr, 1, 128, fp);
+            fclose(fp);
+            (void)got;
+            uint64_t ck;
+            g6_payload_cksum_at(paths[v], hdrs[v] + strlen(texts[v]), &ck);
+            printf("  %s round %d: version=%u size=%llu (want %llu) payload %s\n",
+                   lbl, round, hdr[3],
+                   (unsigned long long)g6_file_size(paths[v]),
+                   (unsigned long long)sizes[v],
+                   ck == cksums[v] ? "INTACT" : "CLOBBERED");
+            CHECK(hdr[3] == 3 - v, "header version preserved through trailer rewrite");
+            CHECK(g6_file_size(paths[v]) == sizes[v],
+                  "file size = envelope + one trailer (replaced, not appended)");
+            CHECK(ck == cksums[v], "payload region byte-identical after trailer rewrite");
+            uint32_t tb = ds4_kvstore_le_get32(hdr + hdrs[v] - 4);
+            CHECK(tb == (uint32_t)strlen(texts[v]), "text-size word intact");
+            if (v == 0) {
+                char psha[41];
+                ds4_kvstore_sha1_bytes_hex(ptext, strlen(ptext), psha);
+                CHECK(memcmp(hdr + 72, psha, 40) == 0, "v3 parent_sha intact");
+                CHECK(ds4_kvstore_le_get32(hdr + 112) == 4096, "v3 delta_from intact");
+            }
+            CHECK(hdr[6] & DS4_KVSTORE_EXT_TOOL_MAP, "ext flag recorded");
+        }
+    }
+    ds4_kvstore_close(&kc);
+    for (int v = 0; v < 3; v++) unlink(paths[v]);
+    rmdir(dir);
+}
+
 int main(void) {
     scenario_switch_churn();
     scenario_idle_retired();
     scenario_delta_parent_deferred();
     scenario_divergence_logic();
     scenario_deferral_backoff();
+    scenario_trailer_rewrite();
     if (g_failures) {
         fprintf(stderr, "kv_policy_harness: %d failure(s)\n", g_failures);
         return 1;

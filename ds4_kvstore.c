@@ -1271,6 +1271,12 @@ static int kv_cache_find_lru_legacy(ds4_kvstore *kc) {
     int64_t oldest = INT64_MAX;
     for (int i = 0; i < kc->len; i++) {
         if (!kv_cache_entry_is_legacy(&kc->entry[i])) continue;
+        /* Same skip as the other proposal sites: legacy files cannot
+         * normally be delta parents, but the children index is built by
+         * parent_sha match against every entry, so if one ever acquires
+         * children its deferral would re-propose every pass (record resets
+         * the pass clock - exactly the pathology this table exists to stop). */
+        if (kv_defer_is_blocked(kc, kc->entry[i].sha)) continue;
         int64_t lu = kv_cache_entry_last_used(&kc->entry[i]);
         if (lu < oldest || (lu == oldest && best < 0)) { oldest = lu; best = i; }
     }
@@ -1319,25 +1325,26 @@ static void kv_defer_backoff_record(ds4_kvstore *kc, const ds4_kvstore_entry *e)
     b->pass = 0;
 }
 
-/* Drop a row only when the node actually BECOMES deletable: its file is
- * gone from the scan, or its live children reached 0.  Anything else -
- * last_used moves, children count shifts while staying > 0 - keeps the
- * row: the unlink predicate defers exactly and only when children > 0, so
- * every other state change leaves the verdict identical.  Letting touches
- * unblock was the leak behind the field "wall of delete deferred" (one
- * 65536-row ladder parent deferred 413x/day): each store rewrites ancestor
- * headers, and each rewrite re-proposed the whole blocked ladder.
+/* Drop a row only when the node actually BECOMES deletable or disappears:
+ * its file is gone from the scan (stale table entry - the node is not a
+ * proposal candidate anymore), or its live children reached 0.  Anything
+ * else - last_used moves, children count shifts while staying > 0 - keeps
+ * the row: the unlink predicate defers exactly and only when children > 0,
+ * so every other state change leaves the verdict identical.  Letting
+ * touches unblock was the leak behind the field "wall of delete deferred"
+ * (one 65536-row ladder parent deferred 413x/day): each store rewrites
+ * ancestor headers, and each rewrite re-proposed the whole blocked ladder.
  * The pass expiry below stays as the safety valve for blind spots. */
 static void kv_defer_backoff_prune(ds4_kvstore *kc) {
     kv_defer_backoff_entry *tbl = kc->defer_tbl;
     for (int i = 0; i < kc->defer_len; ) {
-        bool deletable = false;
+        bool keep = false;
         for (int j = 0; j < kc->len; j++) {
             if (memcmp(kc->entry[j].sha, tbl[i].sha, 41) != 0) continue;
-            deletable = kc->entry[j].children == 0;
+            keep = kc->entry[j].children > 0;
             break;
         }
-        if (!deletable) { i++; continue; }
+        if (keep) { i++; continue; }
         memmove(&tbl[i], &tbl[i + 1],
                 (size_t)(kc->defer_len - i - 1) * sizeof(tbl[0]));
         kc->defer_len--;
@@ -1606,22 +1613,43 @@ int ds4_kvstore_continued_step_at(const ds4_kvstore *kc, int live_tokens) {
 /* Crash-orphaned store temps (<sha>.kv.tmp.<pid>) never match the <sha>.kv
  * name filter in kv_cache_refresh, so they would accumulate forever.  Reap the
  * old ones at open; an age guard keeps a concurrent writer's in-flight temp
- * untouched. */
+ * untouched.
+ * The same sweep reaps zombie <sha>.kv files whose header no longer parses:
+ * they are invisible to refresh (skipped) and to eviction (never indexed, so
+ * the budget never counts them) and would sit on the Blade forever.  Only
+ * files older than 24h are touched, so a rename that is mid-flight on another
+ * process is safe; a header-unreadable file is unrecoverable cache garbage by
+ * definition and is regenerated on the next store of that text. */
 static void kv_cache_sweep_orphan_temps(ds4_kvstore *kc) {
     DIR *d = opendir(kc->dir);
     if (!d) return;
     const uint64_t now = (uint64_t)time(NULL);
     struct dirent *de;
     while ((de = readdir(d)) != NULL) {
-        if (!strstr(de->d_name, ".kv.tmp.")) continue;
+        const bool tmp = strstr(de->d_name, ".kv.tmp.") != NULL;
+        const size_t nlen = strlen(de->d_name);
+        const bool final = !tmp && nlen > 3 &&
+                           strcmp(de->d_name + nlen - 3, ".kv") == 0;
+        if (!tmp && !final) continue;
         char *path = ds4_kvstore_path_join(kc->dir, de->d_name);
         struct stat st;
         if (stat(path, &st) == 0 && st.st_mtime > 0 &&
-            (uint64_t)st.st_mtime + 3600ull <= now) {
-            if (unlink(path) == 0)
-                kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
-                        "%s: kv cache reaped orphaned temp %s",
-                        kv_log_name(kc), path);
+            (uint64_t)st.st_mtime + (tmp ? 3600ull : 86400ull) <= now) {
+            bool reap = tmp;
+            if (final) {
+                FILE *fp = fopen(path, "rb");
+                if (fp) {
+                    ds4_kvstore_entry ze = {0};
+                    uint32_t ztb = 0;
+                    reap = !ds4_kvstore_read_header(fp, &ze, &ztb);
+                    fclose(fp);
+                }
+            }
+            if (reap && unlink(path) == 0)
+                kv_logf(kc, DS4_KVSTORE_LOG_WARNING,
+                        "%s: kv cache reaped %s %s",
+                        kv_log_name(kc), tmp ? "orphaned temp" : "unreadable",
+                        path);
         }
         free(path);
     }
@@ -2193,9 +2221,25 @@ static bool kv_trailer_write(const ds4_kvstore_trailer_hooks *hooks,
     return hooks->write(hooks->ud, fp, text, written_bytes);
 }
 
-static void kv_cache_rewrite_trailer(ds4_kvstore *kc, const char *path,
-                                     const char *text,
-                                     const ds4_kvstore_trailer_hooks *hooks) {
+/* Replace the trailer section of an existing checkpoint IN PLACE (the reuse
+ * path: the payload is unchanged, only the serialized tool-map/vision
+ * section may have grown).  Header arithmetic per version: v1 = 48+0+4,
+ * v2 = 48+24+4, v3 = 48+68+4 bytes total (kv_header_total); the payload
+ * region [0, kv_header_total + text_bytes + payload_bytes) is NEVER touched
+ * - only the old trailer beyond it is dropped and the new one appended.
+ *
+ * The first version of this function got all of that wrong (found by the
+ * full-engine independent review, reproduced against real files): it used
+ * 48+4+(v2?24:0) as the header size, so a v3 file was truncated 68 bytes
+ * short - cutting the pos3 tail - and its header restore branch had no v3
+ * case at all, downgrading h[3] 3->1, orphaning parent_sha/delta_from and
+ * cascading chain-walk deletion over every dependent child; for v1 it wrote
+ * 72 bytes (24 indeterminate stack bytes over the text-size word and the
+ * text prefix), killing every later load.  Version and all identity fields
+ * are now preserved byte-exact; last_used/flag are the only writes. */
+void ds4_kvstore_rewrite_trailer(ds4_kvstore *kc, const char *path,
+                                 const char *text,
+                                 const ds4_kvstore_trailer_hooks *hooks) {
     uint64_t trailer_est = 0;
     if (!hooks || !hooks->write || !hooks->serialized_size ||
         !kv_trailer_serialized_size(hooks, text, &trailer_est) ||
@@ -2208,45 +2252,67 @@ static void kv_cache_rewrite_trailer(ds4_kvstore *kc, const char *path,
     ds4_kvstore_entry hdr = {0};
     uint32_t text_bytes = 0;
     bool ok = ds4_kvstore_read_header(fp, &hdr, &text_bytes);
-    uint64_t hdr_total = DS4_KVSTORE_FIXED_HEADER + 4ull +
-        (hdr.hdr_version == KV_CACHE_VERSION2 ? DS4_KVSTORE_HEADER_V2_EXTRA : 0ull);
-    uint64_t end = hdr_total + (uint64_t)text_bytes + hdr.payload_bytes;
+    if (ok && hdr.hdr_version != KV_CACHE_VERSION &&
+        hdr.hdr_version != KV_CACHE_VERSION2 &&
+        hdr.hdr_version != KV_CACHE_VERSION3)
+        ok = false;
+    const uint64_t hdr_total = kv_header_total(hdr.hdr_version);
+    const uint64_t end = hdr_total + (uint64_t)text_bytes + hdr.payload_bytes;
     if (ok && end <= (uint64_t)INT64_MAX &&
         fseeko(fp, (off_t)end, SEEK_SET) == 0 &&
         ftruncate(fileno(fp), (off_t)end) == 0)
     {
         uint64_t ignored = 0;
         ok = kv_trailer_write(hooks, fp, text, &ignored) && fflush(fp) == 0;
-        if (ok && ignored > 0) {
-            uint8_t h[DS4_KVSTORE_FIXED_HEADER + DS4_KVSTORE_HEADER_V2_EXTRA];
-            uint64_t now = (uint64_t)time(NULL);
-            if (hdr.hdr_version == KV_CACHE_VERSION2) {
-                ds4_kvstore_fill_header_v2(h, hdr.model_id, hdr.quant_bits,
-                                           hdr.reason,
-                                           (uint8_t)(hdr.ext_flags | hooks->ext_flag),
+        if (ok) {
+            uint8_t h[DS4_KVSTORE_FIXED_HEADER + DS4_KVSTORE_HEADER_V3_EXTRA];
+            const uint64_t hdr_now = (uint64_t)time(NULL);
+            const uint8_t flags = (uint8_t)(hdr.ext_flags | hooks->ext_flag);
+            if (hdr.hdr_version == KV_CACHE_VERSION3) {
+                ds4_kvstore_fill_header_v3(h, hdr.model_id, hdr.quant_bits,
+                                           hdr.reason, flags,
                                            hdr.tokens, hdr.hits, hdr.ctx_size,
-                                           hdr.created_at, now, hdr.payload_bytes,
-                                           hdr.conv_id, hdr.model_fp, hdr.bucket,
-                                           hdr.level, hdr.stale);
-                ok = fseeko(fp, 0, SEEK_SET) == 0 &&
-                     fwrite(h, 1,
-                            DS4_KVSTORE_FIXED_HEADER + DS4_KVSTORE_HEADER_V2_EXTRA,
-                            fp) == (DS4_KVSTORE_FIXED_HEADER + DS4_KVSTORE_HEADER_V2_EXTRA) &&
-                     fflush(fp) == 0;
+                                           hdr.created_at, hdr_now,
+                                           hdr.payload_bytes,
+                                           hdr.conv_id, hdr.model_fp,
+                                           hdr.bucket, hdr.level, hdr.stale,
+                                           hdr.parent_sha, hdr.delta_from);
+            } else if (hdr.hdr_version == KV_CACHE_VERSION2) {
+                ds4_kvstore_fill_header_v2(h, hdr.model_id, hdr.quant_bits,
+                                           hdr.reason, flags,
+                                           hdr.tokens, hdr.hits, hdr.ctx_size,
+                                           hdr.created_at, hdr_now,
+                                           hdr.payload_bytes,
+                                           hdr.conv_id, hdr.model_fp,
+                                           hdr.bucket, hdr.level, hdr.stale);
             } else {
-                ds4_kvstore_fill_header(h, hdr.model_id, hdr.quant_bits, hdr.reason,
-                                        (uint8_t)(hdr.ext_flags | hooks->ext_flag),
+                ds4_kvstore_fill_header(h, hdr.model_id, hdr.quant_bits,
+                                        hdr.reason, flags,
                                         hdr.tokens, hdr.hits, hdr.ctx_size,
-                                        hdr.created_at, now, hdr.payload_bytes);
-                ok = fseeko(fp, 0, SEEK_SET) == 0 &&
-                     fwrite(h, 1, sizeof(h), fp) == sizeof(h) &&
-                     fflush(fp) == 0;
+                                        hdr.created_at, hdr_now,
+                                        hdr.payload_bytes);
             }
+            const uint64_t fill_bytes =
+                DS4_KVSTORE_FIXED_HEADER + kv_header_extra(hdr.hdr_version);
+            ok = fseeko(fp, 0, SEEK_SET) == 0 &&
+                 fwrite(h, 1, fill_bytes, fp) == fill_bytes &&
+                 fflush(fp) == 0;
         }
     }
     fclose(fp);
-    (void)kc;
-    (void)ok;
+    if (!ok) {
+        /* A half-applied trailer rewrite leaves an inconsistent envelope.
+         * The file is cache-only: drop it so the next store rewrites it
+         * whole; leaving a zombie guarantees load failures forever. */
+        if (unlink(path) == 0)
+            kv_logf(kc, DS4_KVSTORE_LOG_WARNING,
+                    "%s: kv cache trailer rewrite failed, dropped %s",
+                    kv_log_name(kc), path);
+        else
+            kv_logf(kc, DS4_KVSTORE_LOG_WARNING,
+                    "%s: kv cache trailer rewrite failed for %s (unlink: %s)",
+                    kv_log_name(kc), path, strerror(errno));
+    }
 }
 
 bool ds4_kvstore_store_live_prefix_text(ds4_kvstore *kc,
@@ -2332,7 +2398,7 @@ bool ds4_kvstore_store_live_prefix_text(ds4_kvstore *kc,
          * written.  Counted separately, because a store that logs nothing is
          * exactly the case an offline census cannot see. */
         kc->stat_reused++;
-        kv_cache_rewrite_trailer(kc, path, text, hooks);
+        ds4_kvstore_rewrite_trailer(kc, path, text, hooks);
         free(text);
         free(path);
         ds4_tokens_free(&store_tokens);
@@ -2867,9 +2933,10 @@ static int kv_cache_try_load_one(ds4_kvstore *kc, ds4_engine *engine,
         kv_chain_node anc[63];
         int nanc = 0;
         bool chain_bad = false;
+        bool depth_capped = false;
         ds4_kvstore_entry cur = hdr;
         for (;;) {
-            if (nanc == 63) { chain_bad = true; break; }
+            if (nanc == 63) { depth_capped = true; break; }
             char *ppath = ds4_kvstore_path_for_sha(kc, cur.parent_sha);
             ds4_kvstore_entry ph = {0};
             uint32_t ptb = 0;
@@ -2906,6 +2973,24 @@ static int kv_cache_try_load_one(ds4_kvstore *kc, ds4_engine *engine,
             nanc++;
             if (ph.delta_from == 0) break;   /* full-format root reached */
             cur = ph;
+        }
+        if (depth_capped) {
+            /* The walk only collected 63 ancestors before the cap fired;
+             * loading this prefix would leave a hole at the root end, so
+             * decline entirely.  This is a capacity event, NOT a corrupt
+             * chain: the file stays (the alternative - unlink - destroys a
+             * perfectly good checkpoint every time a session grows past the
+             * replay window).  Field signal only; grids top out ~40 links
+             * deep for 512k sessions. */
+            for (int k = 0; k < nanc; k++) free(anc[k].path);
+            *retryable = true;
+            kv_logf(kc, DS4_KVSTORE_LOG_WARNING,
+                    "%s: kv cache delta chain deeper than the replay cap, falling back to cold rebuild (file kept)",
+                    kv_log_name(kc));
+            fclose(fp);
+            free(cached_text);
+            free(path);
+            return 0;
         }
         if (chain_bad) {
             for (int k = 0; k < nanc; k++) free(anc[k].path);

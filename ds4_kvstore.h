@@ -350,6 +350,13 @@ void ds4_kvstore_fill_header_v2(uint8_t h[DS4_KVSTORE_FIXED_HEADER + DS4_KVSTORE
                                 uint32_t bucket, uint8_t level, bool stale);
 bool ds4_kvstore_touch_file(const char *path, uint32_t hits, bool stale,
                             uint8_t level, uint64_t last_used);
+/* Refresh the trailer section of an existing checkpoint in place (reuse
+ * path).  Exposed for the policy regression harness; the payload region is
+ * preserved byte-exact and header identity (version, parent link) never
+ * changes.  On any failure the file is dropped as cache garbage. */
+void ds4_kvstore_rewrite_trailer(ds4_kvstore *kc, const char *path,
+                                 const char *text,
+                                 const ds4_kvstore_trailer_hooks *hooks);
 /* Store-path reuse check: does the on-disk file for sha already hold a
  * compatible checkpoint?  Replaces (unlinks) incompatible files, including
  * ones written for a different weight fingerprint. */
