@@ -2306,6 +2306,42 @@ static bool kv_cache_file_text_matches(const char *path, const char sha[41],
     return ok;
 }
 
+/* Does any .kv file in kc->dir still reference sha as its v3 delta parent?
+ * Used by the incompatible branch of existing_compatible to decide whether
+ * unlinking the file would orphan a dependent span (review M-4).  A
+ * directory scan, not the entry index: the reuse path runs without a fresh
+ * scan, and this fires only for the rare incompatible replacement.  When
+ * the answer cannot be determined (unreadable dir OR an unreadable
+ * sha-named candidate) the conservative true keeps the file — eviction,
+ * which does track children, remains its route out. */
+static bool kv_dir_has_dependents(ds4_kvstore *kc, const char sha[41]) {
+    if (!kc->dir) return true;
+    DIR *d = opendir(kc->dir);
+    if (!d) return true;
+    bool found = false;
+    struct dirent *de;
+    while (!found && (de = readdir(d)) != NULL) {
+        char csha[41];
+        if (!ds4_kvstore_sha_hex_name(de->d_name, csha)) continue;
+        char *cpath = ds4_kvstore_path_join(kc->dir, de->d_name);
+        ds4_kvstore_entry e = {0};
+        if (ds4_kvstore_read_entry_file(cpath, csha, &e)) {
+            found = e.delta_from > 0 && e.parent_sha[0] &&
+                    strcmp(e.parent_sha, sha) == 0;
+            ds4_kvstore_entry_free(&e);
+        } else {
+            /* Sha-named file whose header we cannot read: it MIGHT be a
+             * dependent.  Conservative true (same doctrine as an
+             * unreadable dir); the zombie reaper bounds how long such a
+             * blocker can sit (unreadable finals are reaped past 24h). */
+            found = true;
+        }
+        free(cpath);
+    }
+    closedir(d);
+    return found;
+}
+
 bool ds4_kvstore_existing_compatible(ds4_kvstore *kc, const char *path,
                                      const char sha[41],
                                      const char *text, size_t text_len,
@@ -2331,9 +2367,22 @@ bool ds4_kvstore_existing_compatible(ds4_kvstore *kc, const char *path,
     }
     ds4_kvstore_entry_free(&e);
     if (!compatible) {
-        if (unlink(path) == 0) {
+        /* Review M-4: never unlink a file that live v3 dependents still
+         * reference.  A delta child loads only through its parent, so an
+         * orphaned child is dead weight: budget-charged, chain-unloadable,
+         * reclaimed only once eviction notices it.  The store that follows
+         * this call overwrites at the SAME path anyway (sha-keyed name),
+         * re-validating the chain in place — the unlink here is purely
+         * opportunistic space release, so skip it when it would orphan. */
+        if (!kv_dir_has_dependents(kc, sha)) {
+            if (unlink(path) == 0) {
+                kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
+                        "%s: kv cache replaced incompatible file %s",
+                        kv_log_name(kc), path);
+            }
+        } else {
             kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
-                    "%s: kv cache replaced incompatible file %s",
+                    "%s: kv cache kept incompatible file %s (live chain dependents; will be replaced in place)",
                     kv_log_name(kc), path);
         }
         return false;

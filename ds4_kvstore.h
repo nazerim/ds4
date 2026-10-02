@@ -364,7 +364,9 @@ void ds4_kvstore_rewrite_trailer(ds4_kvstore *kc, const char *path,
                                  const ds4_kvstore_trailer_hooks *hooks);
 /* Store-path reuse check: does the on-disk file for sha already hold a
  * compatible checkpoint?  Replaces (unlinks) incompatible files, including
- * ones written for a different weight fingerprint. */
+ * ones written for a different weight fingerprint — unless a live v3 chain
+ * dependent still references it, in which case the file is kept for the
+ * in-place overwrite and eviction handles it (review M-4). */
 bool ds4_kvstore_existing_compatible(ds4_kvstore *kc, const char *path,
                                      const char sha[41],
                                      const char *text, size_t text_len,
