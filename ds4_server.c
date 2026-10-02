@@ -6316,7 +6316,13 @@ static bool parse_deepseek_generated_message_ex(const char *text,
         if (!think_end) {
             const char *candidate = find_any_tool_start(text);
             if (!candidate || !find_any_tool_end(candidate)) {
-                fprintf(stderr, "ds4-server: thinking not closed, ignoring incomplete DSML in reasoning\n");
+                /* THINK-20261001 §5: log only when a tool start is actually
+                 * present.  A stream cut with no tool markup at all is benign
+                 * unterminated thinking (field rate 1/660), not "incomplete
+                 * DSML" — the old unconditional WARNING drowned the real
+                 * parse-recovery events.  Recovery behavior unchanged. */
+                if (candidate)
+                    fprintf(stderr, "ds4-server: thinking not closed, ignoring incomplete DSML in reasoning\n");
                 ds4_local_unterminated_reasoning(text, content_out, reasoning_out);
                 return true;
             }
@@ -6570,7 +6576,10 @@ static bool parse_glm_generated_message_ex(const char *text,
         if (!think_end) {
             const char *candidate = strstr(text, tool_start);
             if (!candidate || !strstr(candidate, tool_end)) {
-                fprintf(stderr, "ds4-server: thinking not closed, ignoring incomplete GLM tool calls in reasoning\n");
+                /* THINK-20261001 §5: log only when a tool start is actually
+                 * present; benign stream cuts stay quiet.  Recovery unchanged. */
+                if (candidate)
+                    fprintf(stderr, "ds4-server: thinking not closed, ignoring incomplete GLM tool calls in reasoning\n");
                 ds4_local_unterminated_reasoning(text, content_out, reasoning_out);
                 return true;
             }
@@ -6774,7 +6783,10 @@ static bool parse_qwen_generated_message_ex(const char *text,
         if (!think_end) {
             const char *candidate = strstr(text, tool_start);
             if (!candidate || !strstr(candidate, tool_end)) {
-                fprintf(stderr, "ds4-server: thinking not closed, ignoring incomplete Qwen tool calls in reasoning\n");
+                /* THINK-20261001 §5: log only when a tool start is actually
+                 * present; benign stream cuts stay quiet.  Recovery unchanged. */
+                if (candidate)
+                    fprintf(stderr, "ds4-server: thinking not closed, ignoring incomplete Qwen tool calls in reasoning\n");
                 ds4_local_unterminated_reasoning(text, content_out, reasoning_out);
                 return true;
             }
