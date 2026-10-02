@@ -1087,8 +1087,9 @@ typedef struct kv_defer_backoff_entry {
     int pass;
 } kv_defer_backoff_entry;
 
-/* True while the node's deferral is still fresh (state unchanged and the
- * pass counter has not expired).  Skips ALL victim-proposal sites: the
+/* True while the node's deferral is still in backoff (children have not
+ * reached 0 and the pass counter has not expired).  Skips ALL
+ * victim-proposal sites: the
  * PHASE A redundant picker, the divergent-duplicate sweep, and
  * kv_cache_find_lru_leaf — a deferred node is usually its own lineage leaf
  * (test chain texts are pairwise non-prefixing), so without the leaf-level
@@ -1283,12 +1284,16 @@ static int kv_cache_find_lru_legacy(ds4_kvstore *kc) {
  * ran eviction — in one production hour: 2,065 "delete deferred" lines over
  * 228 distinct files, i.e. 22-25 re-proposals per node that provably cannot
  * be deleted yet.  Backoff: after a deferral, stop re-proposing the node
- * until either its state changes (children died => children count drops; a
- * touch moves last_used) or KV_DEFER_BACKOFF_PASSES eviction passes expire.
- * The pass expiry is mandatory: a node whose last child dies changes state
- * and is dropped from the table, but if only the PARENT's on-disk state
- * shifts (or a future reason class defers without children), the node would
- * otherwise stay unreclaimable for the lifetime of the process.
+ * until it actually BECOMES deletable (children reach 0, or the file goes
+ * away) or KV_DEFER_BACKOFF_PASSES eviction passes expire.  State churn
+ * that does not change deletability — header touches moving last_used,
+ * children counts shifting while staying positive — must NOT unblock:
+ * eviction touches ladder ancestors on every store, and letting those
+ * changes re-propose was the leak behind a field "wall" (one 65536-row
+ * ladder parent deferred 413 times in one day).  The pass expiry remains
+ * mandatory as the blind-spot valve: it bounds the staleness of any future
+ * reason class that defers without children.
+ * Deferral logging is transition-only: one line per node per blocked epoch.
  * This mutates eviction PROPOSALS only; checkpoint bytes are never touched. */
 #define KV_DEFER_BACKOFF_PASSES 8
 
@@ -1314,21 +1319,25 @@ static void kv_defer_backoff_record(ds4_kvstore *kc, const ds4_kvstore_entry *e)
     b->pass = 0;
 }
 
-/* Drop table rows whose node vanished (file deleted => state moved on) or
- * whose recorded state no longer matches the fresh scan (children died,
- * entry touched).  Called at refresh, so "state changed" unblocks a node
- * within one eviction pass. */
+/* Drop a row only when the node actually BECOMES deletable: its file is
+ * gone from the scan, or its live children reached 0.  Anything else -
+ * last_used moves, children count shifts while staying > 0 - keeps the
+ * row: the unlink predicate defers exactly and only when children > 0, so
+ * every other state change leaves the verdict identical.  Letting touches
+ * unblock was the leak behind the field "wall of delete deferred" (one
+ * 65536-row ladder parent deferred 413x/day): each store rewrites ancestor
+ * headers, and each rewrite re-proposed the whole blocked ladder.
+ * The pass expiry below stays as the safety valve for blind spots. */
 static void kv_defer_backoff_prune(ds4_kvstore *kc) {
     kv_defer_backoff_entry *tbl = kc->defer_tbl;
     for (int i = 0; i < kc->defer_len; ) {
-        bool alive = false;
+        bool deletable = false;
         for (int j = 0; j < kc->len; j++) {
             if (memcmp(kc->entry[j].sha, tbl[i].sha, 41) != 0) continue;
-            alive = kc->entry[j].children == tbl[i].children &&
-                    kc->entry[j].last_used == tbl[i].last_used;
+            deletable = kc->entry[j].children == 0;
             break;
         }
-        if (alive) { i++; continue; }
+        if (!deletable) { i++; continue; }
         memmove(&tbl[i], &tbl[i + 1],
                 (size_t)(kc->defer_len - i - 1) * sizeof(tbl[0]));
         kc->defer_len--;
@@ -1356,10 +1365,14 @@ static void kv_cache_unlink_entry(ds4_kvstore *kc, int victim,
          * span. Defer; the parent becomes deletable once its children die.
          * The FILE stays; only the in-memory entry is dropped, mirroring the
          * failed-unlink path so this budget pass never re-picks it. */
-        kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
-                "%s: kv cache delete deferred reason=%s tokens=%u children=%u file=%s",
-                kv_log_name(kc), reason, (unsigned)e.tokens, (unsigned)e.children,
-                e.path ? e.path : "?");
+        /* Log on the transition into backoff only.  Expiry re-checks of a
+         * still-blocked node must not reprint the wall: one line per node
+         * per blocked epoch, not per pass. */
+        if (!kv_defer_is_blocked(kc, e.sha))
+            kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
+                    "%s: kv cache delete deferred reason=%s tokens=%u children=%u file=%s",
+                    kv_log_name(kc), reason, (unsigned)e.tokens, (unsigned)e.children,
+                    e.path ? e.path : "?");
         kv_defer_backoff_record(kc, &e);
         ds4_kvstore_entry_free(&e);
         memmove(kc->entry + victim, kc->entry + victim + 1,

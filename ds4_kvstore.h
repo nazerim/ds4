@@ -156,8 +156,9 @@ typedef struct {
     /* Deferral backoff table (see ds4_kvstore.c): sha of nodes whose delete
      * was deferred with live children (reasons: redundant,
      * redundant-divergent, conversation-retired), so the rescan-driven
-     * victim proposal loop skips them until their state changes or a pass
-     * counter expires.  Eviction proposals only; never mutates a checkpoint. */
+     * victim proposal loop skips them until the node actually becomes
+     * deletable (children reach 0) or a pass counter expires.  Eviction
+     * proposals only; never mutates a checkpoint. */
     void *defer_tbl;
     int defer_len;
     int defer_cap;

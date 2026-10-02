@@ -398,8 +398,26 @@ static void scenario_deferral_backoff(void) {
      * Each evict() is one pass (the in-pass main loop terminates at PHASE D).
      * Without backoff every pass re-proposes y1/y2: counts would climb to 5.
      * With backoff the counts stay flat until expiry. */
-    for (int i = 0; i < 4; i++) ds4_kvstore_evict(&kc, NULL, 0, &inc);
-    CHECK(g_defer_counts[0] == 1, "no re-proposal of the blocked root across 4 frozen passes");
+    for (int i = 0; i < 2; i++) ds4_kvstore_evict(&kc, NULL, 0, &inc);
+    CHECK(g_defer_counts[0] == 1, "no re-proposal of the blocked root across 2 frozen passes");
+
+    /* Touch is NOT a deletability change.  A store/hit rewrites a blocked
+     * parent's header (last_used), which must not unblock its backoff row:
+     * the node is still undeletable while children > 0, and every touch
+     * re-proposing it is the wall the fix exists to stop (field: one 65536
+     * rung deferred 413x/day).  Only children==0 or file removal may drop
+     * the row early; the pass expiry remains the safety valve. */
+    /* Touch with a STALE-but-different last_used: any value within the
+     * retire-grace window would pin the node and confound the later
+     * reclaim assertions.  The predicate under test must ignore it
+     * regardless. */
+    { char sha[41], path[512];
+      ds4_kvstore_sha1_bytes_hex(y1, strlen(y1), sha);
+      snprintf(path, sizeof(path), "%s/%.40s.kv", dir, sha);
+      CHECK(ds4_kvstore_touch_file(path, 2, false, 0, now - 99000),
+            "harness can touch the blocked parent header"); }
+    for (int i = 0; i < 2; i++) ds4_kvstore_evict(&kc, NULL, 0, &inc);
+    CHECK(g_defer_counts[0] == 1, "a touch of the blocked parent does not re-propose it");
 
     /* Expiry path: enough passes to expire HARNESS_DEFER_BACKOFF_PASSES rows.
      * The node MUST become proposable again — nothing is permanently
