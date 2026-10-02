@@ -725,6 +725,15 @@ static void kv_cache_refresh(ds4_kvstore *kc) {
     kv_defer_backoff_prune(kc);
 }
 
+/* Public entry-index refresh: rebuilds kc->entry from the on-disk directory
+ * (with the v3 children index) and prunes the text cache and deferral table.
+ * Exposed for the server's post-store maintenance (review M-5: the divergent
+ * sweep needs a fresh index; eviction and the delta-pick path refresh through
+ * this same function internally). */
+void ds4_kvstore_refresh(ds4_kvstore *kc) {
+    kv_cache_refresh(kc);
+}
+
 bool ds4_kvstore_touch_file(const char *path, uint32_t hits, bool stale,
                             uint8_t level, uint64_t last_used) {
     FILE *fp = fopen(path, "r+b");

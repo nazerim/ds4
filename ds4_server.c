@@ -12727,8 +12727,20 @@ static void kv_cache_maybe_store_continued(server *s, server_slot *slot) {
         return;
     }
     if (kv_cache_store_live_prefix(s, slot, tokens, target, "continued")) {
-        (void)kc;
         kv_cache_slot_note_store(slot, target);
+        /* Review M-5: mirror the library's maybe_store_continued maintenance.
+         * A continued store on a re-rendered head (AGENTS.md edit) just added
+         * a fresh anchor on the new branch; prune the old branch's small-dense
+         * anchors at the same (conv_id, tokens) so re-render churn cannot
+         * accumulate duplicates while the cache stays under budget.  Sweep
+         * unlinks files: take kv_mu around the real store (the leaf-lock
+         * hierarchy every other kv op uses); refresh() first so the entry
+         * index includes the file this store just wrote. */
+        uint64_t sweep_total = 0;
+        pthread_mutex_lock(&s->kv_mu);
+        ds4_kvstore_refresh(kc);
+        ds4_kvstore_sweep_small_dense_divergents(kc, NULL, 0, &sweep_total);
+        pthread_mutex_unlock(&s->kv_mu);
         /* Fire a pending divergence anchor that landed at the same boundary
          * as this continued store (already covered) or at a different point
          * (fire now if reachable).  Store at the live length (see above). */
