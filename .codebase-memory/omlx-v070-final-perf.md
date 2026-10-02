@@ -71,15 +71,24 @@ bugs invisibly. Pin the exact tag when quoting oMLX tok/s; the rc1 recon's
 "not comparable" verdict (warm-vs-cold baseline) is unaffected — if anything
 it strengthens it.
 
-## 4. Suggested next actions (ranked; none started)
+## 4. Suggested next actions (ranked; 1 & 2 RESEARCHED 2026-10-02 — see notes)
 
 1. **Study #3908 + #4023/#4041** against our GDN-state slice format and V2 MTP
    payload (`87e11f3` sliced format): both close gaps named in the rc1 recon,
    and #4041's row-exact verify windows are the blueprint for extending
    `qwen4_graph_fused` beyond T<=2.
+   → DONE (lane 2): `.codebase-memory/omlx-v070-mtp-row-exact.md` — most
+   tricks already equal-or-stronger in ds4; genuine gaps: HC combine_norm
+   T=1-only, snapshot depth (rows-recorded + deferred-commit is the answer),
+   two-launch HC; priced sketch for T<=8 behind a per-cycle env gate.
 2. **Audit V2 ladder for a full-state-tail-per-rung analog** of a28e5a87 —
    pure policy fix, hits the 140 MiB floor directly; check the GDN
    `[state][hist]` fixed slices and the edited-turn fallback need.
+   → DONE (lane 1): `.codebase-memory/omlx-v070-cache-policy.md` — retention
+   waste structurally absent (rung grid is 8192/16384, not 512; keep-set is
+   already frontier+2); live residue = superseded off-grid frontier stores
+   reclaiming only under budget (Scenario L pins the fix) + (D-1)x140.3 MiB
+   redundant state RE-READS per depth-D chain resume.
 3. **Cheap server wins**: per-request detokenizer/tokenizer setup audit
    (#3975 analog); idle-TTFT probe on :8002 (first token after >5 min idle;
    #3974 analog if it pays the wake).
