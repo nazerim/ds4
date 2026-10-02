@@ -51,9 +51,14 @@ static const char *g_defer_dir = NULL;
 static const char *g_defer_texts[4];
 static int g_defer_counts[4];
 
+/* Any "delete deferred" line anywhere (Scenario I asserts a same-pass
+ * chained retire produces ZERO of these — review H-2). */
+static int g_any_defer_lines = 0;
+
 static void log_cb(void *ud, ds4_kvstore_log_type type, const char *msg) {
     (void)ud;
     if (type == DS4_KVSTORE_LOG_WARNING) fprintf(stderr, "WARN: %s\n", msg);
+    if (strstr(msg, "delete deferred")) g_any_defer_lines++;
     if (strstr(msg, "delete deferred") && g_defer_dir) {
         for (int i = 0; i < 4; i++) {
             if (!g_defer_texts[i]) continue;
@@ -601,6 +606,152 @@ static void scenario_trailer_rewrite(void) {
     rmdir(dir);
 }
 
+/* ---- Scenario H: incompatible reuse-path unlink must not orphan a chain
+ * child (review M-4).  existing_compatible replaced an on-disk file it
+ * judged incompatible without checking the v3 dependents that reference it
+ * by parent_sha — a child loads only through its parent, so the unlink
+ * silently killed the child's span and left a dead, budget-charged file on
+ * disk until eviction noticed.  The file must instead be kept for the
+ * in-place overwrite (the store renames onto the same sha path). */
+static void scenario_incompatible_dependents(void) {
+    printf("== Scenario H: incompatible unlink respects chain dependents ==\n");
+    char dir[] = "/tmp/kv-harness-h.XXXXXX";
+    if (!mkdtemp(dir)) { perror("mkdtemp"); exit(1); }
+    const uint64_t now = (uint64_t)time(NULL);
+    const char *p = "scenario H incompatible parent text";
+    const char *c = "scenario H dependent child text";
+    stub_file(dir, p, 7, 1, 40960, now - 1000, 4000);
+    stub_file_v3(dir, c, p, 2, 81920, 40960, now - 1000, 4000);
+
+    ds4_kvstore kc = {0};
+    ds4_kvstore_options opt = ds4_kvstore_default_options();
+    if (!ds4_kvstore_open(&kc, dir, 1024, false, 0, opt,
+                          "harness", log_cb, NULL)) {
+        fprintf(stderr, "open failed\n"); exit(1);
+    }
+    char psha[41];
+    ds4_kvstore_sha1_bytes_hex(p, strlen(p), psha);
+    char ppath[512];
+    snprintf(ppath, sizeof(ppath), "%s/%.40s.kv", dir, psha);
+    /* Requested ctx 16384 < stored ctx 32768: incompatible. */
+    CHECK(!ds4_kvstore_existing_compatible(&kc, ppath, psha, p, strlen(p),
+                                           0, 2, 16384),
+          "parent judged incompatible at smaller requested ctx");
+    CHECK(file_exists(dir, p),
+          "incompatible parent KEPT while a v3 dependent references it");
+    CHECK(file_exists(dir, c), "dependent child untouched");
+
+    unlink_text(dir, c);
+    CHECK(!ds4_kvstore_existing_compatible(&kc, ppath, psha, p, strlen(p),
+                                           0, 2, 16384),
+          "still incompatible after the dependent died");
+    CHECK(!file_exists(dir, p),
+          "parent unlinked once no dependent references it");
+    ds4_kvstore_close(&kc);
+    unlink_text(dir, c); /* idempotent cleanup */
+    rmdir(dir);
+}
+
+/* ---- Scenario I: one-pass convergence of a chained-ladder retirement
+ * (review H-2).  retire_leaf unlinked victims in array-index order, so a
+ * chain parent picked BEFORE its (still-live, also-victim) child was
+ * DEFERRED: the file stayed, freed nothing, and the ladder drained only
+ * ~1 file per refresh pass.  Victims must unlink leaf-ward (descending
+ * delta depth) so a parent whose every child is in the victim set finds
+ * children==0 when its turn comes and is freed in the SAME pass. */
+static void scenario_retire_convergence(void) {
+    printf("== Scenario I: chained-ladder retire converges in one pass ==\n");
+    char dir[] = "/tmp/kv-harness-i.XXXXXX";
+    if (!mkdtemp(dir)) { perror("mkdtemp"); exit(1); }
+    const uint64_t now = (uint64_t)time(NULL);
+    char z1[128], z2[128], z3[128], z4[128];
+    snprintf(z1, sizeof(z1), "scenario I converged chain root");
+    snprintf(z2, sizeof(z2), "%s rung two", z1);
+    snprintf(z3, sizeof(z3), "%s rung three", z2);
+    snprintf(z4, sizeof(z4), "%s rung four", z3);
+    const char *w = "scenario I sibling singleton text";
+    stub_file(dir, z1, 9, 1, 40960, now - 100000, 4000);
+    stub_file_v3(dir, z2, z1, 2, 81920, 40960, now - 100000, 4000);
+    stub_file_v3(dir, z3, z2, 2, 122880, 81920, now - 100000, 4000);
+    stub_file_v3(dir, z4, z3, 2, 163840, 122880, now - 100000, 4000);
+    stub_file(dir, w, 9, 1, 40960, now - 50000, 4000);
+
+    ds4_kvstore kc = {0};
+    ds4_kvstore_options opt = ds4_kvstore_default_options();
+    opt.max_conversations = 0; /* cap engaged only for our pass */
+    if (!ds4_kvstore_open(&kc, dir, 1024, false, 0, opt,
+                          "harness", log_cb, NULL)) {
+        fprintf(stderr, "open failed\n"); exit(1);
+    }
+    kc.opt.max_conversations = 1;
+    g_any_defer_lines = 0;
+    ds4_kvstore_eviction_context inc = {
+        .text = "incoming unrelated request text",
+        .text_len = sizeof("incoming unrelated request text") - 1,
+        .model_id = 0, .quant_bits = 2, .ctx_size = 32768,
+        .reject_different_quant = false,
+    };
+    /* Two non-active lineages (the 4-rung chain, the singleton) over a cap
+     * of 1: the older leaf (chain frontier) retires.  Budget is ample, so
+     * the over-cap path is the only eviction at work. */
+    ds4_kvstore_evict(&kc, NULL, 0, &inc);
+    CHECK(!file_exists(dir, z1), "chain root freed in the same retire pass");
+    CHECK(!file_exists(dir, z2), "rung two freed in the same retire pass");
+    CHECK(!file_exists(dir, z3), "rung three freed in the same retire pass");
+    CHECK(!file_exists(dir, z4), "frontier rung freed");
+    CHECK(file_exists(dir, w), "sibling lineage kept (cap met)");
+    CHECK(g_any_defer_lines == 0, "same-pass retire produced zero deferrals");
+    ds4_kvstore_close(&kc);
+    const char *texts[] = { z1, z2, z3, z4, w };
+    for (int i = 0; i < 5; i++) unlink_text(dir, texts[i]);
+    rmdir(dir);
+}
+
+/* ---- Scenario J: disk-budget input hardening (review M-2) ---- */
+static void scenario_budget_hardening(void) {
+    printf("== Scenario J: budget clamp (no wrap), zero = documented default ==\n");
+    char dir[] = "/tmp/kv-harness-j.XXXXXX";
+    if (!mkdtemp(dir)) { perror("mkdtemp"); exit(1); }
+    ds4_kvstore kc = {0};
+    ds4_kvstore_options opt = ds4_kvstore_default_options();
+    /* 2^44 MiB overflows the MiB→bytes multiply to EXACTLY zero before the
+     * clamp: budget_bytes==0 short-circuits every eviction path, silently
+     * disabling reclamation forever. */
+    CHECK(ds4_kvstore_open(&kc, dir, (1ull << 44), false, 0, opt,
+                           "harness", log_cb, NULL),
+          "open with absurd budget succeeds");
+    CHECK(kc.budget_bytes ==
+          (UINT64_MAX / (1024ull * 1024ull)) * (1024ull * 1024ull),
+          "absurd budget clamps to the largest representable value (never wraps)");
+    ds4_kvstore_close(&kc);
+    CHECK(ds4_kvstore_open(&kc, dir, 0, false, 0, opt,
+                           "harness", log_cb, NULL),
+          "open with budget 0 succeeds");
+    CHECK(kc.budget_bytes == (uint64_t)DS4_KVSTORE_DEFAULT_MB * 1024ull * 1024ull,
+          "budget 0 means the documented default (4 GiB), never disable");
+    ds4_kvstore_close(&kc);
+    rmdir(dir);
+}
+
+/* ---- Scenario K: store gate mirrors the load gate (review M-3) ---- */
+static void scenario_quant_gates(void) {
+    printf("== Scenario K: quantization gate mirroring ==\n");
+    CHECK(ds4_kvstore_quant_bits_loadable(2) && ds4_kvstore_quant_bits_loadable(4),
+          "loadable set keeps {2,4}");
+    CHECK(!ds4_kvstore_quant_bits_loadable(0) &&
+          !ds4_kvstore_quant_bits_loadable(1) &&
+          !ds4_kvstore_quant_bits_loadable(3) &&
+          !ds4_kvstore_quant_bits_loadable(5) &&
+          !ds4_kvstore_quant_bits_loadable(6) &&
+          !ds4_kvstore_quant_bits_loadable(8) &&
+          !ds4_kvstore_quant_bits_loadable(16),
+          "everything else is not loadable (store must not write q5+)");
+    CHECK(ds4_kvstore_quant_bits_supported(5) &&
+          ds4_kvstore_quant_bits_supported(6) &&
+          ds4_kvstore_quant_bits_supported(8),
+          "file-visibility set unchanged (q5+ files stay indexed, budget-charged)");
+}
+
 int main(void) {
     scenario_switch_churn();
     scenario_idle_retired();
@@ -608,6 +759,10 @@ int main(void) {
     scenario_divergence_logic();
     scenario_deferral_backoff();
     scenario_trailer_rewrite();
+    scenario_incompatible_dependents();
+    scenario_retire_convergence();
+    scenario_budget_hardening();
+    scenario_quant_gates();
     if (g_failures) {
         fprintf(stderr, "kv_policy_harness: %d failure(s)\n", g_failures);
         return 1;
