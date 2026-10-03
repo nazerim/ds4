@@ -61,17 +61,38 @@ against the heap variant before touching.
 ## Overnight plan
 
 - IMPLEMENT now (cheap, testable via full make test in this window): fix 1
-  (static LUTs) + fix 5 getenv hoist.
-- DESIGN-NOTE only (needs invariant confirmation + review, do not land
-  overnight without the open question answered): fix 2 (incremental
-  live_text), fix 3 (detok table — memory budget across TP workers), fix 4.
+  (static LUTs) + fix 5 getenv hoist. **DONE (`d9a5d60`).**
+- **Fix #2 (incremental live_text) SHIPPED `58c549c`** after the lane-C
+  read-only audit answered open question 1: **SAFE-WITH-CONDITIONS.** The
+  sole consumer of `slot->live_text` is the memory-text probe
+  (`slot_probe_reuse_locked`, pure byte-prefix memcmp) + router scoring —
+  nothing searches/hashes/persists it, and the probe's
+  `live_text_pos == live_pos` guard already fails closed on staleness.
+  Detok prefix-stability proven by construction: the render loop
+  (`ds4_kvstore_render_tokens_text` ds4_kvstore.c:1985-1997) is stateless
+  per token (pure `ds4_token_text` appends, zero whole-string
+  postprocessing; the SSE partial-UTF8/stop holds are a different path).
+  Implementation: per-slot `live_text_ids` snapshot + pure predicate
+  `live_text_can_append` (strictly-longer + identical head); every rewind/
+  tool-rewrite/disk-swap/reset surfaces as head-mismatch or shrink and
+  falls back to full re-render; predicate pinned by model-free --server
+  unit test. Vision-store splice (:12404-12414) was the in-repo precedent.
+- **TTFT-floor note corrected:** the ~460 ms cold TTFT is NOT explained by
+  live_text (refresh runs after `job_complete`, lands on the NEXT request's
+  queue time; a cold first prompt sees ~0). live_text fix buys per-turn
+  overhead on multi-turn traffic; the cold-floor decomposition remains open.
+- DESIGN-NOTE only (unchanged): fix 3 (detok table — memory budget across
+  TP workers), fix 4 (distributed scratch, open question 3 still gates).
 
 ## Open questions
 
-1. `slot->live_text` consumers (memory-text probe ds4_server.c:12582/:13192,
-   staleness tiers, read under `tool_mu`): does any consumer require
-   live_text to be a FRESH render even when the token prefix is unchanged
-   (e.g. after a disk-cache swap keeping the same prefix)? Gates fix 2.
+1. ~~`slot->live_text` consumers…~~ — **ANSWERED 2026-10-03 lane C: no
+   fresh-render requirement anywhere; fix #2 shipped (`58c549c`)** with the
+   conditions recorded above.
 2. Detok-table memory (few MB/engine) acceptable in every `ds4_engine`
-   instantiation (multi-slot batched servers, TP workers), or lazy?
-3. Is `ds4_dist_run` perf-relevant in production? Gates fix 4.
+   instantiation (multi-slot batched servers, TP workers), or lazy? —
+   still open, gates fix 3.
+3. Is `ds4_dist_run` perf-relevant in production? Gates fix 4. — open.
+4. NEW (lane C follow-up): measure realized per-turn refresh savings via
+   `TRACE_PATH=./log/ds4.trace` (before/after wall time of
+   slot_refresh_live_text at long sessions) to size fix #2's win.
