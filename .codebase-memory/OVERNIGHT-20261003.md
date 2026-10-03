@@ -149,6 +149,14 @@ greedy+MTP vs 33.7) confirmed vs 0.7.0. Quant caveat: Q4_K gguf vs oQ4e MLX.
   probe). Full record + re-scoped B1/B2: FUSED-VERIFY-DESIGN-20261003.md
   §B0-RESULT. Tooling SHIPPED: `tests/spec_economics/` (battery, trace
   parser, both 20261003 result JSONs).
+- **B1 MoE attribution + knob (15913c6, defaults unchanged):** depth-bucketed
+  cycle profiler (DS4_QWEN4_MTP_PROFILE) + TIMING=2 group breakdown pin the
+  T3-verify +5.0ms delta at ~60% MoE (per-row expert re-stream, 20.3 vs
+  17.2ms). Grouped-experts path at verify size: −1.35ms/cycle (~2.5%
+  forced-3 wall) but breaks slot-reference bit-identity; shared-dense alone
+  identical, saves nothing. Remaining exactness blocker localized to ONE
+  question: grouped-vs-slot reduction order (metal MOE_*_GROUPED kernels).
+  Full numbers: FUSED-VERIFY-DESIGN §B1.
 - **RISK-1 upstream issue: DRAFTED** (threadgroup-limit exposure, all cites
   re-verified against upstream `0aaea5a` via gh api; no duplicate issues;
   #607 cross-ref as the M1-Max audience evidence). NOT POSTED — awaiting

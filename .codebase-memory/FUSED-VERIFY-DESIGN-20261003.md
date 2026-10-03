@@ -61,6 +61,26 @@ batteries' outputs saved):
   unconditionally; three rows burn 64-split-slot threadgroups, so the
   single dispatch costs ~what the 2/1 sub-batches saved.
 
+### B1 attribution (2026-10-03, DS4_QWEN4_TIMING=2 + DS4_QWEN4_MTP_PROFILE runs)
+
+Per-group T3-vs-T2 verify delta (profiler-synced numbers, single session):
+verify_deep 27.85 vs verify_shallow 22.85 ms -> **5.0ms**; TIMING=2 group
+breakdown attributes ~**3.1ms to MoE** (20.3 vs 17.2), ~0.6 gdn, ~0.6 hc_ffn,
+~0.3 hc_attn, ~0.3 attn, ~0.2 ple. The MoE share is per-(row,slot) expert
+weight re-stream at T<=8 (slot path). Experiments:
+- shared-dense at verify T (DS4_QWEN4_SHARED_DENSE_MIN=1, routed still
+  slot): byte-IDENTICAL, zero savings (27.94ms) - shared reads overlap.
+- shared-dense + grouped experts (default knobs at MIN=1): saves 1.35ms
+  (26.5ms, forced-3 battery 55.1s vs 57.2s) but **breaks slot-reference
+  bit-identity** (same prompts 3/7 diverge as B0 - the grouped kernel's
+  per-row reduction order differs from the slot kernel, which IS the T=1
+  serial reference).
+=> the remaining exactness blocker is now ONE question: make the grouped
+mid/down kernels reproduce the slot kernels' per-row accumulation order
+(metal/qwen4.metal MOE_MID_Q4K_GROUPED / DOWN_MXFP4_GROUPED vs
+MOE_MID/DOWN slot variants - compare dequant/simd_sum order). Everything
+else on the deep path is genuine per-row compute.
+
 Implications for B1/B2 (re-scoped):
 1. The rows path's per-row geometry (`qwen4_attn_row_splits`, kps = fixed
    split-size windows) differs from the plain decode kernel's redistributed
