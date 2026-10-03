@@ -215,17 +215,91 @@ defaults, smoke ok, 0 WARN); all work pushed through `eb071fd`. NEXT queue:
    distributed scratch (#4, question 3).
 7. Per-turn live_text savings sizing via TRACE_PATH (lane C follow-up 1).
 
-## State at handoff + verification — UPDATED
+## THIRD WINDOW 2026-10-03 (17:21-18:3x, operator-approved: tasks 0+1 back-to-back)
+
+Engine cycled through 6 measurement configs (QWEN_BATCH_SESSION=0,
+DS4_QWEN4_SPEC_TRACE=1, DS4_QWEN4_VERIFY_PER_ROW=1 +/- MTP_DEPTH/SPEC_DISABLE);
+production config restored at window end.
+
+### Task 0 DONE: acceptance economics re-measured under per-row (detail +
+tables in MTP-ACCEPTANCE-20261003.md PER-ROW section). Headline: acceptance
+stats are drift-robust (2.201 tok/cycle identical; P(a2|a1) 70.5->69.6%);
+COST is not - per-row adaptive 65.5-72.3 s (drift-default 55.4), forced-3
+per-row 79.2-80.2 s = SLOWER than serial (~71.7 avg). Per-row spec ~= serial
+speed at serial-exact-everywhere-but-the-last-mile cost. Evidence JSONs +
+spec-trace logs banked under tests/spec_economics/results/ (20261003_pr_*).
+
+### Task 1 DONE (bisected, then some): the "server residual" was never a
+server bug. Full chain (doc: QWEN4-VERIFY-IDENTITY-20261003.md RESIDUAL /
+ROOT-CAUSE-2):
+- Solo prompt-3 per-row vs serial on fresh engines: BYTE-IDENTICAL. The
+  battery flip @884 needs slot-reuse history - even re-running the same
+  prompt twice on a clean engine flips on request #2. Mechanism: the
+  adaptive depth-policy counters are SESSION-scoped and NOT reset on server
+  slot reuse -> warm window kills the deep cycles -> different verify grid
+  -> the next near-tie lands elsewhere. (New tool: tests/spec_economics/
+  order_probe.py drives arbitrary prompt sequences vs :8002.)
+- Upgraded --qwen4-verify-identity to sweep 3 depth grids + print full-
+  precision flip pairs: prompt-03 per-row FLIPS deterministically at abs 251
+  (%4=3, gap 4.58e-05) in BOTH forced depth2 and forced depth3 grids (same
+  logits), while adaptive shows flips=0 - the day-shift "flips=0" was grid
+  luck, not identity. => ROOT-CAUSE-2: the fused multi-row forward drifts
+  ~1 ULP in stages the per-row matvec intercept does not cover (robust to
+  the entire geometry-knob matrix: MV_EXT_NSG, GDN_NSG/R4, Q4K_MID,
+  GROUP_EXACT, SHARED_DENSE_MIN, HC/KV/QKV-FUSION, NO_MTP_BATCH; NO_FUSE
+  "passes" only by vacuity - max_chunk=1, speculation dead).
+- Localization target for the follow-up: per-stage row-count A/B inside
+  qwen4_graph_forward_tokens (attention rows kernel, GDN scan, PLE
+  conv/gate, HC combine/pair-mix, MoE slot stage) against the serial tree
+  - the removed kernel harness needs rebuilding with the arena crash fixed.
+- Policy corollary: per-row forced-3 vs adaptive differ at p6@938/p7@1379 =
+  legitimate different policy trajectories (both serial-consistent), NOT
+  violations; keep out of identity assertions.
+
+Decisions recorded: VERIFY_PER_ROW stays OFF (partial fix at most of the
+cost; the default-flip + golden re-capture question moves behind ROOT-CAUSE-2).
+Suite state: full `./ds4_test` under DS4_TEST_MODEL=Qwen ran GREEN in this
+window: 25 OK / 0 ERR (make test aborted on a dead nohup'd background job -
+operator rule reminder: foreground with timeout or poll properly).
+
+## NEXT queue (ranked) — UPDATED 4th time
+
+1. ROOT-CAUSE-2 localization: kernel-level rowcount A/B per stage of the
+   qwen4 multi-row forward (rebuild the sweep harness, arena-safe); fix =
+   extend per-row interception (or per-row-exact rewrites) to whichever
+   stages drift; gate: --qwen4-verify-identity flips=0 across ALL THREE
+   depth grids on prompts 03/06/07 + think variants.
+2. Session-reuse determinism decision: reset qwen4_depth_window/streak/
+   engaged at request boundary in the server (kills the history-dependent
+   depth grid)? Behavior change -> operator approval; also makes battery
+   order irrelevant for repro.
+3. Operator decision package (was task 2): default-flip question is DEFERRED
+   behind #1 - per-row alone buys +18-30% wall without identity. Numbers
+   ready in MTP-ACCEPTANCE PER-ROW section; goldens still encode the drifting
+   stream either way.
+4. Fused single-dispatch T=3 verify (queue-2 unchanged; note it must now
+   fold in BOTH the matvec per-row cost AND the ROOT-CAUSE-2 stage fixes -
+   the fused kernel is the natural place to make rows serial-exact by
+   construction).
+5. POST the RISK-1 upstream issue — draft ready, operator approval only.
+6. QSA tile widening (prefill front vs omlx 0.7.0).
+7. R2b field measurement / Scenario L reclaim tally / detok-table decision /
+   per-turn live_text sizing (unchanged tail).
+
+## State at handoff + verification — UPDATED (window 3)
 
 Production engine: restored via `./ds4-server.sh start-qwen` at window end.
 Verify:
 ```sh
 cd /Users/naz/Projects/ds4
-git log --oneline -8
+git log --oneline -5
 pgrep -f 'ds4-server --model'
 grep -cE 'WARN|ERR' log/ds4-qwen.log          # expect 0
-./ds4_test --server >/dev/null 2>&1 && echo server-green   # coexists (model-free)
-curl -s 127.0.0.1:8005/health                  # glimmer up, 12 models, 0 loaded
-# full make test now GREEN under DS4_TEST_MODEL=Qwen (25 OK, 4 guarded skips);
-# under default (ds4flash.gguf -> Vision-Exp) unchanged behavior.
+./ds4_test --server >/dev/null 2>&1 && echo server-green
+# identity gate now 3-grid: DS4_TEST_MODEL=gguf/Qwen3.8-Flash-Next-Q4.gguf
+# DS4_TEST_GLM_MTP=1 DS4_QWEN4_VERIFY_PER_ROW=1 DS4_TEST_VERIFY_PROMPT_FILE=
+# tests/spec_economics/prompts/03_Explain_how_a.txt ./ds4_test --qwen4-verify-identity
+# (engine STOPPED for that; expect flips>0 until ROOT-CAUSE-2 lands - the
+# sweep is the honest state-of-truth now)
+curl -s 127.0.0.1:8005/health
 ```

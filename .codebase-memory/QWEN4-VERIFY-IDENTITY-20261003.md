@@ -1,11 +1,14 @@
 # Qwen4 verify-vs-serial identity violation — found 2026-10-03 (pre-existing)
 
-> **STATUS 17:40 2026-10-03: ROOT-CAUSED + FIXED (env-gated `DS4_QWEN4_VERIFY_
-> PER_ROW=1`), session-level probes flips=0; one server-path residual open —
-> see ROOT CAUSE section below. The original "leading hypotheses" text is kept
-> as history; hypotheses 2 was correct in substance (split-window redistribution
-> generalizes to the matvec tree itself), hypotheses 1 partially (pos%4=3 was a
-> near-tie coincidence, not the selection universe).
+> **STATUS 18:30 2026-10-03: matvec drift ROOT-CAUSED + FIXED
+> (env-gated `DS4_QWEN4_VERIFY_PER_ROW=1`); the server residual was
+> bisected to ROOT-CAUSE-2 (see RESIDUAL section: fused multi-row forward
+> still drifts ~1 ULP outside the matvec hosts; adaptive flips=0 is grid
+> luck, forced grids flip deterministically). The original "leading
+> hypotheses" text is kept as history; hypothesis 2 was correct in substance
+> (split-window redistribution generalizes to the whole multi-row forward,
+> not just matvec); hypothesis 1 partially (pos%4=3 was a near-tie
+> coincidence, not the selection universe).
 
 Discovered while B3-tuning the depth policy (the lockout fix makes depth
 transitions frequent, which amplified a latent gap into visible battery
@@ -79,6 +82,9 @@ Cost = re-read weights per row (logits Q8 head 1.3 GiB x extra rows/step).
   DS4_TEST_VERIFY_THINK knobs; prompts now banked under
   tests/spec_economics/prompts/): **flips=0, worst_gap=0.0000** on prompts
   03/06/07, think-none AND think-high, including deep cycles (max_chunk=3).
+  (18:30 correction: this grid was lucky - the probe now sweeps
+  adaptive/depth2/depth3 and prompt-03 forced grids flip deterministically;
+  see ROOT-CAUSE-2.)
 - Server battery (QWEN_BATCH_SESSION=0, temp 0): serial 70.3-73.8 s |
   drift-default 55.4 s | per-row-correct 65.4 s. Per-row spec is still
   ~12% faster than serial and now provably identical to it at session level.
@@ -86,13 +92,59 @@ Cost = re-read weights per row (logits Q8 head 1.3 GiB x extra rows/step).
   arena/dangling-scope crash; findings above preserved in this doc; the
   engine probe is the durable regression).
 
-### RESIDUAL (open, narrow): server-completions battery prompt 3 @884 still
-differs per-row-vs-serial even though the session-level probe (same prompt,
-think-high included, 512 tok) reports flips=0. So the remaining server-path
-difference is NOT matvec row-count coupling - candidates: the server's
-spec skip/rollback boundaries (DSML think-close transitions where spec
-toggles mid-stream, `glm_mtp_rollback`-analog state, completions vs chat
-prompt shaping). Needs a server-level trace bisect in a fresh session.
+### RESIDUAL: BISECTED 17:2x-18:2x (window 3) - it was never a server bug:
+ROOT-CAUSE-2 = the fused multi-row forward itself, plus a session-reuse
+policy twist. Both proven with `tests/spec_economics/order_probe.py`
+(arbitrary prompt sequences vs the live server) + the upgraded
+`--qwen4-verify-identity` (now sweeps adaptive/depth2/depth3 grids and
+prints the flip's full-precision logit pair):
+
+1. **Server prompt-3@884 = slot-reuse depth-grid, not DSML/rollback.**
+   Solo prompt-3 on a fresh engine: per-row spec output is BYTE-IDENTICAL to
+   serial (1565 chars, same sha). The battery (prompt-3 = 4th request)
+   diverges from serial @884; re-running the SAME prompt twice on a clean
+   engine flips on request #2 exactly (and #3==#2). Cycle traces explain it:
+   req#1 (cold session counters) engaged deep(T=3) at pos 158/161/163;
+   req#2 (warm `qwen4_depth_window/streak/engaged` — session-scoped and
+   NOT reset across server slot reuse) ran zero deep cycles; committed
+   streams agree through pos 292, then cycle 293 row-0 (T=2 in BOTH runs)
+   commits 364 vs 1331. The adaptive-policy counters are per-session and
+   the server reuses sessions across requests (rewind/replay) -> the depth
+   grid is request-history dependent. (Follow-up hygiene question, NOT yet
+   acted: reset the depth counters at request boundary for determinism.)
+2. **ROOT-CAUSE-2: per-row matvec is NOT sufficient - the fused T>=2 trunk
+   forward drifts elsewhere.** Probe prompt-03 per-row: adaptive flips=0,
+   but **forced depth2 AND forced depth3 both flip at abs 251 (%4=3, gap
+   4.58e-05: committed 799 vs replay argmax 9167 - a near-tie)** with
+   IDENTICAL logits -> the flip is deterministic and independent of the
+   2/1-row sub-batch split (T=3 reproduces the T=2 numbers exactly).
+   Adaptive "flips=0" is grid luck (which near-ties land as verify rows),
+   NOT proof of identity - the day-shift flips=0 claim must be read that
+   way. Knob matrix: robust to DS4_METAL_MV_EXT_NSG, DS4_QWEN4_GDN_NSG,
+   NO_GDN_R4, NO_Q4K_MID, MOE_GROUP_EXACT, SHARED_DENSE_MIN=1,
+   METAL_DISABLE_{HC,KV,QKV_NORM}_FUSION, QWEN4_NO_MTP_BATCH, and
+   DISABLE_HC_FUSION is inert here (decode fusions default ON only on M3
+   Ultra - `ds4_gpu_qwen4_decode_fusions_enabled`, ds4_metal.m:48711).
+   DS4_QWEN4_NO_FUSE=1 gives flips=0 but is VACUOUS (max_chunk=1: every
+   cycle degrades to 1-row eval, speculation dead, wall == serial).
+   => the residual ~1-ULP coupling lives in the multi-row dispatches of
+   qwen4_graph_forward_tokens that are NOT mv_ext matmul: attention rows
+   kernel, GDN scan, PLE conv/gate, HC combine/pair-mix, MoE slot-stage,
+   rope/scores — needs the kernel-level rowcount sweep rebuilt (the
+   day-shift harness died on the arena crash; start per-stage A/B against
+   the serial tree at T=2 with the real verify buffers).
+3. **Cross-config corollary (benign):** per-row forced-3 vs per-row adaptive
+   differ at p6@938/p7@1379 = legitimate policy trajectories (both serial-
+   consistent streams, different tokens committed); NOT identity violations.
+   Per-row battery == serial on 8/10 prompts (0,1,2,4,5,6,8,9); 3 and 7 flip.
+
+### Default posture UPDATED (18:30): per-row stays OFF.
+It removes the matvec drift family (p6@938 class fixed) at +18-30% battery
+wall, but does not achieve identity (ROOT-CAUSE-2). Flipping the default now
+buys most of the cost without the guarantee; the fix target is now the
+non-matvec row-count coupling (queue #1 below), then GROUP_EXACT/fused-window
+work re-validated against the 3-grid probe, THEN the default decision
+(golden re-capture `--local-golden-capture` only after identity truly holds).
 
 ### Default posture (17:40)
 Env OFF (default binary == drift-status-quo, golden vectors unchanged) while

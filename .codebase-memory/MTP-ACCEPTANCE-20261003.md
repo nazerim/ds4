@@ -1,15 +1,42 @@
 # Qwen4 nextn MTP acceptance economics — measured 2026-10-03 (adaptive vs forced depth-3)
 
-> **CAVEAT 17:50 2026-10-03 (same day):** all numbers below were taken on the
-> pre-identity-fix engine — verify-vs-serial drift was later proven
-> (QWEN4-VERIFY-IDENTITY-20261003.md: the T=2/T=3 matvec stage drifts ~1 ULP
-> vs serial and flips near-tie argmaxes). Per-cycle acceptance rates (P(a1),
-> P(a2|a1)) remain meaningful — acceptance is measured against the drifting
-> stream itself. The WALL comparisons (forced-3 +2% etc.) conflate verify
-> cost with drift-induced trajectory changes and must be re-measured with
-> DS4_QWEN4_VERIFY_PER_ROW=1 before acting on them. Re-run:
-> tests/spec_economics/ (battery + parse_spec_trace), identity gate:
-> ./ds4_test --qwen4-verify-identity.
+> **RE-MEASURED 17:2x-18:2x 2026-10-03 under DS4_QWEN4_VERIFY_PER_ROW=1**
+> (same battery, same machine, fresh engine per run, 2 runs/config — run
+> texts byte-identical within config). The headline numbers are in §PER-ROW
+> below; the pre-fix tables above stay as history. The identity gate was
+> later shown grid-luck-sensitive (QWEN4-VERIFY-IDENTITY-20261003.md
+> ROOT-CAUSE-2): acceptance stats per config remain valid, the per-row WALL
+> below is the operating point to act on.
+
+## PER-ROW re-measurement (the caveat above, resolved)
+
+| config (temp 0, QWEN_BATCH_SESSION=0, 10-prompt battery x400 tok) | wall runs | cycles | deep(T=3) | P(a1) | P(a2\|a1,deep) | tok/cycle |
+|---|---|---|---|---|---|---|
+| drift-default adaptive (pre-fix binary, 16:12) | 55.4 / 55.6 | 2142 | 11 (0.5%) | 73.5% | 81.8% (n=11) | 1.739 |
+| **per-row adaptive** | **65.5 / 72.3** | 2127 | 17 (0.8%) | 72.5% | 90.9% (n=11) | **1.730** |
+| forced-3 drift-default (pre-fix binary) | 56.2 | 1672 | 1668 | 70.5% | 70.5% (n=1176) | 2.201 |
+| **forced-3 per-row** | **79.2 / 80.2** | 1672 | 1669 | 70.9% | 69.6% (n=1183) | **2.201** |
+| serial reference | 69.6 / 73.8 | — | — | — | — | 1.0 |
+
+- **Acceptance is drift-robust, cost is not.** tokens/cycle is identical
+  before/after the fix in both modes (1.739→1.730 adaptive — 15 fewer cycles
+  from the fixed p6/p7 trajectories; 2.201→2.201 forced-3 with P(a2|a1)
+  70.5→69.6% at n≈1.2k). The drafter is the same; the WALL moves.
+- **Per-row verify is expensive.** adaptive: 55.4 → 65.5-72.3 s (+18-30%,
+  run-to-run wall noise ~±5 s on identical text); forced-3: 56.2 → 79.7 avg
+  (+41%). T=3 cycles cost C3/C2 ~1.45-1.55 under per-row (extra rows re-read
+  the 1.3 GiB Q8 logits head + trunk weights), vs the pre-fix >1.266 bound —
+  **forced depth-3 per-row (79.7 s) is now SLOWER than serial (71.7 avg)**,
+  so the "wide-T lift" business case is strictly gated on fused row-exact
+  verify, even more firmly than the pre-fix table concluded.
+- **Spec still pays under per-row vs serial** (65.5 best-run vs 69.6
+  best-run, ~+6%; averages 68.9 vs 71.7, ~+4%) but the 12% headline from the
+  day shift is noise-limited — treat per-row spec as "serial-identical at
+  serial-ish cost" until the second drift source (ROOT-CAUSE-2) and the
+  fused window land.
+- Do NOT force DS4_QWEN4_MTP_DEPTH=3 anywhere. Adaptive default (drift)
+  remains the fastest known binary behavior; per-row is the correctness knob
+  (partial: matvec stage only).
 
 Answers open question #1 of `.codebase-memory/omlx-v070-mtp-row-exact.md`
 (the wide-T lift business case). Overnight window, engine on M5 Max, single
