@@ -74767,12 +74767,37 @@ static int qwen4_spec_depth(ds4_session *s) {
      * second draft accepts at ~0.6 on general prose, which does not cover
      * the wider cycle, while deterministic continuations accept at ~0.95+
      * and gain 10-20 percent. */
+    /* B3 tuning knobs (read per cycle, cheap, same idiom as
+     * qwen4_mtp_draft_rows): defaults reproduce the historical policy. */
+    static uint32_t bits_on = 0, bits_off = 0, r2_off = 0;
+    if (!bits_on) {
+        const char *bo = getenv("DS4_QWEN4_DEPTH_BITS_ON");
+        const char *bf = getenv("DS4_QWEN4_DEPTH_BITS_OFF");
+        const char *br = getenv("DS4_QWEN4_DEPTH_R2_OFF");
+        bits_on = bo && bo[0] ? (uint32_t)atoi(bo) : 8u;
+        bits_off = bf && bf[0] ? (uint32_t)atoi(bf) : 6u;
+        r2_off = br && br[0] ? (uint32_t)atoi(br) : 2u;
+        if (bits_on > 8u) bits_on = 8u;
+        if (bits_off > bits_on) bits_off = bits_on;
+        if (!r2_off) r2_off = 1u;
+    }
     if (!s->qwen4_depth3_engaged) {
-        if (bits >= 8u && s->qwen4_depth_cycles >= 8u && s->qwen4_reject2_streak == 0u) {
+        if (bits >= bits_on && s->qwen4_depth_cycles >= 8u && s->qwen4_reject2_streak == 0u) {
             s->qwen4_depth3_engaged = true;
         }
-    } else if (bits < 6u || s->qwen4_reject2_streak >= 2u) {
+    } else if (bits < bits_off || s->qwen4_reject2_streak >= r2_off) {
         s->qwen4_depth3_engaged = false;
+        /* The streak is otherwise only reset by a deep accept, so a session
+         * that streaks out can never re-engage (engage needs streak == 0):
+         * deep cycles freeze at ~0.4% of the session (2026-10-03 B3 grid).
+         * DS4_QWEN4_DEPTH_UNLOCK=1 pays the penalty at disengage.  OFF by
+         * default until the T=2-verify-vs-serial identity gap
+         * (QWEN4-VERIFY-IDENTITY-20261003.md) is resolved - with that gap
+         * open, more depth transitions means more output drift vs serial. */
+        static int depth_unlock = -1;
+        if (depth_unlock < 0)
+            depth_unlock = getenv("DS4_QWEN4_DEPTH_UNLOCK") != NULL;
+        if (depth_unlock) s->qwen4_reject2_streak = 0u;
     }
     return s->qwen4_depth3_engaged ? 3 : 2;
 }
