@@ -256,39 +256,56 @@ ROOT-CAUSE-2):
   legitimate different policy trajectories (both serial-consistent), NOT
   violations; keep out of identity assertions.
 
-Decisions recorded: VERIFY_PER_ROW stays OFF (partial fix at most of the
-cost; the default-flip + golden re-capture question moves behind ROOT-CAUSE-2).
-Suite state: full `./ds4_test` under DS4_TEST_MODEL=Qwen ran GREEN in this
-window: 25 OK / 0 ERR (make test aborted on a dead nohup'd background job -
-operator rule reminder: foreground with timeout or poll properly).
+### ROOT-CAUSE-2 CLOSED same evening (19:1x, still in the approved window)
+- New harness `--qwen4-rowcount-ab` (DS4_SERVER_TEST-only per-stage row-0
+  hashing inside qwen4_graph_forward_tokens; fused T=2 vs sequential T=1 from
+  identical prefixes): first divergence = layer-0 `mixed` with IDENTICAL
+  xn/lo => the T=2 PAIR hc gate/mix kernel != two T=1 dispatches; with
+  NO_HC_PAIR the diff moves to the FIRST FULL-ATTENTION layer's blk =>
+  chunk-level selection universe (hypothesis 1 confirmed at last).
+- Fix v2 under the SAME env (ds4.c, 2<=T<=8): per-row gate/mix dispatch +
+  per-row attention core with the row's own (pos+1)/4 universe.
+- Gates ALL PASS with flag ON: rowcount-ab 962/962 stage hashes identical,
+  logit maxabs EXACTLY 0.0 both rows (8 pairs); 3-grid identity probes
+  flips=0 on prompts 03/06/07 (+think-high); server [3,3] repeat now
+  byte-identical across requests AND to serial; battery per-row-v2 x2
+  run-identical and 10/10 prompts BYTE-IDENTICAL to the banked serial
+  battery (pr2_adaptive_1/2: 71.6/77.0 s; forced3 83.3 s, 2.196 tok/cycle).
+- Flag OFF controls unchanged (forced-2 still flips on prompt 03; default
+  binaries dispatch exactly as before).
+- Honest cost: per-row v2 spec ~= serial wall (per-row everything = serial
+  work per committed token). It is the AUDIT/CORRECTNESS mode, not a speed
+  mode. Speed+identity together requires row-INVARIANT fused kernels -
+  B0/lane-2 blueprint now carries that hard requirement + rowcount-ab as
+  its acceptance gate.
+- Full suite re-run with v2 landed: exit 0, 26 OK / 0 ERR (rowcount-ab added;
+  skips honest). Binary-artifact hygiene re-checked clean. Engine restored
+  production defaults (new binary, flag OFF) - smoke ok, 0 WARN.
 
-## NEXT queue (ranked) — UPDATED 4th time
+## NEXT queue (ranked) - UPDATED 5th time (ROOT-CAUSE-2 CLOSED)
 
-1. ROOT-CAUSE-2 localization: kernel-level rowcount A/B per stage of the
-   qwen4 multi-row forward (rebuild the sweep harness, arena-safe); fix =
-   extend per-row interception (or per-row-exact rewrites) to whichever
-   stages drift; gate: --qwen4-verify-identity flips=0 across ALL THREE
-   depth grids on prompts 03/06/07 + think variants.
-2. Session-reuse determinism decision: reset qwen4_depth_window/streak/
-   engaged at request boundary in the server (kills the history-dependent
-   depth grid)? Behavior change -> operator approval; also makes battery
-   order irrelevant for repro.
-3. Operator decision package (was task 2): default-flip question is DEFERRED
-   behind #1 - per-row alone buys +18-30% wall without identity. Numbers
-   ready in MTP-ACCEPTANCE PER-ROW section; goldens still encode the drifting
-   stream either way.
-4. Fused single-dispatch T=3 verify (queue-2 unchanged; note it must now
-   fold in BOTH the matvec per-row cost AND the ROOT-CAUSE-2 stage fixes -
-   the fused kernel is the natural place to make rows serial-exact by
-   construction).
-5. POST the RISK-1 upstream issue — draft ready, operator approval only.
-6. QSA tile widening (prefill front vs omlx 0.7.0).
-7. R2b field measurement / Scenario L reclaim tally / detok-table decision /
+0. Fused ROW-INVARIANT verify windows (the one milestone delivering speed AND
+   identity): mv_ext lane->K split reproducing the T=1 tree per row, hc
+   gate/mix pair-kernel invariance, per-row selection universe in one
+   dispatch (the *_rows kernel family is the blueprint - batched-session
+   already does per-row geometry there). Gate: --qwen4-rowcount-ab maxabs=0
+   on 512-token streams x3 prompts + 3-grid identity flips=0 + battery text
+   == serial + wall between drift-default (55.4) and per-row-v2 (~72).
+1. Decision record (was task 2): keep DS4_QWEN4_VERIFY_PER_ROW default OFF
+   (v2 == serial cost, no speed argument); goldens keep drift-encoded until
+   the invariant path lands or an audit run under v2 pins them. Revisit
+   after milestone 0.
+2. Session depth-counter carry-over at slot reuse (grid determinism;
+   harmless for identity now, still history-dependent).
+3. POST the RISK-1 upstream issue - draft ready, operator approval only.
+4. QSA tile widening (prefill front vs omlx 0.7.0).
+5. R2b field measurement / Scenario L reclaim tally / detok-table decision /
    per-turn live_text sizing (unchanged tail).
 
-## State at handoff + verification — UPDATED (window 3)
+## State at handoff + verification - UPDATED 5th time
 
-Production engine: restored via `./ds4-server.sh start-qwen` at window end.
+Production engine: running on the v2 binary with flag OFF (defaults ==
+pre-today dispatch; PID via ./ds4-server.sh status).
 Verify:
 ```sh
 cd /Users/naz/Projects/ds4
@@ -296,10 +313,11 @@ git log --oneline -5
 pgrep -f 'ds4-server --model'
 grep -cE 'WARN|ERR' log/ds4-qwen.log          # expect 0
 ./ds4_test --server >/dev/null 2>&1 && echo server-green
-# identity gate now 3-grid: DS4_TEST_MODEL=gguf/Qwen3.8-Flash-Next-Q4.gguf
-# DS4_TEST_GLM_MTP=1 DS4_QWEN4_VERIFY_PER_ROW=1 DS4_TEST_VERIFY_PROMPT_FILE=
-# tests/spec_economics/prompts/03_Explain_how_a.txt ./ds4_test --qwen4-verify-identity
-# (engine STOPPED for that; expect flips>0 until ROOT-CAUSE-2 lands - the
-# sweep is the honest state-of-truth now)
+# identity (engine STOPPED):
+#   DS4_TEST_MODEL=gguf/Qwen3.8-Flash-Next-Q4.gguf DS4_TEST_GLM_MTP=1
+#   DS4_QWEN4_VERIFY_PER_ROW=1 DS4_TEST_VERIFY_PROMPT_FILE=tests/spec_economics/prompts/03_Explain_how_a.txt
+#   ./ds4_test --qwen4-verify-identity   # flips=0 only with PER_ROW=1
+#   ./ds4_test --qwen4-rowcount-ab       # maxabs=0.0 per pair, with PER_ROW=1
+# full suite: DS4_TEST_MODEL=gguf/Qwen3.8-Flash-Next-Q4.gguf ./ds4_test  # 26 OK
 curl -s 127.0.0.1:8005/health
 ```

@@ -7788,8 +7788,91 @@ static ds4_engine *test_open_dspark_engine(const char *support_path) {
  * dspark --mtp-verify-depth harness measures the worst gap but asserts
  * only <= 2.0 logit tolerance; argmax flips at sub-tolerance gaps still
  * change greedy text, so this probe counts flips explicitly. */
-static void test_qwen4_verify_identity(void) {
+/* Qwen3.8 row-count A/B (ROOT-CAUSE-2, QWEN4-VERIFY-IDENTITY-20261003.md):
+ * for the first spec-committed pairs of the stream, run the fused T=2 verify
+ * forward vs sequential T=1 serial forwards from the SAME synced prefix and
+ * diff per-stage row-0 trunk hashes + row logits.  Locates the first stage
+ * where multi-row geometry breaks serial bit-identity (the per-row matvec
+ * intercept does not cover it).  Engine-level; no server. */
+static void test_qwen4_rowcount_ab(void) {
     ds4_engine *engine = test_get_engine(false);
+    if (!engine || !ds4_engine_is_qwen4(engine) || !test_env_bool("DS4_TEST_GLM_MTP")) {
+        puts("qwen4-rowcount-ab: Qwen3.8 model + DS4_TEST_GLM_MTP=1 required, skipped");
+        return;
+    }
+    const int npairs = getenv("DS4_TEST_RCAB_PAIRS") ?
+        atoi(getenv("DS4_TEST_RCAB_PAIRS")) : 3;
+    const char *pfile = getenv("DS4_TEST_VERIFY_PROMPT_FILE");
+    char *ptext = NULL;
+    if (pfile && pfile[0]) {
+        FILE *pf = fopen(pfile, "rb");
+        TEST_ASSERT(pf != NULL);
+        fseek(pf, 0, SEEK_END);
+        const long psz = ftell(pf);
+        fseek(pf, 0, SEEK_SET);
+        ptext = xmalloc((size_t)psz + 1);
+        TEST_ASSERT(fread(ptext, 1, (size_t)psz, pf) == (size_t)psz);
+        ptext[psz] = '\0';
+        fclose(pf);
+    }
+    ds4_tokens prompt = {0};
+    ds4_chat_begin(engine, &prompt);
+    ds4_chat_append_message(engine, &prompt, "user", ptext ? ptext : test_mtp_copy_prompt());
+    ds4_chat_append_assistant_prefix(engine, &prompt, DS4_THINK_NONE);
+    TEST_ASSERT(prompt.len > 0);
+    int *toks = malloc(512u * sizeof(int));
+    TEST_ASSERT(toks != NULL);
+    int n = 0, chunk = 0;
+    TEST_ASSERT(test_mtp_capture_speculative(engine, &prompt, 512, toks, &n, &chunk) && n > 128);
+    const int cap = 2048;
+    uint64_t *fd = xmalloc((size_t)cap * sizeof(uint64_t));
+    uint64_t *s1 = xmalloc((size_t)cap * sizeof(uint64_t));
+    uint64_t *s2 = xmalloc((size_t)cap * sizeof(uint64_t));
+    int checked = 0, diff_streams = 0, diff_dumps = 0;
+    char err[192];
+    for (int i = 0; i + 1 < n && i / 2 < npairs; i += 2) {
+        int dn = 0, fam0 = -1, fam1 = -1, sam1 = -1, sam2 = -1;
+        float r0d = -1.0f, r1d = -1.0f;
+        const int rc = ds4_test_qwen4_rowcount_ab(
+            engine, prompt.v, prompt.len + i, toks[i], toks[i + 1],
+            fd, s1, s2, cap, &dn, &fam0, &fam1, &sam1, &sam2, &r0d, &r1d,
+            err, sizeof(err));
+        if (rc != 0) {
+            fprintf(stderr, "ds4-test: qwen4-rowcount-ab pair@gen %d failed: %s\n", i, err);
+            break;
+        }
+        checked++;
+        int first_dump_diff = -1;
+        for (int k = 0; k < dn; k++) {
+            if (fd[k] != s1[k]) { first_dump_diff = k; break; }
+        }
+        {   /* layer-0 slot bitmap: which of P1..P4 (R,blk,mixed,xn,lo) differ */
+            char bm[24] = {0};
+            for (int k = 0; k < 20 && k < dn; k++) bm[k] = fd[k] == s1[k] ? '.' : 'X';
+            fprintf(stderr, "ds4-test: qwen4-rowcount-ab layer0 diff: [%s]\n", bm);
+        }
+        const bool identity_ok = fam0 == sam1 && fam1 == sam2;
+        if (!identity_ok) diff_streams++;
+        if (first_dump_diff >= 0) diff_dumps++;
+        fprintf(stderr,
+                "ds4-test: qwen4-rowcount-ab pair@gen %d (abs %d) dump_n=%d "
+                "first_diff=%s layer=%d slot=%d "
+                "pred@%d fused=%d vs serial=%d maxabs=%.3e | pred@%d fused=%d vs serial=%d maxabs=%.3e %s\n",
+                i, prompt.len + i, dn,
+                first_dump_diff >= 0 ? "YES" : "no",
+                first_dump_diff >= 0 ? first_dump_diff / 20 : -1,
+                first_dump_diff >= 0 ? first_dump_diff % 20 : -1,
+                prompt.len + i + 1, fam0, sam1, r0d,
+                prompt.len + i + 2, fam1, sam2, r1d,
+                identity_ok ? "IDENTICAL" : "STREAM-DIFF");
+    }
+    fprintf(stderr, "ds4-test: qwen4-rowcount-ab checked=%d dump-diff=%d stream-diff=%d\n",
+            checked, diff_dumps, diff_streams);
+    free(fd); free(s1); free(s2); free(toks); free(ptext);
+    ds4_tokens_free(&prompt);
+}
+
+static void test_qwen4_verify_identity(void) {    ds4_engine *engine = test_get_engine(false);
     if (!engine || !ds4_engine_is_qwen4(engine)) {
         puts("qwen4-verify-identity: Qwen3.8 model (DS4_TEST_MODEL) required, skipped");
         return;
@@ -8149,6 +8232,7 @@ static const ds4_test_entry test_entries[] = {
     {"--kv-delta", "kv-delta", "Qwen delta-chained continued stores match full checkpoints", test_kv_delta_parity, false},
     {"--qwen4-restore-reuse", "qwen4-restore-reuse", "Qwen restore discards old verifier state and rejects truncated payloads", test_qwen_restore_reused_session, false},
     {"--qwen4-verify-identity", "qwen4-verify-identity", "Qwen3.8 T=2 verify stream replayed through serial decode: count argmax flips with pos%4 fingerprint", test_qwen4_verify_identity, false},
+    {"--qwen4-rowcount-ab", "qwen4-rowcount-ab", "Qwen3.8 fused T=2 verify forward vs sequential T=1 forwards: per-stage row-0 hash diff localizes the row-count coupling (ROOT-CAUSE-2)", test_qwen4_rowcount_ab, false},
     {"--session-snapshot", "session-snapshot", "session snapshot and recurrent-state round trip", test_session_snapshot_roundtrip, false},
     {"--session-rewind", "session-rewind", "Qwen3.8 rewind by snapshot restore and by replay", test_session_rewind_replay, false},
     {"--session-rewind-resample", "session-rewind-resample", "exact-sampling tool-boundary resample rewind restores the block-start state", test_session_rewind_resample_boundary, false},

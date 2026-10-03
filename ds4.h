@@ -506,6 +506,18 @@ bool ds4_session_checkpoint_valid(const ds4_session *s);
  * for inference; free with ds4_session_free_test_checkpoint(). */
 ds4_session *ds4_session_new_test_checkpoint(const int *tokens, int n);
 void ds4_session_free_test_checkpoint(ds4_session *s);
+/* Row-count A/B (ROOT-CAUSE-2, QWEN4-VERIFY-IDENTITY-20261003.md): run one
+ * T=2 fused verify forward vs sequential T=1 serial forwards from the same
+ * synced prefix; dumps hash row-0 trunk buffers per stage, plus row-0/row-1
+ * argmax ids and max-abs logit diffs.  Returns 0 on success. */
+int ds4_test_qwen4_rowcount_ab(ds4_engine *e, const int *tokens, int n,
+                               int pair0, int pair1,
+                               uint64_t *fused_dump, uint64_t *ser1_dump,
+                               uint64_t *ser2_dump, int dump_cap, int *dump_n,
+                               int *fused_am0, int *fused_am1,
+                               int *ser_am1, int *ser_am2,
+                               float *row0_maxabs, float *row1_maxabs,
+                               char *err, size_t errlen);
 /* Attach synthetic image identities to a test checkpoint (copies
  * token_start/row-count/fingerprint per span).  Not usable for inference. */
 void ds4_session_set_test_images(ds4_session *s,

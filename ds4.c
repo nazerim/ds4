@@ -58339,6 +58339,32 @@ static bool qwen4_graph_hc_mix(ds4_qwen4_gpu_graph *g, const ds4_model *m,
                qwen4_gemv(g->hc_u, m, up, g->hc_lo_act, T) &&
                ds4_gpu_qwen4_hc_mix_rows_tensor(g->mixed, g->hc_u, g->xn, T, DS4_N_EMBD, DS4_N_HC);
     }
+    /* DS4_QWEN4_VERIFY_PER_ROW=1: the T=2 PAIR gate/mix kernel is not
+     * bit-identical to two single-row dispatches (same xn/lo, different
+     * mixed; --qwen4-rowcount-ab layer0 slot2).  Dispatch rows individually
+     * so every row takes the exact T=1 kernel.  Same for the T=3 rows_exact
+     * 2/1 split's 2-row half.  Prefill (T>8) keeps its GEMM path. */
+    static int mix_per_row = -1;
+    if (mix_per_row < 0) mix_per_row = getenv("DS4_QWEN4_VERIFY_PER_ROW") != NULL;
+    if (ok && mix_per_row && T >= 2u && T <= 8u) {
+        const uint64_t dim = (uint64_t)DS4_N_EMBD * DS4_N_HC;
+        for (uint32_t r = 0; r < T; r++) {
+            ds4_gpu_tensor *xnr = ds4_gpu_tensor_view(g->xn, r * dim * sizeof(float),
+                                                      dim * sizeof(float));
+            ds4_gpu_tensor *lor = ds4_gpu_tensor_view(g->lo, (uint64_t)r * DS4_N_HC_LOWRANK * sizeof(float),
+                                                      DS4_N_HC_LOWRANK * sizeof(float));
+            ds4_gpu_tensor *mixr = ds4_gpu_tensor_view(g->mixed, (uint64_t)r * DS4_N_EMBD * sizeof(float),
+                                                       DS4_N_EMBD * sizeof(float));
+            const bool rok = xnr && lor && mixr &&
+                ds4_gpu_qwen4_hc_gate_mix_tensor(mixr, xnr, lor, m->map, m->size, up->abs_offset,
+                                                 up->type, 1u, DS4_N_EMBD, DS4_N_HC, DS4_N_HC_LOWRANK);
+            if (mixr) ds4_gpu_tensor_free(mixr);
+            if (lor) ds4_gpu_tensor_free(lor);
+            if (xnr) ds4_gpu_tensor_free(xnr);
+            if (!rok) return false;
+        }
+        return true;
+    }
     if (T == 3u && g->verify_rows_exact) {
         /* Split the 3-row gate/mix into the exact 2-row pair kernel plus the
          * 1-row generic kernel, so every row matches its T <= 2 rounding. */
@@ -58495,6 +58521,39 @@ static bool qwen4_graph_attention_tail(ds4_qwen4_gpu_graph *g, const ds4_model *
                                             n_blocks_after - first_block, ratio, DS4_N_INDEXER_HEAD_DIM,
                                             DS4_N_ROT, DS4_ROPE_FREQ_BASE, DS4_RMS_EPS)) {
         return false;
+    }
+    /* DS4_QWEN4_VERIFY_PER_ROW=1 (ROOT-CAUSE-2, QWEN4-VERIFY-IDENTITY-20261003.md):
+     * run every verify chunk row through the attention core as its own
+     * single-row pass with its own block universe ((pos+1)/4) and key count.
+     * The chunk-level universe lets a row whose own serial step has not yet
+     * closed a block score/attend blocks that only a later row completes -
+     * the row-count coupling the matvec-only intercept left behind (proven
+     * per-stage with --qwen4-rowcount-ab: first divergence at the first full
+     * attention layer's blk, hc xn/lo identical).  Prefill (T>8) and serial
+     * T=1 rows keep their historical paths. */
+    static int attn_per_row = -1;
+    if (attn_per_row < 0) attn_per_row = getenv("DS4_QWEN4_VERIFY_PER_ROW") != NULL;
+    if (attn_per_row && T >= 2u && T <= 8u) {
+        for (uint32_t r = 0; r < T; r++) {
+            const uint32_t rp = pos0 + r;
+            ds4_gpu_tensor *q = ds4_gpu_tensor_view(g->q, (uint64_t)r * q_dim * sizeof(float),
+                                                    q_dim * sizeof(float));
+            ds4_gpu_tensor *gate = ds4_gpu_tensor_view(g->gate, (uint64_t)r * q_dim * sizeof(float),
+                                                       q_dim * sizeof(float));
+            ds4_gpu_tensor *o = ds4_gpu_tensor_view(g->attn_o, (uint64_t)r * q_dim * sizeof(float),
+                                                    q_dim * sizeof(float));
+            ds4_gpu_tensor *iqn = ds4_gpu_tensor_view(g->iqn,
+                    (uint64_t)r * DS4_N_INDEXER_HEAD * DS4_N_INDEXER_HEAD_DIM * sizeof(float),
+                    DS4_N_INDEXER_HEAD * DS4_N_INDEXER_HEAD_DIM * sizeof(float));
+            const bool rok = q && gate && o && iqn &&
+                qwen4_graph_attention_core(g, il, q, gate, iqn, o, (rp + 1u) / ratio, rp, 1u);
+            if (iqn) ds4_gpu_tensor_free(iqn);
+            if (o) ds4_gpu_tensor_free(o);
+            if (gate) ds4_gpu_tensor_free(gate);
+            if (q) ds4_gpu_tensor_free(q);
+            if (!rok) return false;
+        }
+        return true;
     }
     if (T == 3u && g->verify_rows_exact) {
         /* 3-row speculative verify: run the attention core as 2/1-row
@@ -58896,6 +58955,69 @@ static bool qwen4_graph_stage_inputs(ds4_qwen4_gpu_graph *g, const ds4_model *m,
  * everything is causal by construction because the recurrent kernels walk
  * tokens in order and attention reads the caches written for the same
  * chunk.  g->R keeps the pre-mixer streams of every row afterwards. */
+#ifdef DS4_SERVER_TEST
+/* Row-count A/B probe for ROOT-CAUSE-2 (QWEN4-VERIFY-IDENTITY-20261003.md):
+ * hash row 0 of the trunk stream after every stage group inside
+ * qwen4_graph_forward_tokens so a fused T=2 verify forward can be diffed
+ * against sequential T=1 (serial-tree) forwards per stage.  Compiled only
+ * into ds4_test_core.o (DS4_SERVER_TEST); armed by
+ * ds4_test_qwen4_rowcount_ab(), never active in normal runs.  Slot layout
+ * per trunk layer: (R, blk, mixed, xn, lo) at each of 4 stage points
+ * (post-hc_attn_mix, post-attn+steering, post-combine+ffn-mix,
+ * post-moe+steering) = 20; then the final mixer (mixed) + logits row 0.
+ * 22 entries per layer.  The engine syncs commands around each hash point
+ * (debug-only cost; ordered queue, no buffers freed mid-forward). */
+#define QWEN4_RCAB_PER_LAYER 22u
+static uint64_t g_qwen4_rcab[32u * 1024u];
+static uint64_t *g_qwen4_rcab_fill;
+static float *g_qwen4_rcab_tmp;
+static uint64_t g_qwen4_rcab_tmp_floats;
+
+static bool qwen4_graph_forward_tokens(ds4_qwen4_gpu_graph *g, const ds4_model *m,
+                                       const ds4_weights *w, const int *tokens,
+                                       uint32_t T, float *logits_out, bool all_rows);
+
+static void qwen4_rcab_hash_row0(const ds4_gpu_tensor *t, uint64_t floats) {
+    if (!g_qwen4_rcab_fill) return;
+    uint64_t h = 0xcbf29ce484222325ull;
+    if (t && floats) {
+        if (floats > g_qwen4_rcab_tmp_floats) {
+            free(g_qwen4_rcab_tmp);
+            g_qwen4_rcab_tmp = xmalloc(floats * sizeof(float));
+            g_qwen4_rcab_tmp_floats = floats ? floats : 1;
+        }
+        if (g_qwen4_rcab_tmp &&
+            ds4_gpu_tensor_read(t, 0, g_qwen4_rcab_tmp,
+                                floats * sizeof(float)) != 0) {
+            const unsigned char *p = (const unsigned char *)g_qwen4_rcab_tmp;
+            for (uint64_t i = 0; i < floats * sizeof(float); i++) {
+                h ^= p[i];
+                h *= 0x100000001b3ull;
+            }
+        } else {
+            h = 1;   /* read failure is a distinguishable sentinel */
+        }
+    }
+    *g_qwen4_rcab_fill++ = h;
+}
+
+static void qwen4_rcab_stage(const ds4_qwen4_gpu_graph *g) {
+    if (!g_qwen4_rcab_fill) return;
+    (void)ds4_gpu_flush_commands();
+    (void)ds4_gpu_end_commands();
+    qwen4_rcab_hash_row0(g->R, (uint64_t)DS4_N_EMBD * DS4_N_HC);
+    qwen4_rcab_hash_row0(g->blk, DS4_N_EMBD);
+    qwen4_rcab_hash_row0(g->mixed, DS4_N_EMBD);
+    qwen4_rcab_hash_row0(g->xn, (uint64_t)DS4_N_EMBD * DS4_N_HC);
+    qwen4_rcab_hash_row0(g->lo, DS4_N_HC_LOWRANK);
+    (void)glm_graph_begin_commands_if_needed();
+}
+#define QWEN4_RCAB_STAGE(g_) qwen4_rcab_stage(g_)
+#else
+#define QWEN4_RCAB_STAGE(g_) ((void)0)
+#endif
+
+
 static bool qwen4_graph_forward_tokens(ds4_qwen4_gpu_graph *g, const ds4_model *m, const ds4_weights *w,
                                        const int *tokens, uint32_t T, float *logits_out, bool all_rows) {
     if (!g || T == 0 || T > g->cap_tokens || g->pos + T > g->ctx_cap) return false;
@@ -58961,6 +59083,7 @@ static bool qwen4_graph_forward_tokens(ds4_qwen4_gpu_graph *g, const ds4_model *
         QWEN4_PROF(0);
         if (ok) ok = qwen4_graph_hc_mix(g, m, l->hc_attn_norm, l->hc_attn_down, l->hc_attn_up, l->hc_attn_inject, T);
         QWEN4_PROF(1);
+        QWEN4_RCAB_STAGE(g);
         if (ok) {
             ok = ds4_qwen4_layer_is_linear(il) ? qwen4_graph_linear(g, m, l, il, T)
                                                : qwen4_graph_attention(g, m, l, il, pos0, T);
@@ -58972,6 +59095,7 @@ static bool qwen4_graph_forward_tokens(ds4_qwen4_gpu_graph *g, const ds4_model *
             ok = qwen4_graph_apply_steering_attn(g, il, T);
         }
         QWEN4_PROF(ds4_qwen4_layer_is_linear(il) ? 2 : 3);
+        QWEN4_RCAB_STAGE(g);
         if (T == 1u && !g->mtp_R && DS4_N_HC == 4u && ds4_gpu_qwen4_decode_fusions_enabled() &&
             l->hc_ffn_inject->type == DS4_TENSOR_F16) {
             if (ok) ok = ds4_gpu_qwen4_hc_combine_norm_tensor(g->hc_u, g->blk, g->inj,
@@ -58991,6 +59115,7 @@ static bool qwen4_graph_forward_tokens(ds4_qwen4_gpu_graph *g, const ds4_model *
             if (ok) ok = qwen4_graph_hc_mix(g, m, l->hc_ffn_norm, l->hc_ffn_down, l->hc_ffn_up, l->hc_ffn_inject, T);
         }
         QWEN4_PROF(4);
+        QWEN4_RCAB_STAGE(g);
         if (ok) ok = qwen4_graph_moe(g, m, l, T);   /* the reduce folds the combine in */
         if (ok && g->dump_prompt_rows)
             metal_graph_debug_dump_tensor("qwen_router", g->router,
@@ -58998,6 +59123,7 @@ static bool qwen4_graph_forward_tokens(ds4_qwen4_gpu_graph *g, const ds4_model *
         if (ok && g->dump_prompt_rows) qwen4_graph_dump_last_ffn(g, il, T);
         if (ok) ok = qwen4_graph_apply_steering_ffn(g, il, T);
         QWEN4_PROF(5);
+        QWEN4_RCAB_STAGE(g);
         /* Submit this prefix while the host encodes the remaining layers.
          * Flush keeps the same ordered queue and retains pending buffers;
          * end_commands below waits for both batches before inputs are reused. */
@@ -59027,6 +59153,15 @@ static bool qwen4_graph_forward_tokens(ds4_qwen4_gpu_graph *g, const ds4_model *
         }
         if (ok) ok = qwen4_gemv(g->logits, m, w->output, g->mixed, 1);
     }
+#ifdef DS4_SERVER_TEST
+    if (g_qwen4_rcab_fill && ok && logits_out) {
+        (void)ds4_gpu_flush_commands();
+        (void)ds4_gpu_end_commands();
+        qwen4_rcab_hash_row0(g->mixed, DS4_N_EMBD);
+        qwen4_rcab_hash_row0(g->logits, DS4_N_VOCAB);
+        (void)glm_graph_begin_commands_if_needed();
+    }
+#endif
     const double t2 = timing ? now_sec() : 0.0;
     if (!ds4_gpu_end_commands()) ok = false;
     const double t3 = timing ? now_sec() : 0.0;
@@ -86081,6 +86216,100 @@ int ds4_session_pos(ds4_session *s) {
 bool ds4_session_checkpoint_valid(const ds4_session *s) {
     return s && s->checkpoint_valid;
 }
+
+#ifdef DS4_SERVER_TEST
+int ds4_test_qwen4_rowcount_ab(ds4_engine *e, const int *tokens, int n,
+                               int pair0, int pair1,
+                               uint64_t *fused_dump, uint64_t *ser1_dump,
+                               uint64_t *ser2_dump, int dump_cap, int *dump_n,
+                               int *fused_am0, int *fused_am1,
+                               int *ser_am1, int *ser_am2,
+                               float *row0_maxabs, float *row1_maxabs,
+                               char *err, size_t errlen) {
+    if (!e || !ds4_engine_is_qwen4(e) || !dump_n || !fused_dump ||
+        !ser1_dump || !ser2_dump) return 1;
+    *dump_n = 0;
+    const int V = (int)DS4_N_VOCAB;
+    ds4_tokens prompt = {0};
+    for (int i = 0; i < n; i++) token_vec_push(&prompt, tokens[i]);
+    ds4_session *a = NULL, *b = NULL;
+    float *rows = NULL, *ser1_logits = NULL;
+    int rc = 1;
+    if (ds4_session_create(&a, e, n + 32) != 0 ||
+        ds4_session_create(&b, e, n + 32) != 0) {
+        snprintf(err, errlen, "rowcount_ab: session create failed");
+        goto done;
+    }
+    if (ds4_session_sync(a, &prompt, err, errlen) != 0) goto done;
+    if (ds4_session_sync(b, &prompt, err, errlen) != 0) goto done;
+    rows = xmalloc(2u * (size_t)V * sizeof(float));
+    ser1_logits = xmalloc((size_t)V * sizeof(float));
+    const int pair[2] = { pair0, pair1 };
+    /* A: one fused T=2 verify forward at the shared position. */
+    g_qwen4_rcab_fill = g_qwen4_rcab;
+    bool ok = qwen4_graph_forward_tokens(&a->qwen4_graph, &e->model,
+                                         &e->weights, pair, 2u, rows, true);
+    const int fused_n = (int)(g_qwen4_rcab_fill - g_qwen4_rcab);
+    g_qwen4_rcab_fill = NULL;
+    if (!ok) { snprintf(err, errlen, "rowcount_ab: fused forward failed"); goto done; }
+    if (fused_n > dump_cap) {
+        snprintf(err, errlen, "rowcount_ab: fused dump overflow %d>%d", fused_n, dump_cap);
+        goto done;
+    }
+    memcpy(fused_dump, g_qwen4_rcab, (size_t)fused_n * sizeof(uint64_t));
+    if (fused_am0) *fused_am0 = sample_argmax(rows, (uint32_t)V);
+    if (fused_am1) *fused_am1 = sample_argmax(rows + V, (uint32_t)V);
+    /* B: the same pair as sequential T=1 steps (serial tree). */
+    g_qwen4_rcab_fill = g_qwen4_rcab;
+    ok = ds4_session_eval(b, pair0, err, errlen) == 0;
+    const int s1n = (int)(g_qwen4_rcab_fill - g_qwen4_rcab);
+    if (s1n <= dump_cap) memcpy(ser1_dump, g_qwen4_rcab, (size_t)s1n * sizeof(uint64_t));
+    g_qwen4_rcab_fill = NULL;
+    if (!ok) goto done;
+    memcpy(ser1_logits, b->logits, (size_t)V * sizeof(float));
+    if (ser_am1) *ser_am1 = sample_argmax(b->logits, (uint32_t)V);
+    g_qwen4_rcab_fill = g_qwen4_rcab;
+    ok = ds4_session_eval(b, pair1, err, errlen) == 0;
+    const int s2n = (int)(g_qwen4_rcab_fill - g_qwen4_rcab);
+    if (s2n <= dump_cap) memcpy(ser2_dump, g_qwen4_rcab, (size_t)s2n * sizeof(uint64_t));
+    g_qwen4_rcab_fill = NULL;
+    if (!ok) goto done;
+    if (ser_am2) *ser_am2 = sample_argmax(b->logits, (uint32_t)V);
+    if (s1n != fused_n || s2n != fused_n) {
+        snprintf(err, errlen, "rowcount_ab: dump lengths fused=%d ser1=%d ser2=%d",
+                 fused_n, s1n, s2n);
+        goto done;
+    }
+    *dump_n = fused_n;
+    if (row0_maxabs) {
+        float d = 0.0f;
+        for (int i = 0; i < V; i++) {
+            const float e0 = rows[i] - ser1_logits[i];
+            const float ae = fabsf(e0);
+            if (ae > d) d = ae;
+        }
+        *row0_maxabs = d;
+    }
+    if (row1_maxabs) {
+        float d = 0.0f;
+        for (int i = 0; i < V; i++) {
+            const float e0 = rows[V + i] - b->logits[i];
+            const float ae = fabsf(e0);
+            if (ae > d) d = ae;
+        }
+        *row1_maxabs = d;
+    }
+    rc = 0;
+done:
+    free(rows);
+    free(ser1_logits);
+    ds4_session_free(a);
+    ds4_session_free(b);
+    ds4_tokens_free(&prompt);
+    g_qwen4_rcab_fill = NULL;
+    return rc;
+}
+#endif /* DS4_SERVER_TEST */
 
 #ifdef DS4_SERVER_TEST
 /* Test fixture support.  The test target links a dedicated ds4_test_core.o,

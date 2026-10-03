@@ -1,14 +1,16 @@
 # Qwen4 verify-vs-serial identity violation — found 2026-10-03 (pre-existing)
 
-> **STATUS 18:30 2026-10-03: matvec drift ROOT-CAUSED + FIXED
-> (env-gated `DS4_QWEN4_VERIFY_PER_ROW=1`); the server residual was
-> bisected to ROOT-CAUSE-2 (see RESIDUAL section: fused multi-row forward
-> still drifts ~1 ULP outside the matvec hosts; adaptive flips=0 is grid
-> luck, forced grids flip deterministically). The original "leading
-> hypotheses" text is kept as history; hypothesis 2 was correct in substance
-> (split-window redistribution generalizes to the whole multi-row forward,
-> not just matvec); hypothesis 1 partially (pos%4=3 was a near-tie
-> coincidence, not the selection universe).
+> **STATUS 19:1x 2026-10-03: BOTH root causes closed. ROOT-CAUSE-1 (matvec
+> mv_ext) fixed by the per-row intercepts; ROOT-CAUSE-2 (T=2 PAIR gate/mix
+> kernel + chunk-level attention selection universe) localized with
+> `--qwen4-rowcount-ab` and fixed under the SAME env
+> `DS4_QWEN4_VERIFY_PER_ROW=1` (v2): 3-grid identity probes flips=0,
+> rowcount-ab bit-identical (maxabs 0.0), server battery 10/10 byte-identical
+> to serial. Cost: per-row v2 ~= serial wall (see ROOT-CAUSE-2 CLOSED).
+> The original "leading hypotheses" text is kept as history; hypothesis 1
+> (selection universe) + the split-window generalization of hypothesis 2
+> were both right in substance; pos%4=3 was a near-tie coincidence, not the
+> selection fingerprint.
 
 Discovered while B3-tuning the depth policy (the lockout fix makes depth
 transitions frequent, which amplified a latent gap into visible battery
@@ -151,6 +153,62 @@ Env OFF (default binary == drift-status-quo, golden vectors unchanged) while
 the residual is scoped. Recommended after residual lands: flip per-row ON
 by default + re-capture goldens (they encode the drifting stream). Plain
 T=1 decode unaffected either way.
+
+### ROOT-CAUSE-2 CLOSED 19:1x (window 3 continued): localized + fixed (env-gated v2)
+New engine harness `./ds4_test --qwen4-rowcount-ab` (DS4_SERVER_TEST-compiled
+per-stage row-0 hashing inside `qwen4_graph_forward_tokens`: R/blk/mixed/xn/lo
+at 4 stage points per trunk layer + final mixer + logits row 0 = 20/layer;
+fused T=2 forward vs sequential T=1 forwards from identical synced prefixes;
+test-only build, production binaries unaffected):
+
+- Localization (prompt 03, per-row v1, forced depth-2): first divergence
+  layer 0 slot 2 = post-hc_attn_mix `mixed` - xn/lo hashes IDENTICAL, so the
+  T=2 **PAIR gate/mix kernel != two T=1 dispatches** (the "exact T<=2 kernel
+  paths" assumption was never bit-true against T=1). With
+  `DS4_QWEN4_NO_HC_PAIR=1`: layer 0-2 (GDN) clean, first diff moves to the
+  FIRST FULL-ATTENTION layer (interval-4 il=3) at the attention `blk` = the
+  chunk-level `n_blocks_after` selection universe / dense-split: a row whose
+  own serial step has not yet closed a 4-token block still scores/attends
+  blocks only a later chunk row completes (original hypothesis 1, confirmed
+  at last).
+- Fix v2 (same env `DS4_QWEN4_VERIFY_PER_ROW=1`, ds4.c): under the flag and
+  2<=T<=8, (a) `qwen4_graph_hc_mix` dispatches gate/mix per row (T=1 kernel),
+  (b) `qwen4_graph_attention_tail` runs the attention core per row with the
+  row's own universe ((pos+1)/4) and key count. matvec intercept unchanged.
+- Gate results (all under the flag ON):
+  - rowcount-ab: 8 pairs, 962/962 stage hashes identical per pair, row0/row1
+    logit maxabs = EXACTLY 0.000e+00, argmax IDENTICAL both rows.
+  - --qwen4-verify-identity 3-grid sweep: flips=0 on prompts 03/06/07,
+    adaptive + depth2 + depth3, think-none (03) and think-high (03).
+  - control (flag OFF, forced depth2, prompt 03): the pair-kernel flip
+    remains - the gate only passes with the fix on, as designed.
+  - SERVER: [3,3] repeat on one clean engine: BOTH requests now BYTE-IDENTICAL
+    to the serial reference (the @884 reuse artifact is gone - it was the
+    pair-kernel/selection drift + history-dependent depth grid combining).
+  - battery per-row v2 adaptive x2 (pr2_adaptive_1/2): run-to-run identical,
+    and **10/10 prompts byte-identical to the banked serial battery** -
+    spec==serial end-to-end on the completions path. Acceptance 1.733
+    tok/cycle; deep engagement 17/2123 as before.
+- Cost (honest): per-row v2 battery 71.6/77.0 s == serial 69.6/73.8 s
+  (within noise; +29% vs drift-default 55.4). Full per-row verify pays
+  ~1.7x per committed token like serial by construction (each row re-reads
+  trunk weights + its own attention pass) - spec's throughput gain evaporates
+  while correctness holds. forced-3 v2: 83.3 s, 2.196 tok/cycle, P(a2|a1)
+  70.2% (n=1176).
+- Consequence for the DEFAULT decision (task 2 rewritten): per-row v2
+  delivers the identity guarantee but NOT a faster stream than serial;
+  drift-default remains fastest. The only path that keeps BOTH is fused
+  ROW-INVARIANT kernels (T=2 dispatch with per-row serial reduction trees -
+  i.e. B0/lane-2's blueprint now carries a hard correctness requirement:
+  the pair/gate-mix kernels, the mv_ext family, and the selection universe
+  must be invariant-by-construction + tested by --qwen4-rowcount-ab).
+  Flip recommendation: keep OFF; adopt v2 as the correctness/audit mode.
+- Queue: (i) golden re-capture only becomes meaningful with a row-invariant
+  fused path or with per-row v2 default (goldens currently encode drift);
+  (ii) `DS4_QWEN4_NO_HC_PAIR=1` remains a useful standalone A/B;
+  (iii) session depth-counter carry-over at slot reuse (grid determinism)
+  is now harmless for identity but still makes the depth grid
+  request-history dependent - reset decision open (queue #2).
 
 ### NOT the cause (retracted earlier misattributions, all proven)
 - grouped MoE kernels (bit-exact replay vs slot twins, all layers,

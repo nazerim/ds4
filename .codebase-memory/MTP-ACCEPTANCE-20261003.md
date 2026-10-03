@@ -23,20 +23,32 @@
   from the fixed p6/p7 trajectories; 2.201→2.201 forced-3 with P(a2|a1)
   70.5→69.6% at n≈1.2k). The drafter is the same; the WALL moves.
 - **Per-row verify is expensive.** adaptive: 55.4 → 65.5-72.3 s (+18-30%,
-  run-to-run wall noise ~±5 s on identical text); forced-3: 56.2 → 79.7 avg
-  (+41%). T=3 cycles cost C3/C2 ~1.45-1.55 under per-row (extra rows re-read
-  the 1.3 GiB Q8 logits head + trunk weights), vs the pre-fix >1.266 bound —
-  **forced depth-3 per-row (79.7 s) is now SLOWER than serial (71.7 avg)**,
-  so the "wide-T lift" business case is strictly gated on fused row-exact
-  verify, even more firmly than the pre-fix table concluded.
+  run-to-run wall noise ~±5 s on identical text); forced-3: 56.2 → 79.2-80.2 s
+  (79.7 avg, +41%). T=3 cycles cost C3/C2 ~1.45-1.55 under per-row (extra rows
+  re-read the 1.3 GiB Q8 logits head + trunk weights), vs the pre-fix >1.266
+  bound — **forced depth-3 per-row (79.7 s) is now SLOWER than serial
+  (71.7 avg)**, so the "wide-T lift" business case is strictly gated on fused
+  row-exact verify, even more firmly than the pre-fix table concluded.
+- **v2 (19:1x, ROOT-CAUSE-2 closed: per-row hc gate/mix + per-row attention
+  universe under the SAME env):** adaptive 71.6/77.0 s — at/below serial's
+  69.6/73.8 band; battery output 10/10 prompts BYTE-IDENTICAL to serial
+  (20261003_pr2_*). This is expected: with every verify stage dispatched
+  per-row, a T=2 cycle does the work of two serial steps; acceptance stays
+  1.733 tok/cycle so cycle-count drops while per-cycle cost rises to match.
+  forced-3 v2: 83.3 s, 2.196 tok/cycle, P(a2|a1,deep) 70.2% (n=1176).
+  **Spec-under-v2 == serial bit-stream at serial cost: the correctness
+  mode, not a speed mode.** Only row-INVARIANT fused kernels (B0/lane-2,
+  now with the hard invariance requirement per
+  QWEN4-VERIFY-IDENTITY-20261003.md ROOT-CAUSE-2 CLOSED) can deliver both.
 - **Spec still pays under per-row vs serial** (65.5 best-run vs 69.6
   best-run, ~+6%; averages 68.9 vs 71.7, ~+4%) but the 12% headline from the
   day shift is noise-limited — treat per-row spec as "serial-identical at
   serial-ish cost" until the second drift source (ROOT-CAUSE-2) and the
   fused window land.
 - Do NOT force DS4_QWEN4_MTP_DEPTH=3 anywhere. Adaptive default (drift)
-  remains the fastest known binary behavior; per-row is the correctness knob
-  (partial: matvec stage only).
+  remains the fastest known binary behavior; per-row v2 is now the PROVEN
+  correctness knob (bit-identical to serial end-to-end; matvec+hc+attention
+  all per-row under the flag) at serial cost.
 
 Answers open question #1 of `.codebase-memory/omlx-v070-mtp-row-exact.md`
 (the wide-T lift business case). Overnight window, engine on M5 Max, single
