@@ -1,0 +1,92 @@
+ds4: Qwen3.8 YaRN factor 2 over 262144 native tokens (pairs 14..22 blended, mscale 1.0693)
+ds4: Qwen BF16 n-grams: 95.37 GiB, disk reads only
+ds4: Metal device Apple M5 Max, 128.00 GiB RAM
+ds4: Metal 4 tensor API enabled for Tensor kernels
+ds4: drift-patch flags hc_stable=on norm_unify=on kv_raw_f32=off rope_exp2_log2=off math_safe=off tensor_matmul=on
+ds4: Metal model views created in 1.511 ms, residency requested in 333.752 ms, warmup 4.019 ms (mapped 71400.44 MiB from offset 10.51 MiB)
+ds4: Metal mapped mmaped model as 1 overlapping shared buffers
+ds4: Metal model views created in 0.051 ms, residency requested in 327.514 ms, warmup 0.921 ms (mapped 588.12 MiB from offset 0.02 MiB)
+ds4: Metal mapped mmaped model as 2 overlapping shared buffers
+ds4: metal backend initialized for graph diagnostics
+ds4: memory: KV 16.66 GiB (raw 13.01 + compressed 3.66) + buffers 15.24 GiB + resident model 69.73 GiB = 101.63 GiB planned
+ds4: memory detail: ctx=524288 prefill_cap=8192 raw_kv_rows=524288 compressed_kv_rows=131073 backend=metal
+1003 23:43:50 ds4-server: context buffers 32672.72 MiB (ctx=524288, backend=metal, prefill_chunk=8192, raw_kv_rows=524288, compressed_kv_rows=131073)
+1003 23:43:51 ds4-server: KV disk cache /Volumes/FireCuda520/ds4-kv-qwen (budget=524288 MiB, cross-quant=accept, min=512, cold_max=30000, continued=10000, trim=32, align=2048, hit_half_life=21600s)
+1003 23:43:51 ds4-server: KV retention anchor_step=8192 continued_step=8192 (doubles above 49152 tokens) prefill_chunk=4096 small_dense=49152 tail=2 mid_spacing=131072 min_anchors=4 max_conversations=0 model_fp=9911305607209564945
+1003 23:43:51 ds4-server: tracing session to ./log/ds4-qwen.trace
+1003 23:43:51 ds4-server: listening on http://127.0.0.1:8002
+1003 23:43:53 ds4-server: completion ctx=0..59:59 prompt start
+1003 23:43:54 ds4-server: completion ctx=0..59:59 prefill chunk 59/59 (100.0%) chunk=0.00 t/s avg=136.30 t/s 0.433s
+1003 23:43:54 ds4-server: completion ctx=0..59:59 prompt done 0.433s
+1003 23:43:54 ds4-server: completion ctx=59..60:1 gen=1 THINKING decoding chunk=23.76 t/s avg=23.76 t/s 0.042s
+1003 23:43:54 ds4-server: completion ctx=0..59:59 gen=1 THINKING finish=length 0.475s
+1003 23:43:57 ds4-server: live kv cache miss live=60 prompt=112 common=51 vision=match reason=token-mismatch
+1003 23:43:57 ds4-server: completion ctx=0..112:112 prompt start
+1003 23:43:58 ds4-server: completion ctx=0..112:112 prefill chunk 112/112 (100.0%) chunk=0.00 t/s avg=290.31 t/s 0.386s
+1003 23:43:58 ds4-server: completion ctx=0..112:112 prompt done 0.386s
+1003 23:43:59 ds4-server: completion ctx=112..162:50 gen=50 THINKING decoding chunk=61.47 t/s avg=61.47 t/s 0.813s
+1003 23:43:59 ds4-server: completion ctx=162..212:50 gen=100 THINKING decoding chunk=77.41 t/s avg=68.52 t/s 1.459s
+1003 23:44:00 ds4-server: completion ctx=212..262:50 gen=150 THINKING decoding chunk=69.48 t/s avg=68.84 t/s 2.179s
+1003 23:44:01 ds4-server: completion ctx=262..312:50 gen=200 decoding chunk=74.42 t/s avg=70.15 t/s 2.851s
+1003 23:44:01 ds4-server: completion ctx=312..362:50 gen=250 decoding chunk=76.84 t/s avg=71.40 t/s 3.502s
+1003 23:44:02 ds4-server: completion ctx=362..412:50 gen=300 decoding chunk=79.92 t/s avg=72.69 t/s 4.127s
+1003 23:44:03 ds4-server: completion ctx=412..462:50 gen=350 decoding chunk=76.65 t/s avg=73.23 t/s 4.780s
+1003 23:44:03 ds4-server: completion ctx=462..475:13 gen=363 decoding chunk=73.83 t/s avg=73.25 t/s 4.956s
+1003 23:44:03 ds4-server: completion ctx=0..112:112 gen=363 finish=stop 5.342s
+1003 23:44:03 ds4-server: live kv cache miss live=475 prompt=92 common=51 vision=match reason=token-mismatch
+1003 23:44:03 ds4-server: completion ctx=0..92:92 prompt start
+1003 23:44:03 ds4-server: completion ctx=0..92:92 prefill chunk 92/92 (100.0%) chunk=0.00 t/s avg=392.13 t/s 0.235s
+1003 23:44:03 ds4-server: completion ctx=0..92:92 prompt done 0.235s
+1003 23:44:04 ds4-server: completion ctx=92..142:50 gen=50 THINKING decoding chunk=74.66 t/s avg=74.66 t/s 0.670s
+ds4: mtp-prof total=256 | shallow(T2) n=253 verify=22.80ms tail=2.09ms | deep(T3) n=0 verify=0.00ms tail=0.00ms | plain n=3 verify=21.92ms tail=9.66ms
+1003 23:44:04 ds4-server: completion ctx=142..192:50 gen=100 THINKING decoding chunk=61.00 t/s avg=67.15 t/s 1.489s
+1003 23:44:05 ds4-server: completion ctx=192..242:50 gen=150 THINKING decoding chunk=69.44 t/s avg=67.89 t/s 2.209s
+1003 23:44:06 ds4-server: completion ctx=242..292:50 gen=200 THINKING decoding chunk=62.99 t/s avg=66.60 t/s 3.003s
+1003 23:44:07 ds4-server: completion ctx=292..342:50 gen=250 THINKING decoding chunk=62.96 t/s avg=65.84 t/s 3.797s
+1003 23:44:08 ds4-server: completion ctx=342..392:50 gen=300 THINKING decoding chunk=61.03 t/s avg=64.98 t/s 4.617s
+1003 23:44:08 ds4-server: completion ctx=392..442:50 gen=350 THINKING decoding chunk=63.14 t/s avg=64.71 t/s 5.408s
+1003 23:44:09 ds4-server: completion ctx=442..492:50 gen=400 THINKING decoding chunk=63.16 t/s avg=64.52 t/s 6.200s
+1003 23:44:09 ds4-server: completion ctx=0..92:92 gen=400 THINKING finish=length 6.435s
+1003 23:44:09 ds4-server: live kv cache miss live=492 prompt=86 common=51 vision=match reason=token-mismatch
+1003 23:44:09 ds4-server: completion ctx=0..86:86 prompt start
+1003 23:44:09 ds4-server: completion ctx=0..86:86 prefill chunk 86/86 (100.0%) chunk=0.00 t/s avg=387.55 t/s 0.222s
+1003 23:44:09 ds4-server: completion ctx=0..86:86 prompt done 0.222s
+1003 23:44:10 ds4-server: completion ctx=86..136:50 gen=50 THINKING decoding chunk=69.27 t/s avg=69.27 t/s 0.722s
+1003 23:44:11 ds4-server: completion ctx=136..186:50 gen=100 THINKING decoding chunk=71.73 t/s avg=70.48 t/s 1.419s
+ds4: mtp-prof total=512 | shallow(T2) n=507 verify=22.74ms tail=2.09ms | deep(T3) n=0 verify=0.00ms tail=0.00ms | plain n=5 verify=21.29ms tail=6.57ms
+1003 23:44:12 ds4-server: completion ctx=186..236:50 gen=150 THINKING decoding chunk=69.28 t/s avg=70.07 t/s 2.141s
+1003 23:44:12 ds4-server: completion ctx=236..286:50 gen=200 THINKING decoding chunk=64.87 t/s avg=68.69 t/s 2.911s
+1003 23:44:13 ds4-server: completion ctx=286..336:50 gen=250 THINKING decoding chunk=64.72 t/s avg=67.86 t/s 3.684s
+1003 23:44:14 ds4-server: completion ctx=336..386:50 gen=300 THINKING decoding chunk=62.85 t/s avg=66.97 t/s 4.480s
+1003 23:44:15 ds4-server: completion ctx=386..436:50 gen=350 decoding chunk=69.13 t/s avg=67.27 t/s 5.203s
+1003 23:44:15 ds4-server: completion ctx=436..486:50 gen=400 decoding chunk=72.12 t/s avg=67.84 t/s 5.896s
+1003 23:44:15 ds4-server: completion ctx=0..86:86 gen=400 finish=length 6.118s
+1003 23:44:15 ds4-server: live kv cache miss live=486 prompt=91 common=51 vision=match reason=token-mismatch
+1003 23:44:15 ds4-server: completion ctx=0..91:91 prompt start
+1003 23:44:16 ds4-server: completion ctx=0..91:91 prefill chunk 91/91 (100.0%) chunk=0.00 t/s avg=404.23 t/s 0.225s
+1003 23:44:16 ds4-server: completion ctx=0..91:91 prompt done 0.225s
+1003 23:44:16 ds4-server: completion ctx=91..141:50 gen=50 THINKING decoding chunk=71.52 t/s avg=71.52 t/s 0.699s
+1003 23:44:17 ds4-server: completion ctx=141..191:50 gen=100 THINKING decoding chunk=64.77 t/s avg=67.98 t/s 1.471s
+ds4: mtp-prof total=768 | shallow(T2) n=761 verify=22.74ms tail=2.09ms | deep(T3) n=0 verify=0.00ms tail=0.00ms | plain n=7 verify=21.01ms tail=5.25ms
+1003 23:44:18 ds4-server: completion ctx=191..241:50 gen=150 THINKING decoding chunk=64.77 t/s avg=66.87 t/s 2.243s
+1003 23:44:19 ds4-server: completion ctx=241..291:50 gen=200 THINKING decoding chunk=67.00 t/s avg=66.91 t/s 2.989s
+1003 23:44:19 ds4-server: completion ctx=291..341:50 gen=250 THINKING decoding chunk=62.63 t/s avg=66.01 t/s 3.788s
+1003 23:44:20 ds4-server: completion ctx=341..391:50 gen=300 THINKING decoding chunk=66.65 t/s avg=66.11 t/s 4.538s
+1003 23:44:21 ds4-server: completion ctx=391..441:50 gen=350 THINKING decoding chunk=66.60 t/s avg=66.18 t/s 5.289s
+1003 23:44:22 ds4-server: completion ctx=441..491:50 gen=400 THINKING decoding chunk=69.72 t/s avg=66.60 t/s 6.006s
+1003 23:44:22 ds4-server: completion ctx=0..91:91 gen=400 THINKING finish=length 6.231s
+1003 23:44:22 ds4-server: live kv cache miss live=491 prompt=89 common=51 vision=match reason=token-mismatch
+1003 23:44:22 ds4-server: completion ctx=0..89:89 prompt start
+1003 23:44:22 ds4-server: completion ctx=0..89:89 prefill chunk 89/89 (100.0%) chunk=0.00 t/s avg=393.54 t/s 0.226s
+1003 23:44:22 ds4-server: completion ctx=0..89:89 prompt done 0.226s
+1003 23:44:22 ds4-server: completion ctx=89..139:50 gen=50 THINKING decoding chunk=69.43 t/s avg=69.43 t/s 0.720s
+1003 23:44:23 ds4-server: completion ctx=139..189:50 gen=100 THINKING decoding chunk=72.28 t/s avg=70.83 t/s 1.412s
+1003 23:44:24 ds4-server: completion ctx=189..239:50 gen=150 THINKING decoding chunk=64.97 t/s avg=68.76 t/s 2.181s
+ds4: mtp-prof total=1024 | shallow(T2) n=1015 verify=22.75ms tail=2.08ms | deep(T3) n=0 verify=0.00ms tail=0.00ms | plain n=9 verify=20.83ms tail=4.50ms
+1003 23:44:25 ds4-server: completion ctx=239..289:50 gen=200 THINKING decoding chunk=65.00 t/s avg=67.78 t/s 2.951s
+1003 23:44:26 ds4-server: completion ctx=289..339:50 gen=250 THINKING decoding chunk=60.93 t/s avg=66.29 t/s 3.771s
+1003 23:44:26 ds4-server: completion ctx=339..389:50 gen=300 THINKING decoding chunk=64.71 t/s avg=66.02 t/s 4.544s
+1003 23:44:27 ds4-server: completion ctx=389..439:50 gen=350 THINKING decoding chunk=72.38 t/s avg=66.86 t/s 5.235s
+1003 23:44:28 ds4-server: completion ctx=439..489:50 gen=400 THINKING decoding chunk=77.26 t/s avg=68.00 t/s 5.882s
+1003 23:44:28 ds4-server: completion ctx=0..89:89 gen=400 THINKING finish=length 6.108s
+1003 23:44:44 ds4-server: shutdown requested, draining requests

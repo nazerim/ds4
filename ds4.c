@@ -58366,8 +58366,10 @@ static bool qwen4_graph_hc_mix(ds4_qwen4_gpu_graph *g, const ds4_model *m,
         return true;
     }
     if (T == 3u && g->verify_rows_exact) {
-        /* Split the 3-row gate/mix into the exact 2-row pair kernel plus the
-         * 1-row generic kernel, so every row matches its T <= 2 rounding. */
+        /* Split the 3-row gate/mix into a 2-row dispatch plus the 1-row
+         * generic dispatch, so every row matches its T <= 2 rounding (the
+         * 2-row kernel is the pair mixer in the drift world, the row-exact
+         * pair under SINGLE_TREE+VERIFY_HC_PAIR, generic otherwise). */
         const uint64_t dim = (uint64_t)DS4_N_EMBD * DS4_N_HC;
         ds4_gpu_tensor *xn2 = ds4_gpu_tensor_view(g->xn, 0, 2u * dim * sizeof(float));
         ds4_gpu_tensor *lo2 = ds4_gpu_tensor_view(g->lo, 0, 2u * DS4_N_HC_LOWRANK * sizeof(float));

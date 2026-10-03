@@ -48318,6 +48318,7 @@ enum {
     QWEN4_K_HC_GATE_MIX_PAIR_F16_PF,
     QWEN4_K_HC_GATE_MIX_PAIR_F32,
     QWEN4_K_HC_GATE_MIX_PAIR_Q8,
+    QWEN4_K_HC_GATE_MIX_PAIR_ROWE_F16,
     QWEN4_K_MULTI_GEMV,
     QWEN4_K_HC_COMBINE,
     QWEN4_K_CONV_STREAM,
@@ -48423,6 +48424,7 @@ static const char *const qwen4_kernel_names[QWEN4_K_COUNT] = {
     "kernel_qwen4_hc_gate_mix_pair_f16_pf",
     "kernel_qwen4_hc_gate_mix_pair_f32",
     "kernel_qwen4_hc_gate_mix_pair_q8",
+    "kernel_qwen4_hc_gate_mix_pair_rowe_f16",
     "kernel_qwen4_multi_gemv",
     "kernel_qwen4_hc_combine",
     "kernel_qwen4_conv_stream",
@@ -48532,6 +48534,15 @@ static MTLSize qwen4_moe_mm_grid(uint32_t row_blocks, uint32_t n_expert, uint32_
 }
 
 static id<MTLComputePipelineState> g_qwen4_pipelines[QWEN4_K_COUNT];
+
+/* Resolve (and cache) one qwen4 pipeline; false when the running metal/
+ * source tree predates the binary. Callers use it to fall back to an
+ * older-but-present dispatch instead of failing the whole forward. */
+static bool qwen4_pipeline_ready(int kernel) {
+    if (!g_qwen4_pipelines[kernel])
+        g_qwen4_pipelines[kernel] = ds4_gpu_get_pipeline(qwen4_kernel_names[kernel]);
+    return g_qwen4_pipelines[kernel] != nil;
+}
 #define QWEN4_ATTN_NSG 4
 #define QWEN4_ATTN_MAX_SPLITS 64
 #define QWEN4_ATTN_ROWS_MAX 64     /* decode batch rows the attention rows kernels take */
@@ -48671,6 +48682,10 @@ static int qwen4_dispatch_resident(int kernel, const void *args, size_t args_len
             }
             return 0;
         }
+        /* (threadgroup-memory guard deliberately not added here: the SDK
+         * exposes no per-pipeline maxThreadgroupMemoryLength to check
+         * against; an oversized setThreadgroupMemoryLength raises loudly in
+         * the encoder. The row-exact HC pair stages rank*16B <= 5 KB.) */
         int owned = 0;
         id<MTLCommandBuffer> cb = ds4_gpu_command_buffer(&owned);
         if (!cb) return 0;
@@ -48826,14 +48841,31 @@ int ds4_gpu_qwen4_hc_gate_mix_tensor(
         !qwen4_bind_tensor(&b[3], mixed, (uint64_t)n_tokens * n_embd * sizeof(float), "hc mixed")) {
         return 0;
     }
-    const bool pair = n_tokens == 2u && getenv("DS4_QWEN4_NO_HC_PAIR") == NULL &&
-        !ds4_gpu_verify_single_tree();
+    /* DS4_QWEN4_VERIFY_HC_PAIR=1 (with SINGLE_TREE, item-0' fused window):
+     * the historical pair mixers fold w*act into an FMA the single-row
+     * kernel leaves unfused (ROOT-CAUSE-2(a)), so single-tree runs gate/mix
+     * as grid.y-per-token -- re-streaming the up projection once per row
+     * (~+1.8 ms per T=2 verify cycle, measured 2026-10-03 with
+     * DS4_QWEN4_NO_HC_PAIR on the drift world: 22.19 -> 23.98 ms).  The
+     * rowe pair kernel keeps the pair's weight reuse but spells each row's
+     * chain exactly as the single-row f16 kernel (metal/qwen4.metal), so
+     * row i is bit-identical to its own T=1 dispatch: same dispatch shape
+     * and NSG knob as the pair (row-invariant), F16 weights only. */
+    const bool st = ds4_gpu_verify_single_tree();
+    bool pair_rowe = st && n_tokens == 2u && weight_type == 1u &&
+        getenv("DS4_QWEN4_NO_HC_PAIR") == NULL &&
+        ds4_gpu_env_bool("DS4_QWEN4_VERIFY_HC_PAIR") > 0;
+    if (pair_rowe && !qwen4_pipeline_ready(QWEN4_K_HC_GATE_MIX_PAIR_ROWE_F16))
+        pair_rowe = false;  /* metal/ tree predates the kernel: the generic
+                             * per-row dispatch is the same tree, just slower */
+    const bool pair = !st && n_tokens == 2u && getenv("DS4_QWEN4_NO_HC_PAIR") == NULL;
     /* Register-prefetched F16 rows (same lane order and rounding, pinned
      * against the plain kernel by tests/test_qwen4_kernels.c); M5 default. */
     const int prefetch_override = ds4_gpu_env_bool("DS4_QWEN4_HC_MIX_PREFETCH");
     const bool prefetch = weight_type == 1u &&
         (prefetch_override >= 0 ? prefetch_override > 0 : ds4_gpu_device_is_m5_apple_silicon());
-    const int kernel = pair ? (prefetch ? QWEN4_K_HC_GATE_MIX_PAIR_F16_PF
+    const int kernel = pair_rowe ? QWEN4_K_HC_GATE_MIX_PAIR_ROWE_F16
+                    : pair ? (prefetch ? QWEN4_K_HC_GATE_MIX_PAIR_F16_PF
                                         : qwen4_hc_kernel(weight_type, QWEN4_K_HC_GATE_MIX_PAIR_F16,
                                               QWEN4_K_HC_GATE_MIX_PAIR_F32, QWEN4_K_HC_GATE_MIX_PAIR_Q8))
                             : prefetch ? QWEN4_K_HC_GATE_MIX_F16_PF
@@ -48843,10 +48875,12 @@ int ds4_gpu_qwen4_hc_gate_mix_tensor(
      * Keep the per-row lane mapping and reduction order unchanged. */
     const uint32_t default_nsg = n_embd == 2560u && n_rank == 320u &&
         ds4_gpu_device_name_contains("M3 Ultra") ? 16u : 4u;
-    const uint32_t nsg = pair ?
+    const uint32_t nsg = (pair || pair_rowe) ?
         (uint32_t)ds4_gpu_env_u64("DS4_QWEN4_HC_PAIR_NSG", default_nsg, 1u, 16u) : 4u;
     return qwen4_dispatch(kernel, &args, sizeof(args), b, 4,
-                          MTLSizeMake((n_embd + nsg - 1u) / nsg, pair ? 1u : n_tokens, 1), MTLSizeMake(nsg * 32u, 1, 1),
+                          MTLSizeMake((n_embd + nsg - 1u) / nsg, (pair || pair_rowe) ? 1u : n_tokens, 1),
+                          MTLSizeMake(nsg * 32u, 1, 1),
+                          pair_rowe ? (NSUInteger)n_rank * 4u * sizeof(float) :
                           pair ? (NSUInteger)n_rank * 2u * sizeof(float) : 0u);
 }
 

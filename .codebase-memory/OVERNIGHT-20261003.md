@@ -399,3 +399,82 @@ grep -cE 'WARN|ERR' log/ds4-qwen.log          # expect 0
 # full suite: DS4_TEST_MODEL=gguf/Qwen3.8-Flash-Next-Q4.gguf ./ds4_test  # 26 OK
 curl -s 127.0.0.1:8005/health
 ```
+
+## FOURTH WINDOW 2026-10-03 23:12 -> 10-04 00:1x (overnight full-authority):
+## QUEUE ITEM 0' LANDED — fused HC window (row-exact pair gate/mix)
+
+Operator: overnight mode, run queue to completion; RISK-1 posting approved
+conditional on cite re-verification (DONE — verdicts below).
+
+### 0' attribution (corrects the handover's ext-kernel story)
+Code bisect first: the drift and ST worlds run the IDENTICAL ext T=2 matvec
+dispatch inside the verify forward (ds4_metal.m:19547; ST only reroutes
+T=1), so the 3.3 ms shallow-verify gap cannot be the mv_ext kernel. Direct
+pricing (engine-cycled, MTP_PROFILE, forced depth-2, 5-prompt probe,
+n=1015/cfg): drift 22.19 | drift+NO_HC_PAIR 23.98 | ST+GROUP 24.57.
+=> the pair->generic HC downgrade costs ~+1.8 ms/cycle (per-row
+up-projection re-stream); ST+GROUP adds ~0.6 more (per-row decode +
+grouping plumbing). TIMING=2 stage-group sync numbers were TRIED and
+DISCARDED for cross-config attribution: per-group sync inflates configs
+with different dispatch counts in opposite direction to their real wall
+(stgroup read +6 ms/cycle slower under sync but is faster in the wall) —
+use A/B with the existing knobs + MTP_PROFILE instead. Tooling kept:
+tests/spec_economics/attr_parse.py.
+### The kernel
+metal kernel_qwen4_hc_gate_mix_pair_rowexact: pair structure (stage per-row
+x/sigmoid in threadgroup memory, weight rows read once) with the single-row
+f16 chain spelled per row ((x*w)*sig + acc; reassociate/contract off; same
+r+=8 walk, same xor-shuffle trees) -> row i bit-identical to its own T=1
+dispatch. Host: DS4_QWEN4_VERIFY_HC_PAIR=1 (requires SINGLE_TREE; F16 only;
+same grid/nsg shape as pair, HC_PAIR_NSG applies). Bring-up lesson: the
+first unbatched scalar-loop version was 0.9 ms SLOWER than generic
+(load-latency bound) — the 8-ahead batching mirrors the PF variant and is
+mandatory (pinned in the kernel comment).
+### Gates (all green)
+- rowcount-ab: 150 pairs (prompts 03/06/07 x {depth2,depth3} grids x 25),
+  every pair dump-diff=0 stream-diff=0 maxabs=0.0; pipeline-creation dump
+  proves the rowe kernel is actually dispatched (DS4_METAL_LOG_TG_LIMITS).
+- verify-identity: 3 prompts x {think-none, think-high} x 3 grids, flips=0.
+- battery: single-session 60.0/60.1 s (banked ST+GROUP 62.4/63.0) and
+  production batched 57.7/57.3 (banked 58.4); 10/10 texts byte-identical to
+  banked ST+GROUP == ST adaptive == ST serial-ref == prodbatch — streams
+  UNMOVED, goldens pass under the flag; suite 26 OK/0 ERR default AND 26 OK
+  ST+GROUP+HC_PAIR-pinned. 0 WARN in the engine log.
+- Production default NOW exports the flag inside QWEN_EXACT_VERIFY=1
+  (ds4-server.sh one-line umbrella; rollback QWEN_EXACT_VERIFY=0).
+### RISK-1 issue: cites re-verified vs upstream 0aaea5a (.codebase-memory/
+RISK-1-ISSUE-DRAFT.md): (a) flash-reduce @1024 dispatch sites PASS
+(ds4_metal.m:27938/28731/29311/29674, nwg default 32 @:29373); (b) "no
+limit check" FAILS as worded — upstream has ~60 maxTotalThreadsPerThreadgroup
+queries, but ZERO on the reduce path or the qwen4 path — reworded title/
+body accordingly; (c) #607 (M1 Max field report) PASS as audience evidence;
+(d) no duplicate open issue. POSTING: pending final wording pass this
+session (see below).
+### Engine state at window end: production config (umbrella incl. HC_PAIR),
+battery texts verified, 0 WARN.
+### Review round (independent code-review agent on the diff)
+No blockers/majors; all bit-exactness invariants verified line-by-line
+(barrier uniformity, staging bounds vs the n_tokens*n_rank binding, row-1
+offsets, batched-vs-walk sum order, enum/name-table alignment, drift-world
+dispatch immutability, T=3 view consistency). Adopted: env presence-check
+-> ds4_gpu_env_bool (VERIFY_HC_PAIR=0 now correctly DISABLES), missing-
+pipeline fallback (old metal/ tree degrades to the identical-tree generic
+dispatch instead of failing the forward), dead f32/q8 instantiations
+dropped, stale T=3 split comment fixed. Declined (documented inline):
+per-pipeline smem guard (no maxThreadgroupMemoryLength selector on
+MTLComputePipelineState in this SDK; encoder raises anyway, rowe uses
+rank*16B <= 5 KB). NEW static pin: tests/test_qwen4_kernels.c
+test_hc_mix_rowe_pair — fused T=2 vs two T=1 generic dispatches, bit
+comparison across 5 lane paths (ranks 8/72/136/200/320), runs under the
+exact-umbrella env, honest skip otherwise; catches Metal compiler drift
+wherever rcab can't run. The Q8-concat-vs-standalone pin now skips
+honestly under SINGLE_TREE (same reasoning as the ds4_test golden-pair
+skip — the invariant is a plain-tree property).
+### Re-gates after review fixes (final binary)
+rcab spot 8 pairs p03/d2 clean; identity p03 3-grid flips=0; kernel harness
+(test_qwen4_kernels) rc=0 default AND rc=0 ST-pinned (rowe pin ACTIVE: "bit-
+identical to two T=1 generic dispatches"); full ./ds4_test 26 OK / 0 ERR
+both worlds; production engine restarted on the final binary (umbrella incl.
+HC_PAIR), battery 10/10 byte-identical to the banked prodbatch stream,
+0 WARN. Deep(T=3) cycles also ride the rowe 2-row half (depth-3 rcab grids
+covered at the main gate round).

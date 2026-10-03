@@ -426,6 +426,101 @@ QWEN4_HC_MIX_PAIR_INSTANCE(f16, qwen4_w_f16)
 QWEN4_HC_MIX_PAIR_INSTANCE(f32, qwen4_w_f32)
 QWEN4_HC_MIX_PAIR_INSTANCE(q8, qwen4_w_q8)
 
+/* Single-tree (DS4_QWEN4_VERIFY_SINGLE_TREE) replacement for the pair mixer:
+ * reuse each up-projection weight row for both tokens like the pair kernel,
+ * but run each row's arithmetic EXACTLY as the single-row kernel does --
+ * scalar unfused chains ((x*w)*sig + acc, contract/reassociate pinned off,
+ * the order the generic f16 base compiles to and the _f16_pf variant spells
+ * out).  The pair kernels fold w*act into an FMA (this is ROOT-CAUSE-2(a),
+ * QWEN4-VERIFY-IDENTITY-20261003.md: pair != 2x single-row), which made the
+ * single tree disable them; this variant keeps the weight re-stream saving
+ * while row i is bit-identical to a T=1 dispatch at tok=i, so T=2 spec rows
+ * equal their serial steps.  Gate values are staged in threadgroup memory
+ * per row (x and sigmoid(x)); the per-row accumulation walk (lane, lane+8,
+ * ...) and both shuffle trees (xor 1,2,4 then 8,16) match the single-row
+ * kernel exactly.  Oracle: --qwen4-rowcount-ab. */
+template <typename W>
+kernel void kernel_qwen4_hc_gate_mix_pair_rowexact(
+        constant ds4_metal_args_qwen4_hc_gate_mix & args,
+        device const float *xn,
+        device const float *lo,
+        device const char *w_up,
+        device float *mixed,
+        threadgroup float4 *xact [[threadgroup(0)]],
+        uint3 tgpig [[threadgroup_position_in_grid]],
+        ushort tid [[thread_index_in_threadgroup]],
+        ushort3 ntg [[threads_per_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint E = args.n_embd, hc = args.n_hc, rank = args.n_rank;
+    const uint d = tgpig.x * (ntg.x / 32) + sgitg;
+    for (uint r = tid; r < rank; r += ntg.x) {
+        const float x0 = lo[r] / (float)hc;
+        const float x1 = lo[rank + r] / (float)hc;
+        xact[r] = float4(x0, qwen4_sigmoid(x0), x1, qwen4_sigmoid(x1));
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (d >= E) return;
+    const uint s = tiisg / 8, lane = tiisg % 8;
+    const W w(w_up);
+    const uint64_t row = (uint64_t)(s * E + d) * rank;
+    float acc0 = 0.0f, acc1 = 0.0f;
+    uint r = lane;
+    /* Eight ahead weight/activation loads like the single-row PF variant --
+     * a plain per-iteration chain is load-latency bound and measured SLOWER
+     * than the grid.y-per-token generic dispatch (2026-10-03 bring-up);
+     * batching restores the overlap without touching the arithmetic order
+     * (the accumulation sequence over r is unchanged). */
+    for (; r + 56u < rank; r += 64u) {
+#pragma clang fp reassociate(off)
+#pragma clang fp contract(off)
+        float wv[8];
+        float4 av[8];
+        for (uint i = 0; i < 8; i++) { wv[i] = w.at(row + r + 8u * i); av[i] = xact[r + 8u * i]; }
+        for (uint i = 0; i < 8; i++) {
+            const float u0 = (av[i].x * wv[i]) * av[i].y;
+            const float u1 = (av[i].z * wv[i]) * av[i].w;
+            acc0 = acc0 + u0;
+            acc1 = acc1 + u1;
+        }
+    }
+    for (; r < rank; r += 8u) {
+#pragma clang fp reassociate(off)
+#pragma clang fp contract(off)
+        const float wv = w.at(row + r);
+        const float4 a = xact[r];
+        const float u0 = (a.x * wv) * a.y;
+        const float u1 = (a.z * wv) * a.w;
+        acc0 = acc0 + u0;
+        acc1 = acc1 + u1;
+    }
+    acc0 += simd_shuffle_xor(acc0, 1);
+    acc1 += simd_shuffle_xor(acc1, 1);
+    acc0 += simd_shuffle_xor(acc0, 2);
+    acc1 += simd_shuffle_xor(acc1, 2);
+    acc0 += simd_shuffle_xor(acc0, 4);
+    acc1 += simd_shuffle_xor(acc1, 4);
+    float g0 = qwen4_sigmoid(acc0) * xn[s * E + d];
+    float g1 = qwen4_sigmoid(acc1) * xn[E * hc + s * E + d];
+    g0 += simd_shuffle_xor(g0, 8);
+    g0 += simd_shuffle_xor(g0, 16);
+    g1 += simd_shuffle_xor(g1, 8);
+    g1 += simd_shuffle_xor(g1, 16);
+    if (tiisg == 0) {
+        mixed[d] = g0 / (float)hc;
+        mixed[E + d] = g1 / (float)hc;
+    }
+}
+
+#define QWEN4_HC_MIX_PAIR_ROWE_INSTANCE(SUFFIX, W) \
+template [[host_name("kernel_qwen4_hc_gate_mix_pair_rowe_" #SUFFIX)]] \
+kernel void kernel_qwen4_hc_gate_mix_pair_rowexact<W>(constant ds4_metal_args_qwen4_hc_gate_mix &, \
+        device const float *, device const float *, device const char *, device float *, \
+        threadgroup float4 *, uint3, ushort, ushort3, ushort, ushort);
+/* F16 only, matching the host gate (the pinned single-row chain is the f16
+ * one; f32/q8 keep the generic per-token dispatch). */
+QWEN4_HC_MIX_PAIR_ROWE_INSTANCE(f16, qwen4_w_f16)
+
 struct ds4_metal_args_qwen4_hc_combine {
     uint32_t n_tokens;
     uint32_t n_embd;

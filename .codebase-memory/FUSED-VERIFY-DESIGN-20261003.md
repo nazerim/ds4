@@ -259,6 +259,37 @@ mode, ST at 62.4 s beats v2 at 66.8. The p7@1555 near-tie is the empirical
 proof that "the" greedy stream is tree-dependent — worth a line in the
 identity doc next time it's touched.
 
+### 0' RESULT 2026-10-04 (overnight window): fused HC window LANDED —
+### `DS4_QWEN4_VERIFY_HC_PAIR=1` (row-exact pair gate/mix), folded into the
+### QWEN_EXACT_VERIFY umbrella. Shallow T=2 verify 24.57 -> 22.75 ms/cycle
+### (drift 22.19 — ~76% of the same-config gap closed); single-session battery
+### 62.4/63.0 -> 60.0/60.1 s, production batched-session 58.4 -> 57.7/57.3.
+### Attribution first (this refutes the handover's ext-kernel story): both
+### worlds run the IDENTICAL ext T=2 dispatch in the verify forward
+### (ds4_metal.m:19547 gates on n_tok; ST only reroutes T=1) — the 3.3 ms
+### was NOT matvec. Direct pricing: drift + DS4_QWEN4_NO_HC_PAIR (pair->
+### generic at T=2): 22.19 -> 23.98 ms = +1.8 ms is the HC generic's
+### per-row up-projection re-stream (generic grid.y=T reads the [hc*E][rank]
+### weights once per token; pair shares them). Remaining ~0.5 ms: per-row
+### attention decode (B1's number); ~0.4 ms: grouped/shared plumbing.
+### The kernel (metal kernel_qwen4_hc_gate_mix_pair_rowexact): pair's
+### structure (threadgroup-staged per-row x/sigmoid, weight row read once)
+### with the single-row f16 chain spelled per row — ((x*w)*sig + acc,
+### reassociate/contract pinned off, xor-shuffle trees 1/2/4 then 8/16,
+### same r+=8 walk as the PF variant); row i is bit-identical to its own
+### T=1 dispatch. First bring-up attempt (unbatched scalar loop) was 0.9 ms
+### SLOWER than generic — load-latency bound; the 8-ahead batching is
+### mandatory, pinned in the kernel comment. Gates: rowcount-ab 150 pairs
+### (3 prompts x {T=2,T=3} grids x 25, all maxabs=0.0, dump-diff=0);
+### verify-identity 6 runs x 3 grids flips=0 (03/06/07 think-none+high);
+### battery 10/10 byte-identical to banked ST+GROUP x2 runs AND to the
+### production-batched banked stream; suite 26 OK default AND 26 OK
+### ST+GROUP+HC_PAIR-pinned (goldens pass under the flag). F16 weights only
+### (the pinned chain is the f16 one); q8/f32 keep generic dispatch. The
+### T=3 2/1-split's 2-row half rides rowe too (covered by the depth-3 rcab
+### grids). NEXT (unchanged, smaller prize): per-row split ladder in the
+### decode kernel for the last ~0.5 ms.
+
 ### B2 — per-row split ladder (the real fusion, kernel work) [historical spec]
 Make the decode kernel's split geometry row-local: `n_splits_r =
 ceil((pos0+r+1)/split_keys)`, per-row `keys_per_split_r`, partial buffer

@@ -74,8 +74,9 @@ QWEN_YARN="${QWEN_YARN:-2}"
 # QWEN_EXACT_VERIFY=1 (default since 2026-10-03): SINGLE-TREE spec verify -
 # T=1 matvecs share the row-invariant mv_ext tree with speculative verify,
 # so spec output is bit-identical to serial by construction (grouped MoE
-# exact path too).  Costs ~12% wall vs the drifting default (62.4s vs 55.4s
-# on the acceptance battery) and defines the canonical golden tree
+# exact path + row-exact paired HC gate/mix, metal pair_rowe kernel).
+# Costs ~8% wall vs the drifting default (60.0s vs 55.4s on the
+# single-session acceptance battery) and defines the canonical golden tree
 # (tests/test-vectors/qwen38-flashnext).  QWEN_EXACT_VERIFY=0 restores the
 # historical drifting dispatch for perf baselining only.
 QWEN_EXACT_VERIFY="${QWEN_EXACT_VERIFY:-1}"
@@ -240,6 +241,7 @@ start_server() {
       if [ "$QWEN_EXACT_VERIFY" = "1" ]; then
         export DS4_QWEN4_VERIFY_SINGLE_TREE=1
         export DS4_QWEN4_MOE_GROUP_EXACT=1
+        export DS4_QWEN4_VERIFY_HC_PAIR=1
       fi
       TOKENS="${TOKENS:-$QWEN_TOKENS}"
       PORT="${PORT:-$QWEN_PORT}"

@@ -11,6 +11,10 @@
 > (differs from ST world on exactly one known near-tie: prompt 7 @char 1555).
 > QWEN_EXACT_VERIFY=0 restores the drifting dispatch for perf baselines.
 > Full suite green BOTH ways: 26 OK default, 26 OK ST-pinned (2 skips).
+> UPDATE 00:1x 2026-10-04: the exact umbrella also exports DS4_QWEN4_VERIFY_
+> HC_PAIR=1 — ROOT-CAUSE-2(a)'s pair mixer returns as pair_rowe (weight
+> reuse with the single-row chain spelled per row, bit-identical; battery
+> 60.0s single-session / 57.3-57.7s batched, streams UNMOVED, goldens pass).
 >
 > --- Original evening status (kept as history): BOTH root causes closed. ROOT-CAUSE-1 (matvec
 > mv_ext) fixed by the per-row intercepts; ROOT-CAUSE-2 (T=2 PAIR gate/mix

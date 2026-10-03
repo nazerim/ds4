@@ -1891,9 +1891,15 @@ static void test_decode_fusions(arena_t *a) {
         free(expected); free(actual); free(r); free(blk); free(inj);
     }
 
-    /* Concatenated projection: unequal output sizes and short/real input widths. */
+    /* Concatenated projection: unequal output sizes and short/real input widths.
+     * (Skipped under SINGLE_TREE: the standalone T=1 matmul rides the ext tree
+     * there while the concatenated pair kernel keeps its own -- the invariant
+     * is defined against the plain dispatch; same reasoning as the golden-
+     * pair skip in ds4_test.) */
     const uint32_t widths_q8[] = {32u, 2560u}, rows_a[] = {2u, 10240u}, rows_b[] = {48u, 6144u};
-    for (uint32_t i = 0; i < 2u; ++i) {
+    const bool st_tree = getenv("DS4_QWEN4_VERIFY_SINGLE_TREE") != NULL;
+    if (st_tree) printf("Q8 concatenated vs standalone: skipped under DS4_QWEN4_VERIFY_SINGLE_TREE (tree change)\n");
+    for (uint32_t i = 0; !st_tree && i < 2u; ++i) {
         uint32_t k = widths_q8[i], na = rows_a[i], nb = rows_b[i];
         double *shadow = NULL;
         uint64_t wa = arena_q8_0(a, na, k, &shadow, .1f); free(shadow);
@@ -2005,6 +2011,58 @@ static void test_hc_mix_prefetch(arena_t *a) {
     }
     unsetenv("DS4_QWEN4_HC_MIX_PREFETCH");
     printf("HC prefetched mixers (single and paired): exact against the plain kernels on all lane paths\n");
+}
+
+/* Row-exact pair mixer (DS4_QWEN4_VERIFY_SINGLE_TREE + DS4_QWEN4_VERIFY_
+ * HC_PAIR): the fused T=2 dispatch must reproduce two independent T=1
+ * generic dispatches BIT for BIT -- the single-row tree is the row
+ * invariant that lets the exact umbrella use pair-style weight reuse
+ * (the historical pair kernels fold w*act into an FMA the single-row
+ * kernel leaves unfused: ROOT-CAUSE-2(a)).  Pins the Metal compiler's op
+ * choices on this machine; the runtime oracle is --qwen4-rowcount-ab.
+ * The single-tree gate caches its env on first use, so this test only
+ * runs (and can only pin) under a process started with both envs. */
+static void test_hc_mix_rowe_pair(arena_t *a) {
+    if (!getenv("DS4_QWEN4_VERIFY_SINGLE_TREE") || !getenv("DS4_QWEN4_VERIFY_HC_PAIR")) {
+        printf("HC rowe pair mixer: skipped (run with DS4_QWEN4_VERIFY_SINGLE_TREE=1 "
+               "DS4_QWEN4_VERIFY_HC_PAIR=1 to pin the fused T=2 against two T=1 dispatches)\n");
+        return;
+    }
+    const uint32_t ranks[] = {8u, 72u, 136u, 200u, 320u};
+    for (uint32_t ir = 0; ir < 5u; ir++) {
+        const uint32_t rank = ranks[ir], E = rank == 320u ? 2560u : 96u;
+        const uint64_t n = 2u * E, guard = 11u;
+        double *shadow = NULL;
+        const uint64_t off = arena_f16(a, (uint64_t)4u * E * rank, &shadow, 0.3f);
+        free(shadow);
+        float *xn = rand_vec(8u * E, 1.0f), *lo = rand_vec(2u * rank, 6.0f);
+        float *got = malloc((n + guard) * sizeof(float));
+        float *ref = malloc((2u * E + guard) * sizeof(float));
+        require_ok(got && ref, "HC rowe readback allocation");
+        ds4_gpu_tensor *gx2 = upload(xn, 8u * E), *gl2 = upload(lo, 2u * rank);
+        ds4_gpu_tensor *go2 = upload(NULL, n + guard);
+        require_ok(ds4_gpu_tensor_fill_f32(go2, 127.25f, n + guard) &&
+            ds4_gpu_qwen4_hc_gate_mix_tensor(go2, gx2, gl2, a->base, a->size, off, 1u, 2u, E, 4u, rank) &&
+            ds4_gpu_tensor_read(go2, 0, got, (n + guard) * sizeof(float)), "HC rowe T=2 dispatch/read");
+        for (uint32_t row = 0; row < 2u; row++) {
+            ds4_gpu_tensor *gx = upload(xn + row * 4u * E, 4u * E), *gl = upload(lo + row * rank, rank);
+            ds4_gpu_tensor *go = upload(NULL, E + guard);
+            float *tmp = malloc((E + guard) * sizeof(float));
+            require_ok(tmp != NULL, "HC rowe reference readback allocation");
+            require_ok(ds4_gpu_tensor_fill_f32(go, 127.25f, E + guard) &&
+                ds4_gpu_qwen4_hc_gate_mix_tensor(go, gx, gl, a->base, a->size, off, 1u, 1u, E, 4u, rank) &&
+                ds4_gpu_tensor_read(go, 0, tmp, (E + guard) * sizeof(float)), "HC rowe reference dispatch/read");
+            for (uint64_t j = E; j < E + guard; j++) require_ok(tmp[j] == 127.25f, "HC rowe reference guard");
+            memcpy(ref + row * E, tmp, E * sizeof(float));
+            free(tmp);
+            ds4_gpu_tensor_free(go); ds4_gpu_tensor_free(gl); ds4_gpu_tensor_free(gx);
+        }
+        check_exact_f32("HC rowe pair rows match two T=1 dispatches", got, ref, n);
+        for (uint64_t j = n; j < n + guard; j++) require_ok(got[j] == 127.25f, "HC rowe output guard");
+        ds4_gpu_tensor_free(go2); ds4_gpu_tensor_free(gl2); ds4_gpu_tensor_free(gx2);
+        free(ref); free(got); free(lo); free(xn);
+    }
+    printf("HC rowe pair mixer: bit-identical to two T=1 generic dispatches on all lane paths\n");
 }
 
 
@@ -3684,6 +3742,7 @@ int main(void) {
     test_moe_grouped(&arena);
 #endif
     test_hc_mix_prefetch(&arena);
+    test_hc_mix_rowe_pair(&arena);
     test_hc(&arena, 2560, 320, 3, 1u);
     test_hc(&arena, 2560, 320, 2, 1u);
     test_hc(&arena, 2560, 320, 2, 0u);
