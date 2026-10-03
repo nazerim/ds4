@@ -58633,12 +58633,23 @@ static bool qwen4_graph_moe(ds4_qwen4_gpu_graph *g, const ds4_model *m, const ds
                 elapsed[4] * 1e3, elapsed[5] * 1e3, elapsed[6] * 1e3);
         return ok;
     }
-    /* A decode batch runs the shared expert as dense projections over its
-     * rows, as the prefill path does: as a slot of the per-token kernels it
-     * is read once per row, 5 MB of Q8 per row and layer.  Single tokens and
-     * verify rows keep the slot. */
+/* A decode batch runs the shared expert as dense projections over its
+ * rows, as the prefill path does: as a slot of the per-token kernels it
+ * is read once per row, 5 MB of Q8 per row and layer.  Single tokens and
+ * verify rows keep the slot.
+ * DS4_QWEN4_SHARED_DENSE_MIN=N lowers the row threshold (N=1 opts verify
+ * rows into shared-dense + the grouped routed kernels, which read each
+ * expert once per four rows that chose it): the per-row MoE re-stream is
+ * 60% of the T=3 verify delta (3.1 of 5.1 ms, QWEN4_TIMING=2 attribution
+ * 2026-10-03, .codebase-memory/FUSED-VERIFY-DESIGN-20261003.md §B1). */
 #ifdef DS4_HAS_QWEN4_METAL
-    const bool shared_dense = T > 8u &&
+    static int shared_dense_min = -1;
+    if (shared_dense_min < 0) {
+        const char *sdm = getenv("DS4_QWEN4_SHARED_DENSE_MIN");
+        shared_dense_min = sdm && sdm[0] ? (int)strtol(sdm, NULL, 10) : 8;
+        if (shared_dense_min < 1) shared_dense_min = 1;
+    }
+    const bool shared_dense = T > (uint32_t)shared_dense_min &&
         qwen4_graph_dense_ok(l->ffn_gate_shexp) && qwen4_graph_dense_ok(l->ffn_up_shexp) &&
         qwen4_graph_dense_ok(l->ffn_down_shexp);
 #else
@@ -74538,6 +74549,46 @@ static bool qwen4_spec_trace(void) {
     return v != 0;
 }
 
+/* DS4_QWEN4_MTP_PROFILE=1: sync-and-time the spec cycle's stages, bucketed
+ * by verify depth (0 = shallow T=2, 1 = deep T=3, 2 = plain no-verify), and
+ * print rolling averages every 256 cycles.  Motivation: forced depth-3 pays
+ * +26.6% tokens/cycle but loses ~all of it in cycle cost
+ * (MTP-ACCEPTANCE-20261003.md), and the B0 fused-window experiment proved
+ * the attention 2/1-split dispatch count is NOT the cost
+ * (FUSED-VERIFY-DESIGN-20261003.md).  This separates the verify-forward
+ * share from the draft-regeneration tail so the next intervention targets
+ * the right component. */
+static double qwen4_mtp_prof_verify[3], qwen4_mtp_prof_tail[3];
+static uint64_t qwen4_mtp_prof_cycles[3], qwen4_mtp_prof_total;
+static bool qwen4_mtp_prof_on(void) {
+    static int v = -1;
+    if (v < 0) v = getenv("DS4_QWEN4_MTP_PROFILE") != NULL;
+    return v != 0;
+}
+static double qwen4_mtp_prof_mark(void) {
+    /* synchronize unconditionally: ds4_gpu_end_commands is a batched-graph
+     * idiom and no-ops (falsely) on the plain single-session path. */
+    (void)ds4_gpu_synchronize();
+    return now_sec();
+}
+static void qwen4_mtp_prof_add(int b, double verify, double tail) {
+    qwen4_mtp_prof_verify[b] += verify;
+    qwen4_mtp_prof_tail[b] += tail;
+    qwen4_mtp_prof_cycles[b]++;
+    if (++qwen4_mtp_prof_total % 256u != 0u) return;
+    fprintf(stderr, "ds4: mtp-prof total=%llu",
+            (unsigned long long)qwen4_mtp_prof_total);
+    const char *names[3] = { "shallow(T2)", "deep(T3)", "plain" };
+    for (int i = 0; i < 3; i++) {
+        const uint64_t n = qwen4_mtp_prof_cycles[i];
+        fprintf(stderr, " | %s n=%llu verify=%.2fms tail=%.2fms", names[i],
+                (unsigned long long)n,
+                n ? 1e3 * qwen4_mtp_prof_verify[i] / (double)n : 0.0,
+                n ? 1e3 * qwen4_mtp_prof_tail[i] / (double)n : 0.0);
+    }
+    fputc('\n', stderr);
+}
+
 static bool qwen4_spec_force_accept(void) {
     return getenv("DS4_QWEN4_SPEC_FORCE_ACCEPT") != NULL;
 }
@@ -74618,7 +74669,9 @@ static int ds4_session_qwen4_spec_cycle(ds4_session *s, int first_token, float t
     if (!s->glm_mtp_have || accepted_cap < 2 || pos + 2u > g->ctx_cap ||
         g->cap_tokens < 2u || !g->mtp_R || !qwen4_graph_fused(g, 2u)) {
         s->glm_spec_inside = 1;
+        const double pp0 = qwen4_mtp_prof_on() ? qwen4_mtp_prof_mark() : 0.0;
         const int rc = ds4_session_eval_internal(s, first_token, false, err, errlen);
+        const double pp1 = qwen4_mtp_prof_on() ? qwen4_mtp_prof_mark() : 0.0;
         s->glm_spec_inside = 0;
         if (rc != 0) return -1;
         const int parent = sample_argmax(s->logits, V);
@@ -74639,6 +74692,8 @@ static int ds4_session_qwen4_spec_cycle(ds4_session *s, int first_token, float t
         if (qwen4_spec_trace()) {
             fprintf(stderr, "ds4: spec pos %u token %d plain\n", pos, first_token);
         }
+        if (qwen4_mtp_prof_on())
+            qwen4_mtp_prof_add(2, pp1 - pp0, qwen4_mtp_prof_mark() - pp1);
         accepted[0] = first_token;
         return 1;
     }
@@ -74670,7 +74725,9 @@ static int ds4_session_qwen4_spec_cycle(ds4_session *s, int first_token, float t
     g->snap2_valid = false;
     g->verify_rows_exact = deep;
     ds4_gpu_qwen4_set_verify_rows_exact(deep);
+    const double t0 = qwen4_mtp_prof_on() ? qwen4_mtp_prof_mark() : 0.0;
     const bool ok = qwen4_graph_forward_tokens(g, m, w, toks, T, rows, true);
+    const double t1 = qwen4_mtp_prof_on() ? qwen4_mtp_prof_mark() : 0.0;
     ds4_gpu_qwen4_set_verify_rows_exact(false);
     g->verify_rows_exact = false;
     g->snap_after_second = false;
@@ -74753,6 +74810,8 @@ static int ds4_session_qwen4_spec_cycle(ds4_session *s, int first_token, float t
         accepted[0] = first_token;
         accepted[1] = d;
         if (deep) accepted[2] = d2;
+        if (qwen4_mtp_prof_on())
+            qwen4_mtp_prof_add(deep ? 1 : 0, t1 - t0, qwen4_mtp_prof_mark() - t1);
         return deep ? 3 : 2;
     }
     if (accept && deep) {
@@ -74783,6 +74842,8 @@ static int ds4_session_qwen4_spec_cycle(ds4_session *s, int first_token, float t
         s->qwen4_spec_accepted++;
         accepted[0] = first_token;
         accepted[1] = d;
+        if (qwen4_mtp_prof_on())
+            qwen4_mtp_prof_add(1, t1 - t0, qwen4_mtp_prof_mark() - t1);
         return 2;
     }
     if (!g->snap_valid || !qwen4_graph_state_swap(g)) {
@@ -74801,6 +74862,8 @@ static int ds4_session_qwen4_spec_cycle(ds4_session *s, int first_token, float t
         qwen4_session_draft(s, 0, sample_argmax(s->logits, V), pos + 1u);
         accepted[0] = first_token;
         accepted[1] = replacement;
+        if (qwen4_mtp_prof_on())
+            qwen4_mtp_prof_add(deep ? 1 : 0, t1 - t0, qwen4_mtp_prof_mark() - t1);
         return 2;
     }
     memcpy(s->logits, rows, (size_t)V * sizeof(float));
@@ -74821,6 +74884,8 @@ static int ds4_session_qwen4_spec_cycle(ds4_session *s, int first_token, float t
         }
     }
     accepted[0] = first_token;
+    if (qwen4_mtp_prof_on())
+        qwen4_mtp_prof_add(deep ? 1 : 0, t1 - t0, qwen4_mtp_prof_mark() - t1);
     return 1;
 }
 #endif
