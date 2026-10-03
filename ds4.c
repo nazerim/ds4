@@ -58670,16 +58670,126 @@ static bool qwen4_graph_moe(ds4_qwen4_gpu_graph *g, const ds4_model *m, const ds
         l->ffn_up_exps->type == DS4_TENSOR_Q4_K && l->ffn_down_exps->type == DS4_TENSOR_MXFP4 &&
         getenv("DS4_QWEN4_MOE_NO_GROUP") == NULL;
     if (ok && grouped) {
+        /* Bisect diagnostics: run exactly one of the grouped kernels against
+         * the slot twin of the other (acceptance-battery divergence
+         * attribution, 2026-10-03). */
+        static int group_no_mid = -1, group_no_down = -1;
+        if (group_no_mid < 0) {
+            group_no_mid = getenv("DS4_QWEN4_MOE_GROUP_NO_MID") != NULL;
+            group_no_down = getenv("DS4_QWEN4_MOE_GROUP_NO_DOWN") != NULL;
+        }
         ok = ds4_gpu_qwen4_moe_build_lists_tensor(g->moe_lists, g->moe_counts, g->selected, T, DS4_N_EXPERT_USED,
                                                   DS4_N_EXPERT, g->cap_tokens) &&
-             ds4_gpu_qwen4_moe_mid_grouped_tensor(g->mid, g->mixed, g->selected, g->moe_lists, g->moe_counts,
-                                                  g->cap_tokens, m->map, m->size, l->ffn_gate_exps->abs_offset,
-                                                  l->ffn_up_exps->abs_offset, l->ffn_gate_exps->type, DS4_N_EXPERT, T,
-                                                  DS4_N_EXPERT_USED, DS4_N_EMBD, DS4_N_FF_EXP) &&
-             ds4_gpu_qwen4_moe_down_grouped_tensor(g->part, g->mid, g->selected, g->moe_lists, g->moe_counts,
-                                                   g->cap_tokens, m->map, m->size, l->ffn_down_exps->abs_offset,
-                                                   l->ffn_down_exps->type, DS4_N_EXPERT, T, DS4_N_EXPERT_USED,
-                                                   DS4_N_FF_EXP, DS4_N_EMBD);
+             (group_no_mid
+                 ? ds4_gpu_qwen4_moe_mid_tensor(g->mid, g->mixed, g->selected, m->map, m->size,
+                                                l->ffn_gate_exps->abs_offset, l->ffn_up_exps->abs_offset,
+                                                l->ffn_gate_exps->type, DS4_N_EXPERT, T, DS4_N_EXPERT_USED,
+                                                DS4_N_EMBD, DS4_N_FF_EXP, 0, 0, UINT32_MAX) != 0
+                 : ds4_gpu_qwen4_moe_mid_grouped_tensor(g->mid, g->mixed, g->selected, g->moe_lists, g->moe_counts,
+                                                        g->cap_tokens, m->map, m->size, l->ffn_gate_exps->abs_offset,
+                                                        l->ffn_up_exps->abs_offset, l->ffn_gate_exps->type, DS4_N_EXPERT, T,
+                                                        DS4_N_EXPERT_USED, DS4_N_EMBD, DS4_N_FF_EXP) != 0) &&
+             (group_no_down
+                 ? ds4_gpu_qwen4_moe_down_tensor(g->part, g->mid, g->selected, m->map, m->size,
+                                                 l->ffn_down_exps->abs_offset, l->ffn_down_exps->type, DS4_N_EXPERT,
+                                                 T, DS4_N_EXPERT_USED, DS4_N_FF_EXP, DS4_N_EMBD, 0,
+                                                 UINT32_MAX) != 0
+                 : ds4_gpu_qwen4_moe_down_grouped_tensor(g->part, g->mid, g->selected, g->moe_lists, g->moe_counts,
+                                                         g->cap_tokens, m->map, m->size, l->ffn_down_exps->abs_offset,
+                                                         l->ffn_down_exps->type, DS4_N_EXPERT, T, DS4_N_EXPERT_USED,
+                                                         DS4_N_FF_EXP, DS4_N_EMBD) != 0);
+        /* One-shot end-to-end production comparison (DS4_QWEN4_MOE_DEBUG_BISECT):
+         * replay this exact layer's slot twins over the real mixed/selected and
+         * diff mid, down-on-grouped-mid, and the full chain, attributing the
+         * grouped divergence live (kernel-level tests pass; the battery does
+         * not - 2026-10-03, .codebase-memory/FUSED-VERIFY-DESIGN-20261003.md).
+         * Mid-command boundaries follow the DS4_QWEN4_MOE_PROFILE pattern. */
+        static int bisect_left = -1;
+        if (bisect_left < 0)
+            bisect_left = getenv("DS4_QWEN4_MOE_DEBUG_BISECT") != NULL ? 64 : 0;
+        if (ok && bisect_left > 0 && T >= 2u && T <= 8u) {
+            bisect_left--;
+            const uint32_t NS_ = DS4_N_EXPERT_USED, E_ = DS4_N_EMBD, F_ = DS4_N_FF_EXP;
+            const uint64_t nb_mid = (uint64_t)T * NS_ * F_ * sizeof(float);
+            const uint64_t nb_part = (uint64_t)T * NS_ * E_ * sizeof(float);
+            ds4_gpu_tensor *smid = ds4_gpu_tensor_alloc(nb_mid);
+            ds4_gpu_tensor *spart = ds4_gpu_tensor_alloc(nb_part);
+            ds4_gpu_tensor *spart2 = ds4_gpu_tensor_alloc(nb_part);
+            int bok = smid && spart && spart2;
+            ds4_gpu_qwen4_set_verify_rows_exact(true);   /* mirror NR1 dispatch */
+            if (bok && ds4_gpu_end_commands() == 0) bok = -2;
+            if (bok > 0 &&
+                ds4_gpu_qwen4_moe_mid_tensor(smid, g->mixed, g->selected, m->map, m->size,
+                                             l->ffn_gate_exps->abs_offset, l->ffn_up_exps->abs_offset,
+                                             l->ffn_gate_exps->type, DS4_N_EXPERT, T, NS_, E_, F_,
+                                             0, 0, UINT32_MAX) == 0) bok = -3;
+            if (bok > 0 &&
+                ds4_gpu_qwen4_moe_down_tensor(spart, g->mid, g->selected, m->map, m->size,
+                                              l->ffn_down_exps->abs_offset, l->ffn_down_exps->type,
+                                              DS4_N_EXPERT, T, NS_, F_, E_, 0, UINT32_MAX) == 0) bok = -4;
+            if (bok > 0 &&
+                ds4_gpu_qwen4_moe_down_tensor(spart2, smid, g->selected, m->map, m->size,
+                                              l->ffn_down_exps->abs_offset, l->ffn_down_exps->type,
+                                              DS4_N_EXPERT, T, NS_, F_, E_, 0, UINT32_MAX) == 0) bok = -5;
+            if (bok > 0 && ds4_gpu_end_commands() == 0) bok = -6;
+            if (bok > 0 && ds4_gpu_synchronize() == 0) bok = -7;
+            ds4_gpu_qwen4_set_verify_rows_exact(false);
+            if (bok) {
+                float *a_mid = xmalloc((size_t)nb_mid), *b_mid = xmalloc((size_t)nb_mid);
+                float *a_p = xmalloc((size_t)nb_part), *b_p = xmalloc((size_t)nb_part),
+                      *c_p = xmalloc((size_t)nb_part);
+                float *mx = xmalloc((uint64_t)T * E_ * sizeof(float));
+                int32_t *sel = xmalloc((size_t)T * NS_ * sizeof(sel[0]));
+                if (ds4_gpu_tensor_read(g->mid, 0, a_mid, nb_mid) &&
+                    ds4_gpu_tensor_read(smid, 0, b_mid, nb_mid) &&
+                    ds4_gpu_tensor_read(g->part, 0, a_p, nb_part) &&
+                    ds4_gpu_tensor_read(spart, 0, b_p, nb_part) &&
+                    ds4_gpu_tensor_read(spart2, 0, c_p, nb_part) &&
+                    ds4_gpu_tensor_read(g->mixed, 0, mx, (uint64_t)T * E_ * sizeof(float)) &&
+                    ds4_gpu_tensor_read(g->selected, 0, (float *)sel, (size_t)T * NS_ * sizeof(int32_t))) {
+                    uint64_t dm = 0, dp = 0, dc = 0;
+                    for (uint64_t i = 0; i < nb_mid / sizeof(float); i++) dm += a_mid[i] != b_mid[i];
+                    for (uint64_t i = 0; i < nb_part / sizeof(float); i++) {
+                        dp += a_p[i] != b_p[i];
+                        dc += a_p[i] != c_p[i];
+                    }
+                    if (dm || dp || dc)
+                        fprintf(stderr, "ds4: moe-bisect BAD mid-diff=%llu down-diff=%llu chain-diff=%llu"
+                                " sample mid g=%a s=%a sel=%d,%d,%d\n",
+                                (unsigned long long)dm, (unsigned long long)dp, (unsigned long long)dc,
+                                a_mid[0], b_mid[0], sel[0], sel[1], sel[2]);
+                    for (uint64_t i = 0; dm && i < nb_mid / sizeof(float); i++) {
+                        if (a_mid[i] != b_mid[i]) {
+                            fprintf(stderr, "ds4: moe-bisect first mid diff at [%llu][r=%llu] row=%llu g=%a s=%a\n",
+                                    (unsigned long long)(i / F_), (unsigned long long)(i % F_),
+                                    (unsigned long long)(i / F_ / NS_), a_mid[i], b_mid[i]);
+                            break;
+                        }
+                    }
+                    for (uint64_t i = 0; dc && i < nb_part / sizeof(float); i++) {
+                        if (a_p[i] != c_p[i]) {
+                            fprintf(stderr, "ds4: moe-bisect first chain diff at [%llu][r=%llu] g=%a s=%a\n",
+                                    (unsigned long long)(i / E_), (unsigned long long)(i % E_),
+                                    a_p[i], c_p[i]);
+                            break;
+                        }
+                    }
+                    write_f32_binary_file("/tmp/ds4-moe-bisect-mixed.bin", mx, (uint64_t)T * E_);
+                    write_f32_binary_file("/tmp/ds4-moe-bisect-sel.bin", (const float *)sel, (uint64_t)T * NS_);
+                    write_f32_binary_file("/tmp/ds4-moe-bisect-gmid.bin", a_mid, nb_mid / sizeof(float));
+                    write_f32_binary_file("/tmp/ds4-moe-bisect-slotmid.bin", b_mid, nb_mid / sizeof(float));
+                    write_f32_binary_file("/tmp/ds4-moe-bisect-gpart.bin", a_p, nb_part / sizeof(float));
+                    write_f32_binary_file("/tmp/ds4-moe-bisect-spart2.bin", c_p, nb_part / sizeof(float));
+                }
+                free(a_mid); free(b_mid); free(a_p); free(b_p); free(c_p); free(mx); free(sel);
+            } else {
+                fprintf(stderr, "ds4: moe-bisect replay failed (%d)\n", bok);
+            }
+            ds4_gpu_tensor_free(smid);
+            ds4_gpu_tensor_free(spart);
+            ds4_gpu_tensor_free(spart2);
+            (void)glm_graph_begin_commands_if_needed();
+        }
     } else
 #endif
     if (ok) {

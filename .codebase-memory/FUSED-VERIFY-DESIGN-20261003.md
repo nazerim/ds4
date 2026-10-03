@@ -61,7 +61,50 @@ batteries' outputs saved):
   unconditionally; three rows burn 64-split-slot threadgroups, so the
   single dispatch costs ~what the 2/1 sub-batches saved.
 
-### B1 attribution (2026-10-03, DS4_QWEN4_TIMING=2 + DS4_QWEN4_MTP_PROFILE runs)
+### B1 attribution (2026-10-03) — CORRECTED 15:00 after live bisect; the
+### original version misattributed the battery divergence to grouped (and
+### misread the shared-dense-only control output). Corrected story:
+
+1. DS4_QWEN4_MOE_DEBUG_BISECT in-engine replay (all MoE layers, T=2 AND T=3
+   cycles, real production inputs): grouped mid/grouped down == slot twins
+   with ZERO element diffs, chain-composition also zero. Grouped is
+   BIT-EXACT (the earlier claim "grouped breaks bit-identity" was wrong:
+   every MIN=1 run - shared-dense-only, slot-mid+grouped-down, full-grouped
+   - shares ONE divergence fingerprint (prompts 3@884, 7@1520 vs the
+   shared-slot baseline); the common ingredient, not grouped, is the cause).
+2. THE actual exactness fact (now proven, not assumed): shared-dense
+   (dense gemv + swiglu + reduce shared_src=2) is NOT bit-identical to
+   shared-as-slot (slot-kernel branch + reduce shared_src=1), and the T=1
+   serial reference is the SLOT variant. The original `shared_dense =
+   T > 8u` gate therefore guards verify exactness, not just perf - do not
+   lower it.
+3. The grouped kernels REQUIRE shared_dense (their host has no shared slot:
+   "the batch runs the shared expert as dense projections") - which is why
+   the grouped experiment appeared non-exact: it dragged shared-dense with
+   it. Grouped at verify size needs shared-as-slot plumbing (below), not a
+   shared-dense exception.
+4. Measured prizes stand: grouped (with dense shared) verify T3 26.5 vs
+   27.95 slot baseline (-1.35..1.45ms/cycle, ~+4.5% wall at forced-3:
+   55.1s vs 57.2s battery). The exact version must preserve most of it.
+
+### B2 design (was B1/B2 sketch, re-scoped to the corrected cause)
+
+Goal: exact grouped verify MoE = grouped routed (proven bit-exact) +
+shared computed by the UNTOUCHED slot-kernel shared branch (bit-exact by
+identity with baseline) composed through the ORIGINAL baseline reduce
+(shared-as-slot, shared_src=1, n_out=11 stride). Two kernel-host changes:
+- grouped mid/down: write/row-index via a stride-11 output layout when the
+  caller keeps shared as a slot (list membership pair = t*10+s unchanged;
+  mid/part row = t*11+s). Reuse a qwen4_moe_args pad slot for `out_stride`.
+- add a shared-slot-only dispatch: reuse kernel_qwen4_moe_mid/down with
+  slot base 10 (dispatch y from the shared slot only), i.e. `slot_base`
+  in the kernel's slot index math (grid.y stays 11, or start-index arg).
+Baseline composition check afterwards is cheap: the DS4_QWEN4_MOE_DEBUG_
+BISECT replay is the oracle (all-diff-zero => ship; defaults flip via
+SHARED_DENSE_MIN staying 8 - grouped must gain its own row-count gate
+`T >= 2` decoupled from shared_dense).
+
+### Original (superseded) attribution notes:
 
 Per-group T3-vs-T2 verify delta (profiler-synced numbers, single session):
 verify_deep 27.85 vs verify_shallow 22.85 ms -> **5.0ms**; TIMING=2 group

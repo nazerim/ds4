@@ -2047,18 +2047,24 @@ static void test_mv_ext_groups(arena_t *a) {
 
 #ifdef __APPLE__
 /* The grouped decode-batch kernels must reproduce the per-token kernels bit
- * for bit under heavy expert reuse (sixteen rows over eight experts). */
-static void test_moe_grouped(arena_t *a) {
-    const uint32_t NE = 8, slots = 6, E = 2560, F = 640, T = 16, cap = 64;
-    double *gate_w, *up_w, *down_w;
-    const uint64_t gate_off = arena_q4_K(a, (uint64_t)NE * F, E, &gate_w, 0.05f);
-    const uint64_t up_off = arena_q4_K(a, (uint64_t)NE * F, E, &up_w, 0.05f);
-    const uint64_t down_off = arena_mxfp4(a, (uint64_t)NE * E, F, &down_w);
-    free(gate_w); free(up_w); free(down_w);
-    float *x = rand_vec((uint64_t)T * E, 1.0f);
+ * for bit under heavy expert reuse - at EVERY row count and slot count the
+ * verify paths use (T=2/3 with slots=10 included), because the per-token
+ * dispatch selects NR/NSG variants by row count and the verify flag on M5.
+ * T=16/6-slots alone missed the small-batch divergence found live on
+ * 2026-10-03 (grouped@T=3 broke slot-reference bit-identity in the
+ * acceptance battery; .codebase-memory/FUSED-VERIFY-DESIGN-20261003.md §B1). */
+static void test_moe_grouped_case(arena_t *a, uint32_t T, uint32_t slots, uint32_t reuse,
+                                  uint64_t gate_off, uint64_t up_off, uint64_t down_off, float *x,
+                                  uint32_t n_expert, uint32_t list_cap) {
+    const uint32_t NE = n_expert ? n_expert : 8u, E = 2560, F = 640, cap = list_cap ? list_cap : 64u;
     int32_t *sel = malloc((uint64_t)T * slots * 4);
     for (uint32_t t = 0; t < T; t++) {
-        for (uint32_t s = 0; s < slots; s++) sel[t * slots + s] = (int32_t)((t * 7u + s * 3u) % NE);
+        for (uint32_t s = 0; s < slots; s++)
+            sel[t * slots + s] = (int32_t)(
+                reuse == 2u
+                    ? (10u + s + (t == 2u && s < slots / 2u ? 60u : 0u)) % NE
+                    : reuse ? (t * 7u + s * 3u) % NE
+                            : (t * slots + s) % NE);
     }
     ds4_gpu_tensor *gx = upload(x, (uint64_t)T * E);
     ds4_gpu_tensor *gsel = ds4_gpu_tensor_alloc((uint64_t)T * slots * 4);
@@ -2078,13 +2084,87 @@ static void test_moe_grouped(arena_t *a) {
     const uint64_t nm = (uint64_t)T * slots * F, np = (uint64_t)T * slots * E;
     float *am = download(gmid[0], nm), *bm = download(gmid[1], nm);
     float *ap = download(gpart[0], np), *bp = download(gpart[1], np);
-    check_exact_f32("grouped Q4_K mid", bm, am, nm);
-    check_exact_f32("grouped MXFP4 down", bp, ap, np);
-    printf("  MoE grouped kernels: mid and down byte-exact against the per-token kernels under expert reuse\n");
+    char label[96];
+    snprintf(label, sizeof(label), "grouped Q4_K mid T=%u slots=%u reuse=%u", T, slots, reuse);
+    check_exact_f32(label, bm, am, nm);
+    snprintf(label, sizeof(label), "grouped MXFP4 down T=%u slots=%u reuse=%u", T, slots, reuse);
+    check_exact_f32(label, bp, ap, np);
+    /* List order comes from atomicAdd racing and may differ between builds;
+     * per-pair results must not depend on it. Rebuild lists and rerun both
+     * grouped kernels, comparing against the first grouped outputs. */
+    float *cm = malloc(nm * sizeof(float)), *cp = malloc(np * sizeof(float));
+    require_ok(cm && cp, "grouped determinism scratch");
+    memcpy(cm, bm, nm * sizeof(float));
+    memcpy(cp, bp, np * sizeof(float));
+    require_ok(ds4_gpu_qwen4_moe_build_lists_tensor(glists, gcounts, gsel, T, slots, NE, cap), "grouped: lists 2");
+    require_ok(ds4_gpu_qwen4_moe_mid_grouped_tensor(gmid[1], gx, gsel, glists, gcounts, cap, a->base, a->size, gate_off,
+                                                    up_off, 12u, NE, T, slots, E, F), "grouped: mid 2");
+    require_ok(ds4_gpu_qwen4_moe_down_grouped_tensor(gpart[1], gmid[0], gsel, glists, gcounts, cap, a->base, a->size,
+                                                     down_off, 39u, NE, T, slots, F, E), "grouped: down 2");
+    float *dm = download(gmid[1], nm), *dp = download(gpart[1], np);
+    snprintf(label, sizeof(label), "grouped mid list-order determinism T=%u", T);
+    check_exact_f32(label, dm, cm, nm);
+    snprintf(label, sizeof(label), "grouped down list-order determinism T=%u", T);
+    check_exact_f32(label, dp, cp, np);
+    free(dp); free(dm); free(cm); free(cp);
     free(bp); free(ap); free(bm); free(am);
     for (int i = 0; i < 2; i++) { ds4_gpu_tensor_free(gpart[i]); ds4_gpu_tensor_free(gmid[i]); }
     ds4_gpu_tensor_free(gcounts); ds4_gpu_tensor_free(glists); ds4_gpu_tensor_free(gsel); ds4_gpu_tensor_free(gx);
-    free(sel); free(x);
+    free(sel);
+}
+
+static void test_moe_grouped(arena_t *a) {
+    static const uint32_t ts[] = {1u, 2u, 3u, 4u, 8u, 16u};
+    static const uint32_t sl[] = {6u, 8u, 10u};
+    double *gate_w, *up_w, *down_w;
+    const uint64_t gate_off = arena_q4_K(a, 8ull * 640, 2560, &gate_w, 0.05f);
+    const uint64_t up_off = arena_q4_K(a, 8ull * 640, 2560, &up_w, 0.05f);
+    const uint64_t down_off = arena_mxfp4(a, 8ull * 2560, 640, &down_w);
+    free(gate_w); free(up_w); free(down_w);
+    float *x = rand_vec(16ull * 2560, 1.0f);
+    /* Production M5 dispatch takes the NR1 small-batch mid variant once the
+     * verify flag is on; mirror both states. */
+    for (uint32_t vf = 0; vf < 2u; vf++) {
+        ds4_gpu_qwen4_set_verify_rows_exact(vf != 0);
+        for (size_t i = 0; i < sizeof(ts) / sizeof(ts[0]); i++)
+            for (size_t j = 0; j < sizeof(sl) / sizeof(sl[0]); j++)
+                for (uint32_t r = 0; r < 2u; r++)
+                    test_moe_grouped_case(a, ts[i], sl[j], r, gate_off, up_off, down_off, x, 0u, 0u);
+    }
+    ds4_gpu_qwen4_set_verify_rows_exact(false);
+    free(x);
+    /* Production-shaped case: 512 experts, cap_tokens list stride, 10 slots
+     * and the verify triangle - three draft rows whose routers agree on
+     * most experts (the state the grouped kernels actually meet at T=3). */
+    {
+        double *gw, *uw, *dw;
+        const uint64_t g512 = arena_q4_K(a, 128ull * 640, 2560, &gw, 0.05f);
+        const uint64_t u512 = arena_q4_K(a, 128ull * 640, 2560, &uw, 0.05f);
+        const uint64_t d512 = arena_mxfp4(a, 128ull * 2560, 640, &dw);
+        free(gw); free(uw); free(dw);
+        ds4_gpu_qwen4_set_verify_rows_exact(true);
+        test_moe_grouped_case(a, 3u, 10u, 2u, g512, u512, d512, x, 128u, 512u);
+        test_moe_grouped_case(a, 2u, 10u, 2u, g512, u512, d512, x, 128u, 512u);
+        test_moe_grouped_case(a, 3u, 10u, 2u, g512, u512, d512, x, 128u, 8192u);
+        /* Real activations are not uniform noise: adversarial dynamic range
+         * (saturated silu inputs, subnormals, signed zeros, large rows). */
+        {
+            const uint32_t n = 16u * 2560u;
+            float *xe = malloc(n * sizeof(float));
+            require_ok(xe != NULL, "grouped extreme input");
+            for (uint32_t i = 0; i < n; i++) {
+                const uint32_t m = i % 7u;
+                xe[i] = m == 0u ? 1.0e3f : m == 1u ? -1.0e3f
+                        : m == 2u ? 1.0e-40f : m == 3u ? -1.0e-38f
+                        : m == 4u ? -0.0f : m == 5u ? 44.0f : -60.0f;
+            }
+            test_moe_grouped_case(a, 3u, 10u, 2u, g512, u512, d512, xe, 128u, 8192u);
+            test_moe_grouped_case(a, 2u, 10u, 2u, g512, u512, d512, xe, 128u, 8192u);
+            free(xe);
+        }
+        ds4_gpu_qwen4_set_verify_rows_exact(false);
+    }
+    printf("  MoE grouped kernels: mid and down byte-exact against the per-token kernels at T=1..16, slots=6/8/10, reuse and sparse, verify flag off/on, production-shaped 512-expert verify triangles\n");
 }
 
 #endif
