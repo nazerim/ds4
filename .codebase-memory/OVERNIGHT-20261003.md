@@ -55,14 +55,9 @@ operator stopped it for this window).
 
 ## Blocked / deferred (with reasons)
 
-- **Re-baseline vs omlx 0.7.0** — BLOCKED: current :8005 catalog no longer
-  serves Qwen3.8-Flash-Next-oQ4e-mtp (operator's config now Muse-Glimmer-30B
-  family + Qwen3.8-27B); :8000 app down. Did NOT reconfigure the production
-  glimmer overnight. Tooling ready for when the model is back:
-  /tmp/gen_payloads.py + /tmp/rebaseline_8005.py (40k/80k cold, nonce-
-  prefixed; rc1-era reference 992/560 tok/s). Decode side needs no re-run:
-  the 2026-10-02 0.7.0 smoke already recorded 34.3 tok/s warm single-stream
-  vs ds4's 47–68.
+- **Re-baseline vs omlx 0.7.0** — was blocked in the morning window (model
+  absent from :8005); **RESOLVED in the second window below** (operator
+  copied the model back, results recorded).
 - **HC combine_norm beyond T=1** — DEFERRED by tonight's economics: with MTP
   always on, nearly all decode cycles are T=2/3 verify cycles; combine_norm
   T=1 helps only non-spec steps. Re-rank below the fused-verify work.
@@ -100,20 +95,87 @@ make tests/kv_policy_harness && ./tests/kv_policy_harness  # Scenario L incl.
 # verified at bb6ecc7 — not fork drift; guard follow-up proposed above).
 ```
 
-## NEXT queue (ranked)
+## SECOND WINDOW 2026-10-03 (~11:15-11:50, operator resumed)
+
+Operator directive: "continue through all our next items". New standing
+constraint recorded: **ONLY ONE of omlx/ds4 may hold a model resident at a
+time** — 128 GB machine, both engines 70-97 GB; bench sessions must
+cross-stop the other engine.
+
+Operator copied the omlx Flash-Next model back
+(`~/.omlx/models/Jundot/Qwen3.8-Flash-Next-oQ4e-mtp`, 99 GB, same oQ4e quant
+as the rc1-era runs) and the glimmer restart registered it (catalog 11->12,
+rc1-era model_settings survived intact: ctx 262144, PLE SSD offload on,
+ANE off, MTP on).
+
+| SHA | What |
+|---|---|
+| `58c549c` | **server: incremental live_text refresh** (lane B fix #2) — per-slot ids snapshot + pure `live_text_can_append` predicate (strictly-longer + identical head); ds4_token_text proven stateless per token so the splice is byte-identical to full re-render; rewind/rewrite/disk-swap/shrink fall back; --server unit test pins the predicate. Kills O(session_len) detok churn per turn |
+| `8a120d9` + `973aaa4` | **tests: model-anchor guards** for the 4 DeepSeek fixtures (realpath vs canonical ds4flash.gguf, overridable via DS4_TEST_DEEPSEEK_MODEL) — **full `make test` under Qwen: 25 OK / 0 ERR, first fully-honest run** (the 4 now report skipped). Wording corrected: the canonical default is the Vision-Exp layers-37-42 gguf (ds4flash.gguf relink Sep-21), NOT 0731 — operator note; the fixtures pass under that default |
+| `0eb8f5a` | docs: lane C verdict folded (live_text consumers pure-memcmp; TTFT-floor attribution corrected — refresh lands on the NEXT request's queue time, cold floor unexplained) |
+
+### Re-baseline DONE (was "blocked" in the morning section)
+
+`flash-next-perf/rebaseline_070.py` (now durable in the workstream — operator
+rule: no scripts in /tmp) + results `rebaseline_070_2026-10-03.json`, run on
+the ORIGINAL rc1-era `perf_payloads.json` (nonce-prefixed, cold, same
+prompts as perf_results2.json). Model loaded in 13.2 s (page cache warm):
+
+| size | rc1-era cold | 0.7.0 cold | change |
+|---|---|---|---|
+| 40k | 992 tok/s | **1733** | +75% |
+| 80k | 560 tok/s | **1748** | **3.12x — scaling collapse gone** |
+| decode warm | ~34 | 33.7 | flat (40k decode figure = early-EOS artifact, ignore) |
+
+Consequence recorded in `omlx-v070-final-perf.md` §3.1: **ds4 no longer
+leads cold prefill on this machine** (~35-38% behind) — the recon's open
+candidates #2 (GDN prefill front, ~0.4% — now underwhelming) and #4 (QSA
+tile widening) move from "nice" to "required"; decode lead (ds4 ~65 t/s
+greedy+MTP vs 33.7) confirmed vs 0.7.0. Quant caveat: Q4_K gguf vs oQ4e MLX.
+
+### Also this window
+
+- **RISK-1 upstream issue: DRAFTED** (threadgroup-limit exposure, all cites
+  re-verified against upstream `0aaea5a` via gh api; no duplicate issues;
+  #607 cross-ref as the M1-Max audience evidence). NOT POSTED — awaiting
+  operator go-ahead (public action). Draft location: this file's git-history
+  of the lane D run; summary: title "Metal: split-K attention reduce
+  dispatched at 1024 threads with no per-pipeline limit check", minimal fix
+  = the fail-closed guard shape we shipped in `555ee22`, plus a
+  DS4_METAL_LOG_TG_LIMITS-style diagnostic.
+- glimmer service restarted twice (register model; then unload before ds4
+  tests) — :8005 healthy, models unloaded after bench; ds4 engine restored
+  at window end (production config).
+
+## NEXT queue (ranked) — UPDATED 2nd window
 
 1. Fused single-dispatch T=3 verify (the re-gated lift milestone; blueprint
    in omlx-v070-mtp-row-exact.md §3 + e15e5b53/f5bf6f7b mechanisms).
-2. Model-guard the 4 DeepSeek-fixture tests (addae6c pattern) so make test
-   under Qwen is honest; or restore a 0731 gguf + record it in download_model.sh.
-3. R2b follow-through: measure realized resume-latency delta in the field
-   (log `save=`/load times before-after at matched depths) — the seek path
-   is shipped but the seconds column is projected, not measured.
-4. Scenario L field check: after a few days, tally `frontier-superseded`
-   lines + MiB freed in log/ds4-qwen.log.
-5. Re-baseline when Flash-Next returns to a glimmer instance (scripts ready).
-6. Lane B #2 incremental live_text (gated on the tool_mu consumer invariant
-   question) — biggest per-request CPU win for long agent sessions; the
-   ~460 ms cold TTFT floor decomposition belongs with it.
-7. Upstream: RISK-1 issue draft for antirez/ds4 (matches #4063 audience);
-   watch #1163/#1164/#1020/#1022.
+   Priority RAISED by the re-baseline: prefill+decode are now the two
+   fronts where omlx 0.7.0 either leads (prefill) or trails (decode) —
+   fused verify is the decode-side multiplier.
+2. **POST the RISK-1 upstream issue** — draft ready, operator approval only.
+3. QSA tile widening (rc1 recon §5 plan item #4) — now the direct response
+   to losing the prefill row: omlx 0.7.0 prefill ~1750 flat vs ds4 1268-1319.
+4. R2b field measurement (compare load `ms=`/`size=` in log/ds4-qwen.log at
+   matched chain depths before/after the trim; engine was rebuilt so the
+   "after" samples accumulate from today).
+5. Scenario L reclaim tally (`frontier-superseded` lines + MiB).
+6. Detok-table memory decision (lane B fix #3, open question 2) then
+   distributed scratch (#4, question 3).
+7. Per-turn live_text savings sizing via TRACE_PATH (lane C follow-up 1).
+
+## State at handoff + verification — UPDATED
+
+Production engine: restored via `./ds4-server.sh start-qwen` at window end.
+Verify:
+```sh
+cd /Users/naz/Projects/ds4
+git log --oneline -8
+pgrep -f 'ds4-server --model'
+grep -cE 'WARN|ERR' log/ds4-qwen.log          # expect 0
+./ds4_test --server >/dev/null 2>&1 && echo server-green   # coexists (model-free)
+curl -s 127.0.0.1:8005/health                  # glimmer up, 12 models, 0 loaded
+# full make test now GREEN under DS4_TEST_MODEL=Qwen (25 OK, 4 guarded skips);
+# under default (ds4flash.gguf -> Vision-Exp) unchanged behavior.
+```
