@@ -169,10 +169,31 @@ greedy+MTP vs 33.7) confirmed vs 0.7.0. Quant caveat: Q4_K gguf vs oQ4e MLX.
   tests) — :8005 healthy, models unloaded after bench; ds4 engine restored
   at window end (production config).
 
-## NEXT queue (ranked) — UPDATED 2nd window
+## DAY SHIFT UPDATE 2026-10-03 (B3 push -> identity root cause; see QWEN4-VERIFY-IDENTITY-20261003.md)
+While pushing the decode wall (B3 policy tuning), the depth-perturbation
+experiments exposed the systemic verify-vs-serial drift: ROOT CAUSE = mv_ext
+matvec kernels not row-count invariant (1 ULP on 82% of logits elements,
+T=2/3 vs T=1). Fix shipped env-gated (29224e2, DS4_QWEN4_VERIFY_PER_ROW=1);
+--qwen4-verify-identity regression added (flips=0 with fix, think-high and
+deep). Server-completions residual (prompt 3@884) open. Grouped MoE is
+innocent (bit-exact in-engine replay, all layers); shared-DENSE at verify
+sizes is NOT serial-exact (shared-slot is) -> GROUP_EXACT redesign = grouped
+routed + shared-slot stride-11 (B2 note in FUSED-VERIFY-DESIGN).
+Production engine restored with defaults (drift-status-quo, fastest known);
+flip to per-row if identity > 15% decode latency.
+Depth-policy knobs (MTP_PROFILE/DEPTH_BITS_*/DEPTH_UNLOCK/GROUP_EXACT/
+SHARED_DENSE_MIN/VERIFY_PER_ROW) all env-gated, defaults = pre-experiment.
 
-1. Fused single-dispatch T=3 verify (the re-gated lift milestone; blueprint
-   in omlx-v070-mtp-row-exact.md §3 + e15e5b53/f5bf6f7b mechanisms).
+## NEXT queue (ranked) — UPDATED 3rd time
+
+1. SERVER residual for the identity fix: per-row vs serial still differs at
+   completions prompt-3@884 while the session probe is clean — bisect the
+   server spec skip/rollback boundaries (think-close transitions).
+   Then: decide VERIFY_PER_ROW default (cost 65.4 vs 55.4 battery) + re-capture
+   goldens if flipped. THE decode headline is now correctness, not fused windows.
+2. Fused single-dispatch T=3 verify (the re-gated lift milestone; blueprint
+   in omlx-v070-mtp-row-exact.md §3 + e15e5b53/f5bf6f7b mechanisms) — note:
+   per-row matvec cost must be folded into this design (they interact).
    Priority RAISED by the re-baseline: prefill+decode are now the two
    fronts where omlx 0.7.0 either leads (prefill) or trails (decode) —
    fused verify is the decode-side multiplier.
