@@ -24,14 +24,16 @@ static const char *test_model_path(void) {
     return (model_path && model_path[0]) ? model_path : "ds4flash.gguf";
 }
 
-/* These four suites are pinned to the official DeepSeek-V4-Flash 0731
- * checkpoint - their vector fixtures, story facts, ratio-4 layout and the
- * #384 SSD-streaming repro all derive from that model.  Run against any
- * other fixture (e.g. a Qwen3.8 DS4_TEST_MODEL) they fail with meaningless
- * mismatches, so skip them the way the local-golden-vectors model-anchor
- * guard does: DS4_TEST_MODEL must resolve (realpath) to the canonical
- * ds4flash.gguf target - the symlink re-linked by download_model.sh, or an
- * explicit DS4_TEST_DEEPSEEK_MODEL anchor. */
+/* These four suites are pinned to the canonical DeepSeek-V4-Flash model -
+ * their vector fixtures, story facts, ratio-4 layout and the #384
+ * SSD-streaming repro all derive from that checkpoint family (the repo
+ * default ds4flash.gguf, currently the Vision-Exp layers-37-42 build).
+ * Run against any other fixture (e.g. a Qwen3.8 DS4_TEST_MODEL) they fail
+ * with meaningless mismatches, so skip them the way the
+ * local-golden-vectors model-anchor guard does: DS4_TEST_MODEL must resolve
+ * (realpath) to the canonical ds4flash.gguf target - the symlink
+ * download_model.sh re-links, or an explicit DS4_TEST_DEEPSEEK_MODEL
+ * anchor. */
 static bool test_deepseek_flash_fixture_ready(void) {
     char a[PATH_MAX], b[PATH_MAX];
     const char *canonical = getenv("DS4_TEST_DEEPSEEK_MODEL");
@@ -5575,7 +5577,7 @@ static void test_metal_kernel_group(void) {
 
 static void test_metal_short_prefill_ratio4(void) {
     if (!test_deepseek_flash_fixture_ready()) {
-        puts("metal-short-prefill: DeepSeek 0731 fixture required (see "
+        puts("metal-short-prefill: DeepSeek canonical fixture required (see "
              "test_deepseek_flash_fixture_ready), skipped");
         return;
     }
@@ -5962,7 +5964,7 @@ static void test_long_prefill_progress(void *ud, const char *event, int current,
 
 static void test_long_story_fact_recall(void) {
     if (!test_deepseek_flash_fixture_ready()) {
-        puts("long-context: DeepSeek 0731 fixture required (see "
+        puts("long-context: DeepSeek canonical fixture required (see "
              "test_deepseek_flash_fixture_ready), skipped");
         return;
     }
@@ -6219,7 +6221,7 @@ static bool test_logprob_vector_case_disabled(const char *path,
 
 static void test_official_logprob_vectors_run(const char *case_filter) {
     if (!test_deepseek_flash_fixture_ready()) {
-        puts("logprob-vectors: DeepSeek 0731 vector fixture required (see "
+        puts("logprob-vectors: DeepSeek canonical vector fixture required (see "
              "test_deepseek_flash_fixture_ready), skipped");
         return;
     }
@@ -6285,7 +6287,7 @@ static void test_metal_ssd_streaming_cache_pressure(void) {
             "(Metal-only)\n");
 #else
     if (!test_deepseek_flash_fixture_ready()) {
-        puts("metal-ssd-streaming-cache-pressure: DeepSeek 0731 fixture "
+        puts("metal-ssd-streaming-cache-pressure: DeepSeek canonical fixture "
              "required (see test_deepseek_flash_fixture_ready), skipped");
         return;
     }
