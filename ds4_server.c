@@ -10416,6 +10416,12 @@ struct server_slot {
     char *live_text;
     size_t live_text_len;
     int live_text_pos;              /* checkpoint.len at render time; 0 = stale */
+    /* Copy of the checkpoint token ids as rendered (live_text_pos entries),
+     * so a refresh can PROVE the head is unchanged before appending instead
+     * of re-rendering the whole session.  Rewinds, tool-checkpoint rewrites,
+     * disk prefix swaps and resets all surface as a head mismatch or a
+     * shrink and fall back to the full re-render. */
+    int *live_text_ids;
 
     job *assigned;
     job *running;
@@ -13319,25 +13325,73 @@ static bool live_continuation_unavailable(const request *req, bool materialized)
     return false;
 }
 
+/* Append-branch decision for slot_refresh_live_text: the checkpoint must
+ * strictly extend the rendered snapshot with an identical head.  Pure so the
+ * model-free --server unit tests can pin it (test_live_text_append_predicate). */
+static bool live_text_can_append(const int *ids, int ids_len,
+                                 const ds4_tokens *live) {
+    if (!ids || ids_len <= 0 || !live || !live->v || live->len <= ids_len)
+        return false;
+    return memcmp(ids, live->v, (size_t)ids_len * sizeof(int)) == 0;
+}
+
 /* Refresh the cached rendered text of the slot's checkpoint.  Called by the
  * slot worker after each job - the only place the checkpoint is mutated - so
  * the memory-text probe stays a pure memcmp and never detokenizes under
- * tool_mu. */
+ * tool_mu.
+ *
+ * Extending checkpoints take an append fast path: ds4_token_text is a pure
+ * per-token function with zero cross-token state (ds4.c vocab render loop;
+ * the SSE partial-UTF8/stop holds live on a different path), so rendering
+ * only the new rows and splicing is byte-identical to a full re-render.
+ * That used to be O(session_len) malloc churn per turn (fix #2,
+ * .codebase-memory/TOKENIZER-AUDIT-20261003.md). */
 static void slot_refresh_live_text(server *s, server_slot *slot) {
     if (!slot) return;
+    const bool valid = s && slot->session &&
+                       ds4_session_checkpoint_valid(slot->session);
+    const ds4_tokens *live = valid ? ds4_session_tokens(slot->session) : NULL;
+    if (valid && live && live->len > 0 &&
+        live_text_can_append(slot->live_text_ids, slot->live_text_pos, live))
+    {
+        ds4_tokens tail = {0};
+        tail.v = (int *)live->v + slot->live_text_pos;
+        tail.len = live->len - slot->live_text_pos;
+        tail.cap = tail.len;
+        size_t tl = 0;
+        char *t = render_tokens_text(s->engine, &tail, &tl);
+        if (t) {
+            char *joined = xmalloc(slot->live_text_len + tl + 1);
+            memcpy(joined, slot->live_text, slot->live_text_len);
+            memcpy(joined + slot->live_text_len, t, tl);
+            joined[slot->live_text_len + tl] = '\0';
+            int *ids = xmalloc((size_t)live->len * sizeof(int));
+            memcpy(ids, live->v, (size_t)live->len * sizeof(int));
+            free(slot->live_text);
+            free(slot->live_text_ids);
+            slot->live_text = joined;
+            slot->live_text_len += tl;
+            slot->live_text_ids = ids;
+            slot->live_text_pos = live->len;
+            free(t);
+            return;
+        }
+        /* Append render failed: fall through to the full path, which
+         * fail-closes on its own. */
+    }
     free(slot->live_text);
+    free(slot->live_text_ids);
     slot->live_text = NULL;
+    slot->live_text_ids = NULL;
     slot->live_text_len = 0;
     slot->live_text_pos = 0;
-    if (!s || !slot->session ||
-        !ds4_session_checkpoint_valid(slot->session))
-    {
-        return;
-    }
-    const ds4_tokens *live = ds4_session_tokens(slot->session);
-    if (!live || live->len <= 0) return;
+    if (!valid || !live || live->len <= 0) return;
     slot->live_text = render_tokens_text(s->engine, live, &slot->live_text_len);
-    if (slot->live_text) slot->live_text_pos = live->len;
+    if (slot->live_text) {
+        slot->live_text_ids = xmalloc((size_t)live->len * sizeof(int));
+        memcpy(slot->live_text_ids, live->v, (size_t)live->len * sizeof(int));
+        slot->live_text_pos = live->len;
+    }
 }
 
 /* =========================================================================
@@ -17355,6 +17409,7 @@ static void server_close_resources(server *s) {
         slot->vision_store.base_text = NULL;
         slot->vision_store.valid = false;
         free(slot->live_text);
+        free(slot->live_text_ids);
         if (slot->session) ds4_session_free(slot->session);
     }
     free(s->slot_threads);
@@ -27467,6 +27522,29 @@ static void test_deepseek41_anthropic_results(void) {
     chat_msgs_free(&msgs);
 }
 
+/* Append-predicate pins for the incremental live_text fast path: only a
+ * strictly longer checkpoint with a byte-identical rendered head may append.
+ * Rewind, tool-checkpoint rewrite and disk prefix swap all change or shrink
+ * the head and must take the full re-render. */
+static void test_live_text_append_predicate(void) {
+    const int ids[3] = {5, 6, 7};
+    ds4_tokens live = {0};
+    TEST_ASSERT(!live_text_can_append(NULL, 0, &live));        /* nothing rendered */
+    live.v = (int *)ids; live.len = 3;
+    TEST_ASSERT(!live_text_can_append(ids, 3, &live));         /* equal: not an extension */
+    const int ext[4] = {5, 6, 7, 8};
+    live.v = (int *)ext; live.len = 4;
+    TEST_ASSERT(live_text_can_append(ids, 3, &live));          /* strict extension */
+    const int diverge[4] = {5, 9, 7, 8};
+    live.v = (int *)diverge;
+    TEST_ASSERT(!live_text_can_append(ids, 3, &live));         /* rewrite below frontier */
+    const int shorter[2] = {5, 6};
+    live.v = (int *)shorter; live.len = 2;
+    TEST_ASSERT(!live_text_can_append(ids, 3, &live));         /* shrink */
+    live.v = NULL; live.len = 4;
+    TEST_ASSERT(!live_text_can_append(ids, 3, &live));         /* malformed live */
+}
+
 static void test_deepseek41_live_result_order(void) {
     server s = {0};
     server_slot slot;
@@ -27523,6 +27601,7 @@ static void ds4_server_unit_tests_run(void) {
     test_batched_live_continuation_slot_binding();
     test_live_continuation_contract();
     test_slot_probe_and_routing_scores();
+    test_live_text_append_predicate();
     test_slot_probe_live_state_tiers();
     test_slot_probe_vision_tiers();
     test_slot_routing_staleness_tiers();
