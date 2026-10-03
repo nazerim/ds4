@@ -65,11 +65,43 @@ attention stack (~60 commits) is other-model traffic.
 ## 3. Benchmark confounder (for all future oMLX comparisons)
 
 rc1 published numbers were produced by an engine with ANE prefill silently
-disabled (#3957) AND A8 dense prefill silently falling back to W4A16 (#3952).
+disabled (#3957) AND A8 dense-prefill silently falling back to W4A16 (#3952).
 0.7.0 fixes both. Any rc1-vs-ds4 or 0.7.0-vs-ds4 comparison inherited those
 bugs invisibly. Pin the exact tag when quoting oMLX tok/s; the rc1 recon's
 "not comparable" verdict (warm-vs-cold baseline) is unaffected — if anything
 it strengthens it.
+
+### §3.1 MEASURED 2026-10-03: the rc1→0.7.0 delta is real and big
+
+Same-prompt cold battery (original rc1-era `perf_payloads.json`, nonce-
+prefixed, model `Qwen3.8-Flash-Next-oQ4e-mtp` oQ4e, glimmer :8005 on
+0.7.0; scripts now durable in `~/Projects/Scratch/muse-glimmer/flash-next-perf/
+rebaseline_070.py` + `rebaseline_070_2026-10-03.json`):
+
+| size | rc1-era cold | 0.7.0 cold | change |
+|---|---|---|---|
+| 40k | 992.0 tok/s | **1733.0** | +75% |
+| 80k | 560.0 tok/s | **1748.3** | **3.12x — the long-context scaling collapse is GONE** (flat 40k→80k) |
+| decode warm single-stream | ~34.3 | 33.7 | unchanged |
+
+Attribution: the rc1..0.7.0 range carried #3980-#4020 (wide prefill steps,
+exact-HC fusion, QSA main-attention on tensor units, GDN SiLU fix) plus the
+#3957 ANE and #3952 A8 repairs — the earlier "recon already covered" framing
+was wrong for the final release: those prefill kernels were NOT in the rc1
+build that produced the 992/560 numbers.
+
+**Consequence for our talking points (read this before citing rc1 recon §1):**
+- **Prefill lead: REVERSED.** ds4 measured 1,319/1,268 tok/s @40k/80k cold
+  (same machine) vs omlx 0.7.0's 1,733/1,748 — omlx is now ~35% faster at
+  40k and ~38% at 80k on this comparison. Caveats that cut both ways: quant
+  lineage differs (Q4_K gguf vs oQ4e MLX), ctx settings differ (524k vs
+  262k), and ds4's numbers predate the QSA tile-widening candidate.
+  The rc1 recon §5 ranked plan items #2/#4 were aimed exactly at this class;
+  they just moved from "nice" to "required" — do NOT repeat the "ds4 wins
+  prefill" sentence without re-measuring first.
+- **Decode lead: CONFIRMED vs 0.7.0.** omlx 33.7 single-stream warm; ds4
+  measured ~65 t/s greedy-with-MTP tonight (acceptance battery). Safe to
+  cite with those qualifiers.
 
 ## 4. Suggested next actions (ranked; 1 & 2 RESEARCHED 2026-10-02 — see notes)
 

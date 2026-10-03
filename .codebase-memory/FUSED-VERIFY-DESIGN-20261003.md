@@ -43,7 +43,46 @@ universe (:58518-58521). Two distinct geometry switches force this:
 
 ## Milestones (ordered, independently gated)
 
-### B0 — resolve the universe-vs-mask contradiction (measurement, 1-2 h)
+### B0 — RESULT 2026-10-03: NEGATIVE. Rows kernels are NOT the exact sub-batch geometry.
+
+Experiment executed (branch prototyped in the working tree only — never
+committed, now reverted; tooling kept in `tests/spec_economics/` with both
+batteries' outputs saved):
+
+- Wired the single-session exact T=3 attention through
+  `qwen4_batch_attention_entries` (3 entries, one session's caches, env
+  `DS4_QWEN4_VERIFY_ROWS_FUSED`), vs the sub-batch split, forced depth-3,
+  temperature 0, identical 10-prompt battery.
+- **Greedy identity BROKE: 2/10 prompts diverged** (char ~1364 in a story,
+  ~1520 in UBI prose — accept-then-diverge = a verify row committed a
+  different argmax than the split path would have).
+- **It wasn't cheaper either: +0.3% wall (57.4 vs 57.2 s)** — the rows
+  kernels dispatch `grid = (QWEN4_ATTN_MAX_SPLITS=64, n_head_kv, n_rows)`
+  unconditionally; three rows burn 64-split-slot threadgroups, so the
+  single dispatch costs ~what the 2/1 sub-batches saved.
+
+Implications for B1/B2 (re-scoped):
+1. The rows path's per-row geometry (`qwen4_attn_row_splits`, kps = fixed
+   split-size windows) differs from the plain decode kernel's redistributed
+   `keys_per_split = ceil(n_keys/n_splits)` — the "same arithmetic" batched
+   comment holds between batched variants, not against the sub-batch exact
+   path. B1's hoped-for "split only the decode half" is NOT free: the two
+   halves disagree on selection/sums somewhere (score masking vs universe,
+   or the kps model) — needs per-stage buffer diffs (score[], sel_blocks[],
+   partials) to localize, before any fusion is attempted again.
+2. A viable fused window must REPRODUCE the sub-batch path's exact per-row
+   geometry inside one dispatch — i.e. a purpose-built kernel with
+   per-row (n_splits, keys_per_split) computed like the plain kernel does
+   for chunks of ≤2, not a repurposing of rows2.
+3. The C3/C2 > 1.266 finding still stands (forced depth-3 still loses
+   wall — the split is expensive); the payoff target (~+20%) still exists;
+   only the "easy path to it" is closed. Cost-side next probe should
+   PROFILE where the exact T=3 cycle actually spends (component timings,
+   DS4_QWEN4_TIMING per-cycle) before writing kernels — the HC 2/1 split
+   (:58349) also doubles gate/mix dispatches and may be the cheaper first
+   target.
+
+### B0(original) — resolve the universe-vs-mask contradiction (measurement, 1-2 h)
 Test: single-dispatch T=3 through the VEC score + PRE select + expand (drop
 the sub-batch split for the indexer half only), then compare greedy verify
 outputs against the serial reference — the existing identity gate

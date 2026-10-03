@@ -135,6 +135,20 @@ greedy+MTP vs 33.7) confirmed vs 0.7.0. Quant caveat: Q4_K gguf vs oQ4e MLX.
 
 ### Also this window
 
+- **B0 fused-verify experiment (the decode wall): NEGATIVE, reverted.**
+  Single-session exact T=3 attention wired through the batched rows kernels
+  (env `DS4_QWEN4_VERIFY_ROWS_FUSED`, working-tree only): greedy identity
+  BROKE on 2/10 battery prompts (accept-then-diverge at char ~1.4k) and it
+  gained nothing (+0.3% wall — rows kernels burn 64-split-slot grids at 3
+  rows). Root learning: rows geometry (fixed split windows, per-row
+  qwen4_attn_row_splits) ≠ sub-batch exact geometry (redistributed
+  keys_per_split) — the batched "same arithmetic" claim is internal to the
+  batched path. A real fused window needs a purpose-built kernel
+  reproducing the ≤2 path per row, and should start by PROFILING where the
+  exact T=3 cycle spends (the HC 2/1 split at ds4.c:58349 is a cheaper next
+  probe). Full record + re-scoped B1/B2: FUSED-VERIFY-DESIGN-20261003.md
+  §B0-RESULT. Tooling SHIPPED: `tests/spec_economics/` (battery, trace
+  parser, both 20261003 result JSONs).
 - **RISK-1 upstream issue: DRAFTED** (threadgroup-limit exposure, all cites
   re-verified against upstream `0aaea5a` via gh api; no duplicate issues;
   #607 cross-ref as the M1-Max audience evidence). NOT POSTED — awaiting

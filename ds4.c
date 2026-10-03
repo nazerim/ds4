@@ -78801,7 +78801,6 @@ static bool ds41_sessions_batch_supported(ds4_decode_item *items, int count,
  * recurrence, attention caches and n-gram history independent. Row views
  * let the single-session kernels consume slices of the shared transients. */
 
-enum { QWEN4_BATCH_MAX_ROWS = 64 };
 
 typedef struct {
     ds4_gpu_tensor *R, *ple_gated, *ple_normed;
@@ -78903,6 +78902,8 @@ static void qwen4_batch_row_graph(ds4_qwen4_gpu_graph *out, ds4_session *s,
  * operands, so the logits and head rows are sized for at least that many:
  * the output head then takes the tile at any batch width instead of the
  * per-token matvec reading its 636 MB once per four rows. */
+enum { QWEN4_BATCH_MAX_ROWS = 64 };
+
 static bool qwen4_batch_scratch_ensure(ds4_qwen4_gpu_graph *g, uint32_t rows) {
     if (rows < 32u) rows = 32u;
     if (g->batch_logits && g->batch_logit_rows >= rows) return true;
