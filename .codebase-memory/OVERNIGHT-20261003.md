@@ -184,6 +184,13 @@ flip to per-row if identity > 15% decode latency.
 Depth-policy knobs (MTP_PROFILE/DEPTH_BITS_*/DEPTH_UNLOCK/GROUP_EXACT/
 SHARED_DENSE_MIN/VERIFY_PER_ROW) all env-gated, defaults = pre-experiment.
 
+## Final state at day-shift end (17:50): engine PID 35690 (production
+defaults, smoke ok, 0 WARN); all work pushed through `eb071fd`. NEXT queue:
+
+0. Re-measure the acceptance economics under DS4_QWEN4_VERIFY_PER_ROW=1
+   (caveat banner added in MTP-ACCEPTANCE-20261003.md), then the residual +
+   default-flip decision below.
+
 ## NEXT queue (ranked) — UPDATED 3rd time
 
 1. SERVER residual for the identity fix: per-row vs serial still differs at

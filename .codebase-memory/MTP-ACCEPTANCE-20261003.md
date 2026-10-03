@@ -1,5 +1,16 @@
 # Qwen4 nextn MTP acceptance economics — measured 2026-10-03 (adaptive vs forced depth-3)
 
+> **CAVEAT 17:50 2026-10-03 (same day):** all numbers below were taken on the
+> pre-identity-fix engine — verify-vs-serial drift was later proven
+> (QWEN4-VERIFY-IDENTITY-20261003.md: the T=2/T=3 matvec stage drifts ~1 ULP
+> vs serial and flips near-tie argmaxes). Per-cycle acceptance rates (P(a1),
+> P(a2|a1)) remain meaningful — acceptance is measured against the drifting
+> stream itself. The WALL comparisons (forced-3 +2% etc.) conflate verify
+> cost with drift-induced trajectory changes and must be re-measured with
+> DS4_QWEN4_VERIFY_PER_ROW=1 before acting on them. Re-run:
+> tests/spec_economics/ (battery + parse_spec_trace), identity gate:
+> ./ds4_test --qwen4-verify-identity.
+
 Answers open question #1 of `.codebase-memory/omlx-v070-mtp-row-exact.md`
 (the wide-T lift business case). Overnight window, engine on M5 Max, single
 session (`QWEN_BATCH_SESSION=0`), `DS4_QWEN4_SPEC_TRACE=1`, temperature 0,
