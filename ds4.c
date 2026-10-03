@@ -74816,6 +74816,16 @@ static int qwen4_session_replay_if_stale(ds4_session *s, char *err, size_t errle
     s->checkpoint_valid = false;
     const int rc = kept.len ? ds4_session_sync(s, &kept, err, errlen) : 0;
     if (!kept.len) qwen4_graph_reset(&s->qwen4_graph);
+    /* a replayed trajectory re-runs every cycle from the start: the
+     * adaptive-depth evidence is re-derived, never inherited (this is the
+     * rewind-side sibling of the sync-rebuild reset; without it the deep-
+     * engagement window of the discarded run skewed the replayed grid -
+     * 2026-10-03 queue item) */
+    s->qwen4_depth_window = 0;
+    s->qwen4_depth_accepted = 0;
+    s->qwen4_depth_cycles = 0;
+    s->qwen4_reject2_streak = 0;
+    s->qwen4_depth3_engaged = false;
     token_vec_free(&kept);
     return rc;
 }
@@ -76234,9 +76244,16 @@ static int ds4_session_sync_internal(ds4_session *s, const ds4_tokens *prompt, c
             ds4_tokens_starts_with(prompt, &s->checkpoint)) {
             start = s->checkpoint.len;
         } else {
+            /* Full rebuild: the kept trajectory was replaced, so the
+             * adaptive-depth evidence goes with it (see ds4_session_rewind). */
             qwen4_graph_reset(&s->qwen4_graph);
             s->checkpoint.len = 0;
             s->checkpoint_valid = false;
+            s->qwen4_depth_window = 0;
+            s->qwen4_depth_accepted = 0;
+            s->qwen4_depth_cycles = 0;
+            s->qwen4_reject2_streak = 0;
+            s->qwen4_depth3_engaged = false;
         }
         for (int i = start; i < prompt->len; i++) {
             if (prompt->v[i] < 0 || prompt->v[i] >= (int)DS4_N_VOCAB) {
@@ -86197,6 +86214,21 @@ void ds4_session_rewind(ds4_session *s, int pos) {
     }
 #endif
     s->checkpoint.len = pos;
+    if (ds4_session_is_qwen4(s)) {
+        /* The adaptive-depth policy counters are evidence about the
+         * discarded trajectory (which positions' drafts paid); a rewound
+         * session's next request must not inherit them (2026-10-03 queue
+         * item: request-history-dependent verify grids - prompt 3 engaged
+         * deep at 158/161/163 cold, never on a warm slot).  Tokens are
+         * grid-invariant (per-row verify is serial-exact), but traces and
+         * acceptance stats were not; reset here and in the sync rebuild
+         * branch so a prompt's cycle trace depends only on the prompt. */
+        s->qwen4_depth_window = 0;
+        s->qwen4_depth_accepted = 0;
+        s->qwen4_depth_cycles = 0;
+        s->qwen4_reject2_streak = 0;
+        s->qwen4_depth3_engaged = false;
+    }
     /* DeepSeek compressors cannot be rolled back by truncating their row
      * counts. Without a saved frontier the caller must rebuild this prefix. */
     if (!state_ok) s->checkpoint_valid = false;

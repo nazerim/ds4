@@ -295,8 +295,20 @@ ROOT-CAUSE-2):
    (v2 == serial cost, no speed argument); goldens keep drift-encoded until
    the invariant path lands or an audit run under v2 pins them. Revisit
    after milestone 0.
-2. Session depth-counter carry-over at slot reuse (grid determinism;
-   harmless for identity now, still history-dependent).
+2. DONE 19:2x (operator-approved): adaptive-depth evidence reset at request
+   boundaries - ds4_session_rewind (ds4.c:86216), sync full-rebuild
+   (ds4.c:76242), and qwen4_session_replay_if_stale (ds4.c:74819): a replayed
+   trajectory re-derives its depth window instead of inheriting the
+   discarded run's. Verified: battery texts stay 10/10 serial-identical;
+   [3,3,3] reuse repeats are trace-identical among themselves
+   (req2==req3, 230 cycles/deep 14) and the stale inherited-grid behavior
+   (cold req2 = 237 cycles/0 deep) is gone. KNOWN RESIDUAL: FIRST request on
+   a fresh engine still differs from warmed repeats (234/3-deep) - the
+   predictor-side nextn raw cache holds zeroed rows on a cold buffer vs
+   first-run draft rows after reuse, so chain-draft QUALITY (deep-streak
+   length only, never committed tokens - verify is exact) is
+   first-request sensitive; folded into queue 0 (invariant fused path must
+   clear/rewrite nextn speculative rows at rebuild). Suite: 26 OK / 0 ERR.
 3. POST the RISK-1 upstream issue - draft ready, operator approval only.
 4. QSA tile widening (prefill front vs omlx 0.7.0).
 5. R2b field measurement / Scenario L reclaim tally / detok-table decision /
