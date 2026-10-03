@@ -87,7 +87,32 @@ batteries' outputs saved):
    27.95 slot baseline (-1.35..1.45ms/cycle, ~+4.5% wall at forced-3:
    55.1s vs 57.2s battery). The exact version must preserve most of it.
 
-### B2 design (was B1/B2 sketch, re-scoped to the corrected cause)
+### B2 - SHIPPED 2026-10-03 (`c7eb582`, DS4_QWEN4_MOE_GROUP_EXACT, default off)
+Design as specced below and verified: `out_layout` args field ((row-stride<<6)
+| slot-base) threaded through mid/down/grouped kernels via
+`qwen4_moe_pair_row`; grouped routed + shared dispatched through the slot
+kernels' own shared branch at NS=0/grid.y=1 (bit-exact by construction);
+reduce untouched baseline form. Measured (M5 Max, battery + goldens):
+forced-depth-3 55.4 vs 57.2 s (-3.1% wall) byte-IDENTICAL to the split
+baseline; adaptive-exact vs adaptive-baseline IDENTICAL (T=2 path included,
+prefill tails 2..8 also ride grouped); golden vectors pass env on AND off;
+full `make test` green (25 OK, exit 0). Prefill-tail and shallow paths gain
+the expert dedup too (small free bonus at T=2). NOT yet default - operator
+flip decision after B3.
+
+### B3 - NEXT: policy re-tune (the remaining unlock)
+`qwen4_spec_depth`'s engagement gates (perfect-8-bit window, reject-streak
+disengagements) were calibrated against the OLD verify delta (5.0 ms deep
+vs 22.9 shallow); exact grouped cuts it to ~3.7 and makes deep cycles
+positive in isolation, but adaptive fires deep on only 0.5% of cycles, so
+the shipped win needs the POLICY to actually engage. Re-tune loop (all
+identity-safe via battery parity): relax bits window, revisit the
+reject2-streak rule against measured P(a2|a1)=0.705, consider content-class
+engagement (code/JSON continuation). Metric: adaptive+exact wall <
+adaptive baseline AND byte-identical. Then revisit B1-split-removal and
+widths >3 (P(a3|a2)) on top.
+
+### Original B2 design sketch (superseded by shipped note above)
 
 Goal: exact grouped verify MoE = grouped routed (proven bit-exact) +
 shared computed by the UNTOUCHED slot-kernel shared branch (bit-exact by
