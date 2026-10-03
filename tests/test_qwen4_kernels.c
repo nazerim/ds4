@@ -2138,14 +2138,14 @@ static void test_moe_grouped(arena_t *a) {
      * most experts (the state the grouped kernels actually meet at T=3). */
     {
         double *gw, *uw, *dw;
-        const uint64_t g512 = arena_q4_K(a, 128ull * 640, 2560, &gw, 0.05f);
-        const uint64_t u512 = arena_q4_K(a, 128ull * 640, 2560, &uw, 0.05f);
-        const uint64_t d512 = arena_mxfp4(a, 128ull * 2560, 640, &dw);
+        const uint64_t g512 = arena_q4_K(a, 64ull * 640, 2560, &gw, 0.05f);
+        const uint64_t u512 = arena_q4_K(a, 64ull * 640, 2560, &uw, 0.05f);
+        const uint64_t d512 = arena_mxfp4(a, 64ull * 2560, 640, &dw);
         free(gw); free(uw); free(dw);
         ds4_gpu_qwen4_set_verify_rows_exact(true);
-        test_moe_grouped_case(a, 3u, 10u, 2u, g512, u512, d512, x, 128u, 512u);
-        test_moe_grouped_case(a, 2u, 10u, 2u, g512, u512, d512, x, 128u, 512u);
-        test_moe_grouped_case(a, 3u, 10u, 2u, g512, u512, d512, x, 128u, 8192u);
+        test_moe_grouped_case(a, 3u, 10u, 2u, g512, u512, d512, x, 64u, 512u);
+        test_moe_grouped_case(a, 2u, 10u, 2u, g512, u512, d512, x, 64u, 512u);
+        test_moe_grouped_case(a, 3u, 10u, 2u, g512, u512, d512, x, 64u, 8192u);
         /* Real activations are not uniform noise: adversarial dynamic range
          * (saturated silu inputs, subnormals, signed zeros, large rows). */
         {
@@ -2158,8 +2158,8 @@ static void test_moe_grouped(arena_t *a) {
                         : m == 2u ? 1.0e-40f : m == 3u ? -1.0e-38f
                         : m == 4u ? -0.0f : m == 5u ? 44.0f : -60.0f;
             }
-            test_moe_grouped_case(a, 3u, 10u, 2u, g512, u512, d512, xe, 128u, 8192u);
-            test_moe_grouped_case(a, 2u, 10u, 2u, g512, u512, d512, xe, 128u, 8192u);
+            test_moe_grouped_case(a, 3u, 10u, 2u, g512, u512, d512, xe, 64u, 8192u);
+            test_moe_grouped_case(a, 2u, 10u, 2u, g512, u512, d512, xe, 64u, 8192u);
             free(xe);
         }
         ds4_gpu_qwen4_set_verify_rows_exact(false);

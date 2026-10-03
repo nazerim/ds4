@@ -7779,6 +7779,86 @@ static ds4_engine *test_open_dspark_engine(const char *support_path) {
  * decode and requires each to be a (near-)argmax: that is the verify invariant,
  * and unlike comparing token streams it tolerates the near-greedy tie
  * divergences.  Needs an MTP head, so it self-skips without DS4_TEST_MTP. */
+/* Qwen3.8 verify-vs-serial autoregressive identity probe
+ * (.codebase-memory/QWEN4-VERIFY-IDENTITY-20261003.md): capture a
+ * spec-driven greedy stream (T=2 verify cycles), replay it through fresh
+ * single-row decode, and report every position where the replay argmax
+ * differs from the committed token - with pos%4 (the block-closing
+ * selection-universe hypothesis fingerprint) and the logit gap.  The
+ * dspark --mtp-verify-depth harness measures the worst gap but asserts
+ * only <= 2.0 logit tolerance; argmax flips at sub-tolerance gaps still
+ * change greedy text, so this probe counts flips explicitly. */
+static void test_qwen4_verify_identity(void) {
+    ds4_engine *engine = test_get_engine(false);
+    if (!engine || !ds4_engine_is_qwen4(engine)) {
+        puts("qwen4-verify-identity: Qwen3.8 model (DS4_TEST_MODEL) required, skipped");
+        return;
+    }
+    /* DS4_TEST_VERIFY_PROMPT_FILE: replay a specific corpus prompt (e.g. the
+     * battery ones under tests/spec_economics/prompts/). */
+    const char *pfile = getenv("DS4_TEST_VERIFY_PROMPT_FILE");
+    char *ptext = NULL;
+    if (pfile && pfile[0]) {
+        FILE *pf = fopen(pfile, "rb");
+        TEST_ASSERT(pf != NULL);
+        fseek(pf, 0, SEEK_END);
+        const long psz = ftell(pf);
+        fseek(pf, 0, SEEK_SET);
+        ptext = xmalloc((size_t)psz + 1);
+        TEST_ASSERT(fread(ptext, 1, (size_t)psz, pf) == (size_t)psz);
+        ptext[psz] = '\0';
+        fclose(pf);
+    }
+    ds4_tokens prompt = {0};
+    ds4_chat_begin(engine, &prompt);
+    ds4_chat_append_message(engine, &prompt, "user", ptext ? ptext : test_mtp_copy_prompt());
+    /* DS4_TEST_VERIFY_THINK=1 mirrors the server's default think-high prompt
+     * shape (the residual server-battery question). */
+    ds4_chat_append_assistant_prefix(engine, &prompt,
+        test_env_bool("DS4_TEST_VERIFY_THINK") ? DS4_THINK_HIGH : DS4_THINK_NONE);
+    TEST_ASSERT(prompt.len > 0);
+    int *toks = malloc(512u * sizeof(int));
+    TEST_ASSERT(toks != NULL);
+    int n = 0, chunk = 0;
+    const bool ok_cap = test_mtp_capture_speculative(engine, &prompt, 512, toks, &n, &chunk);
+    TEST_ASSERT(ok_cap && n > 128);
+    if (chunk < 2) {
+        fprintf(stderr, "ds4-test: qwen4-verify-identity: no multi-token spec chunks "
+                        "(engine MTP off? server uses --mtp) - max_chunk=%d\n", chunk);
+        free(toks); ds4_tokens_free(&prompt);
+        return;
+    }
+    ds4_session *session = NULL;
+    TEST_ASSERT(ds4_session_create(&session, engine, prompt.len + n + 16) == 0);
+    char err[160];
+    TEST_ASSERT(ds4_session_sync(session, &prompt, err, sizeof(err)) == 0);
+    int flips = 0, first_flip = -1, worst_at = -1;
+    float first_gap = 0.0f, worst = 0.0f;
+    for (int i = 0; i < n; i++) {
+        ds4_token_score best, cur;
+        TEST_ASSERT(ds4_session_top_logprobs(session, &best, 1) >= 1);
+        TEST_ASSERT(ds4_session_token_logprob(session, toks[i], &cur) == 1);
+        const float gap = best.logit - cur.logit;
+        if (best.id != toks[i]) {
+            if (!flips) { first_flip = i; first_gap = gap; }
+            flips++;
+        }
+        if (gap > worst) { worst = gap; worst_at = i; }
+        TEST_ASSERT(ds4_session_eval(session, toks[i], err, sizeof(err)) == 0);
+    }
+    fprintf(stderr,
+            "ds4-test: qwen4-verify-identity n=%d max_chunk=%d flips=%d "
+            "first=%d(abs %d, %%4=%d, gap=%.4f) worst_gap=%.4f at %d\n",
+            n, chunk, flips, first_flip,
+            first_flip >= 0 ? prompt.len + first_flip : -1,
+            first_flip >= 0 ? (prompt.len + first_flip) % 4 : -1,
+            first_gap, worst, worst_at);
+    free(toks);
+    free(ptext);
+    ds4_session_free(session);
+    ds4_tokens_free(&prompt);
+}
+
 static void test_mtp_verify_depth(void) {
     ds4_engine *engine = test_get_engine(false);
     if (!engine || !ds4_engine_has_mtp(engine)) {
@@ -8041,6 +8121,7 @@ static const ds4_test_entry test_entries[] = {
     {"--qwen4-prefill-checkpoints", "qwen4-prefill-checkpoints", "Qwen chunk checkpoints restore matching logits and state", test_qwen_prefill_checkpoints, false},
     {"--kv-delta", "kv-delta", "Qwen delta-chained continued stores match full checkpoints", test_kv_delta_parity, false},
     {"--qwen4-restore-reuse", "qwen4-restore-reuse", "Qwen restore discards old verifier state and rejects truncated payloads", test_qwen_restore_reused_session, false},
+    {"--qwen4-verify-identity", "qwen4-verify-identity", "Qwen3.8 T=2 verify stream replayed through serial decode: count argmax flips with pos%4 fingerprint", test_qwen4_verify_identity, false},
     {"--session-snapshot", "session-snapshot", "session snapshot and recurrent-state round trip", test_session_snapshot_roundtrip, false},
     {"--session-rewind", "session-rewind", "Qwen3.8 rewind by snapshot restore and by replay", test_session_rewind_replay, false},
     {"--session-rewind-resample", "session-rewind-resample", "exact-sampling tool-boundary resample rewind restores the block-start state", test_session_rewind_resample_boundary, false},

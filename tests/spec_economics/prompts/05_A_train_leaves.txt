@@ -1,0 +1,1 @@
+A train leaves station A at 60 km/h. Two hours later a second train leaves the same station in the same direction at 90 km/h. How long after the second train departs does it catch the first? Show the reasoning step by step.

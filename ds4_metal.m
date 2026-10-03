@@ -5624,6 +5624,19 @@ void ds4_gpu_qwen4_set_verify_rows_exact(bool on) {
     g_qwen4_verify_rows_exact = on;
 }
 
+/* DS4_QWEN4_VERIFY_PER_ROW=1: speculative verify chunks (2..8 rows) are
+ * dispatched as per-row single-row matvecs, so each row's arithmetic is
+ * exactly the serial (T=1) tree. The batched mv_ext kernel pairs rows into
+ * lane groups differently (nxpsg): ~82% of output elements drift ~1 ULP
+ * between a T=2 chunk and T=1 dispatch (all of F32/F16/Q8), which flips
+ * near-tie greedy argmax between speculative and serial decode
+ * (.codebase-memory/QWEN4-VERIFY-IDENTITY-20261003.md). */
+static int ds4_gpu_verify_per_row(void) {
+    static int v = -1;
+    if (v < 0) v = getenv("DS4_QWEN4_VERIFY_PER_ROW") != NULL;
+    return v;
+}
+
 static int16_t ds4_gpu_mv_ext_nsg(void) {
     return (int16_t)ds4_gpu_env_u64("DS4_METAL_MV_EXT_NSG", 2u, 1u, 8u);
 }
@@ -19695,6 +19708,22 @@ static int ds4_gpu_matmul_q8_0_tensor_impl(
         return 0;
     }
 
+    if (ds4_gpu_verify_per_row() && n_tok >= 2u && n_tok <= 8u && (in_dim % 128u) == 0) {
+        int prc = 1;
+        for (uint64_t t = 0; t < n_tok && prc; t++) {
+            ds4_gpu_tensor *xt = ds4_gpu_tensor_view(x, t * in_dim * sizeof(float),
+                                                     in_dim * sizeof(float));
+            ds4_gpu_tensor *ot = ds4_gpu_tensor_view(out, t * out_dim * sizeof(float),
+                                                     out_dim * sizeof(float));
+            prc = xt && ot &&
+                  ds4_gpu_matmul_q8_0_tensor_impl(ot, model_map, model_size, weight_offset,
+                                                   in_dim, out_dim, xt, 1, prefill_default);
+            ds4_gpu_tensor_free(ot);
+            ds4_gpu_tensor_free(xt);
+        }
+        return prc;
+    }
+
     const int profile_requested =
         n_tok > 8u && ds4_gpu_env_bool("DS4_METAL_Q8_PREFILL_PROFILE") > 0;
     int profile_prefill = 0;
@@ -19813,7 +19842,7 @@ int ds4_gpu_matmul_q8_0_decode_rows_exact_tensor(
             return 0;
         }
 
-        uint64_t inner_offset = 0;
+    uint64_t inner_offset = 0;
         id<MTLBuffer> wbuf = ds4_gpu_wrap_model_range(
                 model_map, model_size, weight_offset, weight_bytes,
                 &inner_offset);
@@ -21130,7 +21159,23 @@ static int ds4_gpu_matmul_f16_tensor_impl(
             return 0;
         }
 
-        uint64_t inner_offset = 0;
+        if (ds4_gpu_verify_per_row() && n_tok >= 2u && n_tok <= 8u && (in_dim % 128u) == 0) {
+        int prc = 1;
+        for (uint64_t t = 0; t < n_tok && prc; t++) {
+            ds4_gpu_tensor *xt = ds4_gpu_tensor_view(x, t * in_dim * sizeof(float),
+                                                     in_dim * sizeof(float));
+            ds4_gpu_tensor *ot = ds4_gpu_tensor_view(out, t * out_dim * sizeof(float),
+                                                     out_dim * sizeof(float));
+            prc = xt && ot &&
+                  ds4_gpu_matmul_f16_tensor(ot, model_map, model_size, weight_offset,
+                                              in_dim, out_dim, xt, 1);
+            ds4_gpu_tensor_free(ot);
+            ds4_gpu_tensor_free(xt);
+        }
+        return prc;
+    }
+
+    uint64_t inner_offset = 0;
         id<MTLBuffer> wbuf =
             ds4_gpu_wrap_model_range(model_map,
                                      model_size,
@@ -22020,7 +22065,25 @@ int ds4_gpu_matmul_f32_tensor(
             return 0;
         }
 
-        uint64_t inner_offset = 0;
+        if (ds4_gpu_verify_per_row() && n_tok >= 2u && n_tok <= 8u && (in_dim % 128u) == 0) {
+        /* per-row T=1 dispatches: serial-exact verify rows (see
+         * ds4_gpu_verify_per_row; weights are re-read per row) */
+        int prc = 1;
+        for (uint64_t t = 0; t < n_tok && prc; t++) {
+            ds4_gpu_tensor *xt = ds4_gpu_tensor_view(x, t * in_dim * sizeof(float),
+                                                     in_dim * sizeof(float));
+            ds4_gpu_tensor *ot = ds4_gpu_tensor_view(out, t * out_dim * sizeof(float),
+                                                     out_dim * sizeof(float));
+            prc = xt && ot &&
+                  ds4_gpu_matmul_f32_tensor(ot, model_map, model_size, weight_offset,
+                                            in_dim, out_dim, xt, 1);
+            ds4_gpu_tensor_free(ot);
+            ds4_gpu_tensor_free(xt);
+        }
+        return prc;
+    }
+
+    uint64_t inner_offset = 0;
         id<MTLBuffer> wbuf =
             ds4_gpu_wrap_model_range(model_map,
                                      model_size,

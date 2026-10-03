@@ -1,0 +1,1 @@
+Write a C function that parses a null-terminated string of comma-separated integers and returns the sum, handling malformed entries by skipping them. Then explain the edge cases.

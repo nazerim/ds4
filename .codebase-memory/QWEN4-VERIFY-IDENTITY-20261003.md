@@ -1,5 +1,12 @@
 # Qwen4 verify-vs-serial identity violation — found 2026-10-03 (pre-existing)
 
+> **STATUS 17:40 2026-10-03: ROOT-CAUSED + FIXED (env-gated `DS4_QWEN4_VERIFY_
+> PER_ROW=1`), session-level probes flips=0; one server-path residual open —
+> see ROOT CAUSE section below. The original "leading hypotheses" text is kept
+> as history; hypotheses 2 was correct in substance (split-window redistribution
+> generalizes to the matvec tree itself), hypotheses 1 partially (pos%4=3 was a
+> near-tie coincidence, not the selection universe).
+
 Discovered while B3-tuning the depth policy (the lockout fix makes depth
 transitions frequent, which amplified a latent gap into visible battery
 divergence). Headline, fully deterministic (2 fresh processes per config,
@@ -45,7 +52,55 @@ on (encodes whatever spec produced). This is the gap.
 3. Draft-regen chain steps polluting predictor cache rows read before
    rewrite (the code comments argue they're always rewritten first).
 
-## What is NOT the cause (all proven tonight)
+## ROOT CAUSE FOUND (16:00-17:40, day shift) + fix implemented
+
+**The small-batch matvec kernels are not row-count invariant.** Every dense
+projection + the logits head at verify chunk widths T=2/3 dispatches through
+the `mul_mv_ext_*` batched kernels whose lane->K split (`nxpsg`, pair
+grouping) differs from the plain T=1 matvec kernel's reduction tree ->
+**~82% of output elements differ by 1 ULP between a T=2 chunk dispatch and
+T=1** (measured across F32/F16/Q8, out-dims 640/2560; logits head is Q8_0,
+out 248320). Rare near-tie argmaxes then flip => speculative stream drifts
+from serial (battery prompts 6@938, 7@1379 stable, and prompt 3@884 in other
+depth sequences). The `verify_rows_exact` machinery only protected
+attention (2/1 sub-batches) and HC gate/mix (2-row pair kernel + 1-row) -
+the matvec stage was never covered, and no test compared row 0 across T.
+
+### Fix (implemented, env-gated): DS4_QWEN4_VERIFY_PER_ROW=1
+`ds4_gpu_verify_per_row()` + per-row intercepts in `ds4_metal.m` hosts
+matmul_f32_tensor / matmul_q8_0_tensor_impl / matmul_f16_tensor_impl: 2..8
+row chunks (in_dim%128==0) are dispatched as T independent T=1 view
+dispatches - every verify row then runs the exact serial tree.
+Cost = re-read weights per row (logits Q8 head 1.3 GiB x extra rows/step).
+
+### Evidence with the fix on
+- NEW engine-level regression `./ds4_test --qwen4-verify-identity`
+  (spec cycle vs serial replay of the same stream; DS4_TEST_VERIFY_PROMPT_FILE,
+  DS4_TEST_VERIFY_THINK knobs; prompts now banked under
+  tests/spec_economics/prompts/): **flips=0, worst_gap=0.0000** on prompts
+  03/06/07, think-none AND think-high, including deep cycles (max_chunk=3).
+- Server battery (QWEN_BATCH_SESSION=0, temp 0): serial 70.3-73.8 s |
+  drift-default 55.4 s | per-row-correct 65.4 s. Per-row spec is still
+  ~12% faster than serial and now provably identical to it at session level.
+- Kernel-level rowcount sweep was built (then removed: its own harness hit an
+  arena/dangling-scope crash; findings above preserved in this doc; the
+  engine probe is the durable regression).
+
+### RESIDUAL (open, narrow): server-completions battery prompt 3 @884 still
+differs per-row-vs-serial even though the session-level probe (same prompt,
+think-high included, 512 tok) reports flips=0. So the remaining server-path
+difference is NOT matvec row-count coupling - candidates: the server's
+spec skip/rollback boundaries (DSML think-close transitions where spec
+toggles mid-stream, `glm_mtp_rollback`-analog state, completions vs chat
+prompt shaping). Needs a server-level trace bisect in a fresh session.
+
+### Default posture (17:40)
+Env OFF (default binary == drift-status-quo, golden vectors unchanged) while
+the residual is scoped. Recommended after residual lands: flip per-row ON
+by default + re-capture goldens (they encode the drifting stream). Plain
+T=1 decode unaffected either way.
+
+### NOT the cause (retracted earlier misattributions, all proven)
 - grouped MoE kernels (bit-exact replay vs slot twins, all layers,
   production inputs: mid/down/chain diffs = 0)
 - shared-dense vs shared-slot (that was a REAL second inexactness, now

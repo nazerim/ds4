@@ -1,0 +1,1 @@
+Explain how a hash table with open addressing and linear probing degrades as the load factor approaches 1, and write pseudocode for a resize operation.

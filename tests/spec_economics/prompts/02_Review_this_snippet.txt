@@ -1,0 +1,8 @@
+Review this snippet for bugs:
+
+int divide(int a, int b) {
+    int r = a / b;
+    return r;
+}
+
+List every problem you find, then give a corrected version.
