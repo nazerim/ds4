@@ -58534,6 +58534,125 @@ static bool qwen4_graph_attention_tail(ds4_qwen4_gpu_graph *g, const ds4_model *
     static int attn_per_row = -1;
     if (attn_per_row < 0) attn_per_row = getenv("DS4_QWEN4_VERIFY_PER_ROW") != NULL;
     if (attn_per_row && T >= 2u && T <= 8u) {
+        /* DS4_QWEN4_VERIFY_INDEXER_BATCH=1 (item-0 B1 probe, default off):
+         * does the per-row universe actually bind BITWISE, or only the
+         * decode split geometry?  Runs score/select/expand ONCE chunk-wide
+         * (legacy universe) and splits only the decode dispatch per row -
+         * B1 VERDICT 2026-10-03 (rowcount-ab 110 pairs abs 63-263, T=2 AND
+         * T=3 grids; battery 2x): chunk-wide selection is BIT-EXACT
+         * (maxabs 0.0; battery 10/10 == serial) - the per-row universe never
+         * binds, the decode split geometry does.  Kept default-off; gains
+         * ~0-5% wall (three dispatches per attention layer per cycle), so
+         * the real prize remains B2's per-row split ladder inside one
+         * decode dispatch. */
+        static int idx_batch = -1;
+        if (idx_batch < 0)
+            idx_batch = getenv("DS4_QWEN4_VERIFY_INDEXER_BATCH") != NULL;
+        if (idx_batch) {
+            const uint32_t sparse_pos = (g->k_blocks + 1u) * ratio - 1u;
+            const uint32_t clast = pos0 + T - 1u;
+            const uint32_t n_dense = clast < sparse_pos
+                ? T : (sparse_pos > pos0 ? sparse_pos - pos0 : 0u);
+            if (n_dense >= T) {
+                /* fully dense chunk: universe is moot, decode-only split */
+                for (uint32_t r = 0; r < T; r++) {
+                    const uint32_t rp = pos0 + r;
+                    const float scale = 1.0f / sqrtf((float)DS4_N_HEAD_DIM);
+                    ds4_gpu_tensor *q = ds4_gpu_tensor_view(g->q, (uint64_t)r * q_dim * sizeof(float),
+                                                            q_dim * sizeof(float));
+                    ds4_gpu_tensor *gate = ds4_gpu_tensor_view(g->gate, (uint64_t)r * q_dim * sizeof(float),
+                                                               q_dim * sizeof(float));
+                    ds4_gpu_tensor *o = ds4_gpu_tensor_view(g->attn_o, (uint64_t)r * q_dim * sizeof(float),
+                                                            q_dim * sizeof(float));
+                    const bool rok = q && gate && o &&
+                        ds4_gpu_qwen4_attn_decode_tensor(o, q, gate, g->layer_k_cache[il],
+                                                         g->layer_v_cache[il], g->sel_tokens, g->n_sel,
+                                                         g->attn_part, 1u, DS4_N_HEAD, DS4_N_HEAD_KV,
+                                                         DS4_N_HEAD_DIM, rp, false, g->sel_stride, scale);
+                    if (o) ds4_gpu_tensor_free(o);
+                    if (gate) ds4_gpu_tensor_free(gate);
+                    if (q) ds4_gpu_tensor_free(q);
+                    if (!rok) return false;
+                }
+                return true;
+            }
+            /* sparse (or mixed) chunk: one chunk-wide selection exactly as
+             * the pre-v2 fused path did it, then decode per row.  Dense
+             * rows keep use_sel=false (sel rows are indexed sp0-relative,
+             * so a dense row r<T-n_dense must not read them); sparse row r
+             * reads sel_tokens row (r - n_dense). */
+            if (n_dense > 0) {
+                const float scale = 1.0f / sqrtf((float)DS4_N_HEAD_DIM);
+                for (uint32_t r = 0; r < n_dense; r++) {
+                    const uint32_t rp = pos0 + r;
+                    ds4_gpu_tensor *q = ds4_gpu_tensor_view(g->q, (uint64_t)r * q_dim * sizeof(float),
+                                                            q_dim * sizeof(float));
+                    ds4_gpu_tensor *gate = ds4_gpu_tensor_view(g->gate, (uint64_t)r * q_dim * sizeof(float),
+                                                               q_dim * sizeof(float));
+                    ds4_gpu_tensor *o = ds4_gpu_tensor_view(g->attn_o, (uint64_t)r * q_dim * sizeof(float),
+                                                            q_dim * sizeof(float));
+                    const bool rok = q && gate && o &&
+                        ds4_gpu_qwen4_attn_decode_tensor(o, q, gate, g->layer_k_cache[il],
+                                                         g->layer_v_cache[il], g->sel_tokens, g->n_sel,
+                                                         g->attn_part, 1u, DS4_N_HEAD, DS4_N_HEAD_KV,
+                                                         DS4_N_HEAD_DIM, rp, false, g->sel_stride, scale);
+                    if (o) ds4_gpu_tensor_free(o);
+                    if (gate) ds4_gpu_tensor_free(gate);
+                    if (q) ds4_gpu_tensor_free(q);
+                    if (!rok) return false;
+                }
+            }
+            const uint32_t n_sparse = T - n_dense;
+            const uint32_t sp0 = pos0 + n_dense;
+            ds4_gpu_tensor *qs = ds4_gpu_tensor_view(g->q, (uint64_t)n_dense * q_dim * sizeof(float),
+                                                     (uint64_t)n_sparse * q_dim * sizeof(float));
+            ds4_gpu_tensor *gates = ds4_gpu_tensor_view(g->gate, (uint64_t)n_dense * q_dim * sizeof(float),
+                                                        (uint64_t)n_sparse * q_dim * sizeof(float));
+            ds4_gpu_tensor *iqns = ds4_gpu_tensor_view(g->iqn,
+                    (uint64_t)n_dense * DS4_N_INDEXER_HEAD * DS4_N_INDEXER_HEAD_DIM * sizeof(float),
+                    (uint64_t)n_sparse * DS4_N_INDEXER_HEAD * DS4_N_INDEXER_HEAD_DIM * sizeof(float));
+            const float scale = 1.0f / sqrtf((float)DS4_N_HEAD_DIM);
+            bool ok = qs && gates && iqns &&
+                ds4_gpu_qwen4_idx_score_tensor(g->score, n_sparse <= 2u ? g->tile_max : NULL, iqns,
+                                               g->layer_block_key[il], n_sparse, n_blocks_after,
+                                               DS4_N_INDEXER_HEAD, DS4_N_INDEXER_HEAD_DIM, sp0, ratio) &&
+                qwen4_idx_select(g->sel_blocks, g->score, n_sparse <= 2u ? g->tile_max : NULL,
+                                 n_blocks_after, n_sparse, g->k_blocks);
+            ds4_gpu_tensor_free(iqns);
+            ds4_gpu_tensor_free(gates);
+            ds4_gpu_tensor_free(qs);
+            if (!ok) return false;
+            if (!ds4_gpu_qwen4_idx_expand_tensor(g->sel_tokens, g->n_sel, g->sel_blocks, n_sparse,
+                                                 g->k_blocks, ratio, sp0, g->sel_stride))
+                return false;
+            for (uint32_t r = 0; r < n_sparse; r++) {
+                const uint32_t rp = sp0 + r;
+                ds4_gpu_tensor *q = ds4_gpu_tensor_view(g->q, (uint64_t)(n_dense + r) * q_dim * sizeof(float),
+                                                        q_dim * sizeof(float));
+                ds4_gpu_tensor *gate = ds4_gpu_tensor_view(g->gate, (uint64_t)(n_dense + r) * q_dim * sizeof(float),
+                                                           q_dim * sizeof(float));
+                ds4_gpu_tensor *o = ds4_gpu_tensor_view(g->attn_o, (uint64_t)(n_dense + r) * q_dim * sizeof(float),
+                                                        q_dim * sizeof(float));
+                ds4_gpu_tensor *sel = ds4_gpu_tensor_view(g->sel_tokens,
+                        (uint64_t)r * g->sel_stride * sizeof(int32_t),
+                        (uint64_t)n_sparse * g->sel_stride * sizeof(int32_t));
+                ds4_gpu_tensor *nsel = ds4_gpu_tensor_view(g->n_sel, (uint64_t)r * sizeof(uint32_t),
+                                                           (uint64_t)n_sparse * sizeof(uint32_t));
+                const bool rok = q && gate && o && sel && nsel &&
+                    ds4_gpu_qwen4_attn_decode_tensor(o, q, gate, g->layer_k_cache[il],
+                                                     g->layer_v_cache[il], sel, nsel,
+                                                     r == 0u ? g->attn_part : NULL, 1u,
+                                                     DS4_N_HEAD, DS4_N_HEAD_KV, DS4_N_HEAD_DIM,
+                                                     rp, true, g->sel_stride, scale);
+                if (nsel) ds4_gpu_tensor_free(nsel);
+                if (sel) ds4_gpu_tensor_free(sel);
+                if (o) ds4_gpu_tensor_free(o);
+                if (gate) ds4_gpu_tensor_free(gate);
+                if (q) ds4_gpu_tensor_free(q);
+                if (!rok) return false;
+            }
+            return true;
+        }
         for (uint32_t r = 0; r < T; r++) {
             const uint32_t rp = pos0 + r;
             ds4_gpu_tensor *q = ds4_gpu_tensor_view(g->q, (uint64_t)r * q_dim * sizeof(float),

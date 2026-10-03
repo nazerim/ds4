@@ -7820,21 +7820,29 @@ static void test_qwen4_rowcount_ab(void) {
     ds4_chat_append_message(engine, &prompt, "user", ptext ? ptext : test_mtp_copy_prompt());
     ds4_chat_append_assistant_prefix(engine, &prompt, DS4_THINK_NONE);
     TEST_ASSERT(prompt.len > 0);
-    int *toks = malloc(512u * sizeof(int));
+    int *toks = malloc(1024u * sizeof(int));
     TEST_ASSERT(toks != NULL);
     int n = 0, chunk = 0;
-    TEST_ASSERT(test_mtp_capture_speculative(engine, &prompt, 512, toks, &n, &chunk) && n > 128);
+    TEST_ASSERT(test_mtp_capture_speculative(engine, &prompt, 1024, toks, &n, &chunk) && n > 128);
     const int cap = 2048;
     uint64_t *fd = xmalloc((size_t)cap * sizeof(uint64_t));
     uint64_t *s1 = xmalloc((size_t)cap * sizeof(uint64_t));
     uint64_t *s2 = xmalloc((size_t)cap * sizeof(uint64_t));
     int checked = 0, diff_streams = 0, diff_dumps = 0;
     char err[192];
-    for (int i = 0; i + 1 < n && i / 2 < npairs; i += 2) {
+    /* full = prompt ++ captured stream; the A/B prefix at pair i is
+     * full[0 .. prompt.len+i), the pair is full[prompt.len+i..+2) */
+    int *full = xmalloc((size_t)(prompt.len + n) * sizeof(int));
+    memcpy(full, prompt.v, (size_t)prompt.len * sizeof(int));
+    memcpy(full + prompt.len, toks, (size_t)n * sizeof(int));
+    /* sessions in the A/B are sized prefix+32; keep prefixes sane (< ~100k
+     * tokens) so the probe never captures past the engine's context window */
+    const int max_i = n < 100000 ? n : 100000;
+    for (int i = 0; i + 1 < max_i && i / 2 < npairs; i += 2) {
         int dn = 0, fam0 = -1, fam1 = -1, sam1 = -1, sam2 = -1;
         float r0d = -1.0f, r1d = -1.0f;
         const int rc = ds4_test_qwen4_rowcount_ab(
-            engine, prompt.v, prompt.len + i, toks[i], toks[i + 1],
+            engine, full, prompt.len + i, toks[i], toks[i + 1],
             fd, s1, s2, cap, &dn, &fam0, &fam1, &sam1, &sam2, &r0d, &r1d,
             err, sizeof(err));
         if (rc != 0) {
@@ -7868,7 +7876,7 @@ static void test_qwen4_rowcount_ab(void) {
     }
     fprintf(stderr, "ds4-test: qwen4-rowcount-ab checked=%d dump-diff=%d stream-diff=%d\n",
             checked, diff_dumps, diff_streams);
-    free(fd); free(s1); free(s2); free(toks); free(ptext);
+    free(fd); free(s1); free(s2); free(full); free(toks); free(ptext);
     ds4_tokens_free(&prompt);
 }
 
