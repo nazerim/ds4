@@ -58666,10 +58666,44 @@ static bool qwen4_graph_moe(ds4_qwen4_gpu_graph *g, const ds4_model *m, const ds
      * chose it instead of once per row, each row's arithmetic unchanged.
      * DS4_QWEN4_MOE_NO_GROUP=1 keeps the per-row kernels for A/B. */
 #ifdef DS4_HAS_QWEN4_METAL
-    const bool grouped = shared_dense && l->ffn_gate_exps->type == DS4_TENSOR_Q4_K &&
-        l->ffn_up_exps->type == DS4_TENSOR_Q4_K && l->ffn_down_exps->type == DS4_TENSOR_MXFP4 &&
+    const bool types_groupable = l->ffn_gate_exps->type == DS4_TENSOR_Q4_K &&
+        l->ffn_up_exps->type == DS4_TENSOR_Q4_K && l->ffn_down_exps->type == DS4_TENSOR_MXFP4;
+    const bool grouped = shared_dense && types_groupable &&
         getenv("DS4_QWEN4_MOE_NO_GROUP") == NULL;
-    if (ok && grouped) {
+    /* DS4_QWEN4_MOE_GROUP_EXACT=1: grouped ROUTED kernels with the shared
+     * expert kept as the baseline's extra slot (shared-row dispatches of the
+     * slot kernels). Every routed row is bit-exact to the slot twin
+     * (DS4_QWEN4_MOE_DEBUG_BISECT replay: zero diffs over production
+     * inputs), and the shared row is bit-exact by construction - the same
+     * kernel branch the T=1 reference runs. reduce keeps the baseline
+     * shared-as-slot form. The batched path (shared_dense) is unchanged. */
+    static int group_exact = -1;
+    if (group_exact < 0) group_exact = getenv("DS4_QWEN4_MOE_GROUP_EXACT") != NULL;
+    const bool grouped_exact = group_exact > 0 && !shared_dense && types_groupable &&
+        getenv("DS4_QWEN4_MOE_NO_GROUP") == NULL && T >= 2u && T <= 8u;
+    if (ok && grouped_exact) {
+        const uint32_t NS_ = DS4_N_EXPERT_USED, OS_ = NS_ + 1u;
+        /* grouped rows carry their own slot ids: base 0, stride NS+1 */
+        const uint32_t OL_ = OS_ << 6;
+        ok = ds4_gpu_qwen4_moe_build_lists_tensor(g->moe_lists, g->moe_counts, g->selected, T, NS_,
+                                                  DS4_N_EXPERT, g->cap_tokens) &&
+             ds4_gpu_qwen4_moe_mid_grouped_ex_tensor(g->mid, g->mixed, g->selected, g->moe_lists,
+                                                     g->moe_counts, g->cap_tokens, m->map, m->size,
+                                                     l->ffn_gate_exps->abs_offset, l->ffn_up_exps->abs_offset,
+                                                     l->ffn_gate_exps->type, DS4_N_EXPERT, T, NS_,
+                                                     DS4_N_EMBD, DS4_N_FF_EXP, OL_) &&
+             ds4_gpu_qwen4_moe_mid_shared_row_tensor(g->mid, g->mixed, g->selected, m->map, m->size,
+                                                     l->ffn_gate_shexp->abs_offset, l->ffn_up_shexp->abs_offset,
+                                                     l->ffn_gate_shexp->type, T, NS_,
+                                                     DS4_N_EMBD, DS4_N_FF_EXP) &&
+             ds4_gpu_qwen4_moe_down_grouped_ex_tensor(g->part, g->mid, g->selected, g->moe_lists,
+                                                      g->moe_counts, g->cap_tokens, m->map, m->size,
+                                                      l->ffn_down_exps->abs_offset, l->ffn_down_exps->type,
+                                                      DS4_N_EXPERT, T, NS_, DS4_N_FF_EXP, DS4_N_EMBD, OL_) &&
+             ds4_gpu_qwen4_moe_down_shared_row_tensor(g->part, g->mid, g->selected, m->map, m->size,
+                                                      l->ffn_down_shexp->abs_offset, l->ffn_down_shexp->type,
+                                                      T, NS_, DS4_N_FF_EXP, DS4_N_EMBD);
+    } else if (ok && grouped) {
         /* Bisect diagnostics: run exactly one of the grouped kernels against
          * the slot twin of the other (acceptance-battery divergence
          * attribution, 2026-10-03). */

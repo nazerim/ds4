@@ -48461,7 +48461,7 @@ typedef struct {
     uint32_t n_tokens, n_slots, in_dim, out_rows, weight_type, row_bytes;
     uint64_t expert_bytes;
     uint32_t has_shared, shared_type, shared_row_bytes, n_total_expert;
-    uint32_t list_cap, pad0;
+    uint32_t list_cap, out_layout;   /* 0 default; else (row stride << 6) | slot base */
 } qwen4_moe_args;
 
 static bool qwen4_moe_mv_specialize(uint32_t type) {
@@ -49793,18 +49793,31 @@ int ds4_gpu_qwen4_moe_mid_grouped_tensor(
         const void *model_map, uint64_t model_size, uint64_t gate_offset, uint64_t up_offset,
         uint32_t weight_type, uint32_t n_total_expert, uint32_t n_tokens, uint32_t n_slots,
         uint32_t in_dim, uint32_t ff_dim) {
+    return ds4_gpu_qwen4_moe_mid_grouped_ex_tensor(mid, x, selected, lists, counts, list_cap,
+                                                    model_map, model_size, gate_offset, up_offset,
+                                                    weight_type, n_total_expert, n_tokens, n_slots,
+                                                    in_dim, ff_dim, 0u);
+}
+
+int ds4_gpu_qwen4_moe_mid_grouped_ex_tensor(
+        ds4_gpu_tensor *mid, const ds4_gpu_tensor *x, const ds4_gpu_tensor *selected,
+        const ds4_gpu_tensor *lists, const ds4_gpu_tensor *counts, uint32_t list_cap,
+        const void *model_map, uint64_t model_size, uint64_t gate_offset, uint64_t up_offset,
+        uint32_t weight_type, uint32_t n_total_expert, uint32_t n_tokens, uint32_t n_slots,
+        uint32_t in_dim, uint32_t ff_dim, uint32_t out_layout) {
     if (weight_type != 12u || (in_dim % 256u) != 0) return 0;
     const uint32_t row_bytes = qwen4_expert_row_bytes(weight_type, in_dim);
     const uint64_t expert_bytes = (uint64_t)row_bytes * ff_dim;
     qwen4_moe_args args = { n_tokens, n_slots, in_dim, ff_dim, weight_type, row_bytes, expert_bytes,
-                            0u, 0u, 0u, n_total_expert, list_cap, 0u };
+                            0u, 0u, 0u, n_total_expert, list_cap, out_layout };
+    const uint64_t row_slots = out_layout ? out_layout >> 6 : (uint64_t)n_slots;
     qwen4_bind b[7];
     if (n_tokens == 0 || n_slots == 0 || row_bytes == 0 || ff_dim == 0 || list_cap == 0 ||
         !qwen4_bind_weight(&b[0], model_map, model_size, gate_offset, expert_bytes * n_total_expert, "moe gate experts") ||
         !qwen4_bind_weight(&b[1], model_map, model_size, up_offset, expert_bytes * n_total_expert, "moe up experts") ||
         !qwen4_bind_tensor(&b[2], selected, (uint64_t)n_tokens * n_slots * sizeof(int32_t), "moe selected") ||
         !qwen4_bind_tensor(&b[3], x, (uint64_t)n_tokens * in_dim * sizeof(float), "moe input") ||
-        !qwen4_bind_tensor(&b[4], mid, (uint64_t)n_tokens * n_slots * ff_dim * sizeof(float), "moe mid") ||
+        !qwen4_bind_tensor(&b[4], mid, (uint64_t)n_tokens * row_slots * ff_dim * sizeof(float), "moe mid") ||
         !qwen4_bind_tensor(&b[5], lists, (uint64_t)n_total_expert * list_cap * sizeof(int32_t), "moe lists") ||
         !qwen4_bind_tensor(&b[6], counts, (uint64_t)n_total_expert * sizeof(int32_t), "moe counts")) {
         return 0;
@@ -49815,6 +49828,70 @@ int ds4_gpu_qwen4_moe_mid_grouped_tensor(
                           MTLSizeMake(32u * nsg, 1, 1), 0);
 }
 
+
+/* Exact grouped verify path: shared-expert mid rows written through the
+ * slot kernel's shared branch at the baseline slot layout
+ * (row = t*(n_slots_routed+1) + n_slots_routed), keeping the shared
+ * arithmetic bit-identical to the T=1 serial reference. n_slots=0 +
+ * has_shared=1 + out_layout carries the row stride/base; the routed
+ * branch is unreachable (grid.y = 1, slot == n_slots == 0). */
+int ds4_gpu_qwen4_moe_mid_shared_row_tensor(
+        ds4_gpu_tensor *mid, const ds4_gpu_tensor *x, const ds4_gpu_tensor *selected,
+        const void *model_map, uint64_t model_size,
+        uint64_t shared_gate_offset, uint64_t shared_up_offset, uint32_t shared_type,
+        uint32_t n_tokens, uint32_t n_slots_routed, uint32_t in_dim, uint32_t ff_dim) {
+    const uint32_t sh_row_bytes = qwen4_expert_row_bytes(shared_type, in_dim);
+    const uint64_t shared_bytes = (uint64_t)sh_row_bytes * ff_dim;
+    const uint32_t out_stride = n_slots_routed + 1u;
+    qwen4_moe_args args = { n_tokens, 0u, in_dim, ff_dim, 0u, sh_row_bytes, shared_bytes,
+                            1u, shared_type, sh_row_bytes, 0u, 0u,
+                            (out_stride << 6) | n_slots_routed };
+    qwen4_bind b[7];
+    if (n_tokens == 0 || (in_dim % 256u) != 0 ||
+        !qwen4_bind_weight(&b[0], model_map, model_size, shared_gate_offset, shared_bytes, "shared gate") ||
+        !qwen4_bind_weight(&b[1], model_map, model_size, shared_up_offset, shared_bytes, "shared up") ||
+        !qwen4_bind_tensor(&b[2], selected, (uint64_t)n_tokens * sizeof(int32_t), "moe selected dummy") ||
+        !qwen4_bind_tensor(&b[3], x, (uint64_t)n_tokens * in_dim * sizeof(float), "moe input") ||
+        !qwen4_bind_tensor(&b[4], mid,
+                           (uint64_t)n_tokens * out_stride * ff_dim * sizeof(float), "moe mid rows")) {
+        return 0;
+    }
+    b[5] = b[0];
+    b[6] = b[1];
+    const uint32_t nsg = 4u, rows_per_tg = nsg;   /* NR1 */
+    return qwen4_dispatch(QWEN4_K_MOE_MID_Q4K_NR1, &args, sizeof(args), b, 7,
+                          MTLSizeMake((ff_dim + rows_per_tg - 1) / rows_per_tg, 1, n_tokens),
+                          MTLSizeMake(32u * nsg, 1, 1), 0);
+}
+
+int ds4_gpu_qwen4_moe_down_shared_row_tensor(
+        ds4_gpu_tensor *part, const ds4_gpu_tensor *mid, const ds4_gpu_tensor *selected,
+        const void *model_map, uint64_t model_size, uint64_t shared_down_offset,
+        uint32_t shared_type, uint32_t n_tokens, uint32_t n_slots_routed,
+        uint32_t ff_dim, uint32_t out_dim) {
+    const uint32_t sh_row_bytes = qwen4_expert_row_bytes(shared_type, ff_dim);
+    const uint64_t shared_bytes = (uint64_t)sh_row_bytes * out_dim;
+    const uint32_t out_stride = n_slots_routed + 1u;
+    qwen4_moe_args args = { n_tokens, 0u, ff_dim, out_dim, 0u, sh_row_bytes, shared_bytes,
+                            1u, shared_type, sh_row_bytes, 0u, 0u,
+                            (out_stride << 6) | n_slots_routed };
+    qwen4_bind b[5];
+    if (n_tokens == 0 ||
+        !qwen4_bind_weight(&b[0], model_map, model_size, shared_down_offset, shared_bytes, "shared down") ||
+        !qwen4_bind_tensor(&b[1], selected, (uint64_t)n_tokens * sizeof(int32_t), "moe selected dummy") ||
+        !qwen4_bind_tensor(&b[2], mid,
+                           (uint64_t)n_tokens * out_stride * ff_dim * sizeof(float), "moe mid rows") ||
+        !qwen4_bind_tensor(&b[3], part,
+                           (uint64_t)n_tokens * out_stride * out_dim * sizeof(float), "moe partial rows")) {
+        return 0;
+    }
+    b[4] = b[0];
+    const uint32_t nsg = 4u, rows_per_tg = 2u * nsg;
+    return qwen4_dispatch(QWEN4_K_MOE_DOWN, &args, sizeof(args), b, 5,
+                          MTLSizeMake((out_dim + rows_per_tg - 1) / rows_per_tg, 1, n_tokens),
+                          MTLSizeMake(32u * nsg, 1, 1), 0);
+}
+
 /* The MXFP4 down rows of the same batch, on the same lists. */
 int ds4_gpu_qwen4_moe_down_grouped_tensor(
         ds4_gpu_tensor *part, const ds4_gpu_tensor *mid, const ds4_gpu_tensor *selected,
@@ -49822,17 +49899,29 @@ int ds4_gpu_qwen4_moe_down_grouped_tensor(
         const void *model_map, uint64_t model_size, uint64_t down_offset,
         uint32_t weight_type, uint32_t n_total_expert, uint32_t n_tokens, uint32_t n_slots,
         uint32_t ff_dim, uint32_t out_dim) {
+    return ds4_gpu_qwen4_moe_down_grouped_ex_tensor(part, mid, selected, lists, counts, list_cap,
+                                                    model_map, model_size, down_offset, weight_type,
+                                                    n_total_expert, n_tokens, n_slots, ff_dim, out_dim, 0u);
+}
+
+int ds4_gpu_qwen4_moe_down_grouped_ex_tensor(
+        ds4_gpu_tensor *part, const ds4_gpu_tensor *mid, const ds4_gpu_tensor *selected,
+        const ds4_gpu_tensor *lists, const ds4_gpu_tensor *counts, uint32_t list_cap,
+        const void *model_map, uint64_t model_size, uint64_t down_offset,
+        uint32_t weight_type, uint32_t n_total_expert, uint32_t n_tokens, uint32_t n_slots,
+        uint32_t ff_dim, uint32_t out_dim, uint32_t out_layout) {
     if (weight_type != 39u || (ff_dim % 32u) != 0) return 0;
     const uint32_t row_bytes = qwen4_expert_row_bytes(weight_type, ff_dim);
     const uint64_t expert_bytes = (uint64_t)row_bytes * out_dim;
     qwen4_moe_args args = { n_tokens, n_slots, ff_dim, out_dim, weight_type, row_bytes, expert_bytes,
-                            0u, 0u, 0u, n_total_expert, list_cap, 0u };
+                            0u, 0u, 0u, n_total_expert, list_cap, out_layout };
+    const uint64_t row_slots = out_layout ? out_layout >> 6 : (uint64_t)n_slots;
     qwen4_bind b[6];
     if (n_tokens == 0 || n_slots == 0 || row_bytes == 0 || out_dim == 0 || list_cap == 0 ||
         !qwen4_bind_weight(&b[0], model_map, model_size, down_offset, expert_bytes * n_total_expert, "moe down experts") ||
         !qwen4_bind_tensor(&b[1], selected, (uint64_t)n_tokens * n_slots * sizeof(int32_t), "moe selected") ||
-        !qwen4_bind_tensor(&b[2], mid, (uint64_t)n_tokens * n_slots * ff_dim * sizeof(float), "moe mid") ||
-        !qwen4_bind_tensor(&b[3], part, (uint64_t)n_tokens * n_slots * out_dim * sizeof(float), "moe partial") ||
+        !qwen4_bind_tensor(&b[2], mid, (uint64_t)n_tokens * row_slots * ff_dim * sizeof(float), "moe mid") ||
+        !qwen4_bind_tensor(&b[3], part, (uint64_t)n_tokens * row_slots * out_dim * sizeof(float), "moe partial") ||
         !qwen4_bind_tensor(&b[4], lists, (uint64_t)n_total_expert * list_cap * sizeof(int32_t), "moe lists") ||
         !qwen4_bind_tensor(&b[5], counts, (uint64_t)n_total_expert * sizeof(int32_t), "moe counts")) {
         return 0;

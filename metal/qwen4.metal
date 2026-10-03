@@ -2578,8 +2578,19 @@ struct ds4_metal_args_qwen4_moe {
     uint32_t shared_row_bytes;
     uint32_t n_total_expert;
     uint32_t list_cap;     /* grouped kernels: row stride of the per-expert pair lists */
-    uint32_t pad0;
+    uint32_t out_layout;   /* 0 = default (tok*(n_slots+has_shared)+slot); else
+                            * (mid/part row stride << 6) | slot base: the exact
+                            * grouped verify path keeps the baseline shared-as-slot
+                            * layout (stride NS+1, shared row NS) while the routed
+                            * grouped kernels index rows through this mapping */
 };
+
+/* Row of the mid/part tensors for (tok, slot) under out_layout. */
+static inline uint64_t qwen4_moe_pair_row(constant ds4_metal_args_qwen4_moe &args,
+                                          uint64_t tok, uint64_t slot) {
+    if (!args.out_layout) return tok * (uint64_t)(args.n_slots + args.has_shared) + slot;
+    return tok * (uint64_t)(args.out_layout >> 6) + (uint64_t)(args.out_layout & 63u) + slot;
+}
 
 /* dot of one quantized expert row with x, lanes split as in the K3 kernels:
  * ix = block stride, it = element pair inside the block */
@@ -2811,7 +2822,7 @@ kernel void kernel_qwen4_moe_mid_q4k(
     const uint row0 = (tgpig.x * (ntg.x / 32) + (uint)sgitg) * NR;
     if (row0 >= args.out_rows || slot >= n_out || tok >= args.n_tokens) return;
     device const float *xt = x + (uint64_t)tok * args.in_dim;
-    const uint64_t mid_base = ((uint64_t)tok * n_out + slot) * args.out_rows;
+    const uint64_t mid_base = qwen4_moe_pair_row(args, tok, slot) * args.out_rows;
     if (slot == args.n_slots) {
         for (uint r = row0; r < row0 + NR && r < args.out_rows; r++) {
             const uint64_t off = (uint64_t)r * args.shared_row_bytes;
@@ -2973,7 +2984,7 @@ static inline void qwen4_moe_mid_q4k_pass(
         for (uint j = 0; j < NJ; j++) {
             const float g = simd_sum(sg_[j][r]);
             const float u = simd_sum(su_[j][r]);
-            if (tiisg == 0) mid[(uint64_t)pairs[j] * args.out_rows + row0 + r] = qwen4_silu(g) * u;
+            if (tiisg == 0) mid[qwen4_moe_pair_row(args, pairs[j] / args.n_slots, pairs[j] % args.n_slots) * args.out_rows + row0 + r] = qwen4_silu(g) * u;
         }
     }
 }
@@ -2999,7 +3010,7 @@ kernel void kernel_qwen4_moe_mid_q4k_grouped(
     const int32_t expert = selected[pair];
     if (expert < 0 || (uint)expert >= args.n_total_expert) {
         if (tiisg == 0) {
-            for (uint r = row0; r < row0 + NR && r < args.out_rows; r++) mid[(uint64_t)pair * args.out_rows + r] = 0.0f;
+            for (uint r = row0; r < row0 + NR && r < args.out_rows; r++) mid[qwen4_moe_pair_row(args, tok, slot) * args.out_rows + r] = 0.0f;
         }
         return;
     }
@@ -3054,7 +3065,7 @@ kernel void kernel_qwen4_moe_down(
     const uint type = shared ? st : wt;
     const uint row_bytes = shared ? args.shared_row_bytes : args.row_bytes;
     device const char *db = shared ? sh_down : down_base;
-    const uint64_t pair = (uint64_t)tok * n_out + slot;
+    const uint64_t pair = qwen4_moe_pair_row(args, tok, slot);
     const uint64_t ebase = shared ? 0 : (uint64_t)(uint)selected[(uint64_t)tok * args.n_slots + slot] * args.expert_bytes;
     device const float *m = mid + pair * args.in_dim;
     for (uint r = row0; r < row0 + nr && r < args.out_rows; r++) {
@@ -3101,7 +3112,7 @@ kernel void kernel_qwen4_moe_down_mxfp4_pf(
     const uint st = is_function_constant_defined(qwen4_mv_shared_type) ? qwen4_mv_shared_type : args.shared_type;
     const uint row0 = (tgpig.x * (ntg.x / 32u) + (uint)sgitg) * nr;
     if (row0 >= args.out_rows || slot >= n_out || tok >= args.n_tokens) return;
-    const uint64_t pair = (uint64_t)tok * n_out + slot;
+    const uint64_t pair = qwen4_moe_pair_row(args, tok, slot);
     device const float *m = mid + pair * args.in_dim;
     if (slot == args.n_slots) {
         for (uint r = row0; r < row0 + nr && r < args.out_rows; r++) {
@@ -3184,7 +3195,7 @@ static inline void qwen4_moe_down_mxfp4_pass(
 #pragma unroll
     for (uint j = 0; j < NJ; j++) {
         pairs[j] = (uint)list[j];
-        ms[j] = mid + (uint64_t)pairs[j] * args.in_dim;
+        ms[j] = mid + qwen4_moe_pair_row(args, pairs[j] / args.n_slots, pairs[j] % args.n_slots) * args.in_dim;
     }
     /* both rows of the simdgroup walk their blocks together: two
      * independent chains per pair in flight instead of one after the other;
@@ -3248,8 +3259,9 @@ static inline void qwen4_moe_down_mxfp4_pass(
         const float va = simd_sum(acca[j]);
         const float vb = simd_sum(accb[j]);
         if (tiisg == 0) {
-            part[(uint64_t)pairs[j] * args.out_rows + row0] = va;
-            if (two) part[(uint64_t)pairs[j] * args.out_rows + row0 + 1u] = vb;
+            const uint64_t prow = qwen4_moe_pair_row(args, pairs[j] / args.n_slots, pairs[j] % args.n_slots);
+            part[prow * args.out_rows + row0] = va;
+            if (two) part[prow * args.out_rows + row0 + 1u] = vb;
         }
     }
 }
@@ -3280,7 +3292,7 @@ kernel void kernel_qwen4_moe_down_mxfp4_grouped(
     const int32_t expert = selected[pair];
     if (expert < 0 || (uint)expert >= args.n_total_expert) {
         if (tiisg == 0) {
-            for (uint r = row0; r < row0 + 2u && r < args.out_rows; r++) part[(uint64_t)pair * args.out_rows + r] = 0.0f;
+            for (uint r = row0; r < row0 + 2u && r < args.out_rows; r++) part[qwen4_moe_pair_row(args, tok, slot) * args.out_rows + r] = 0.0f;
         }
         return;
     }
