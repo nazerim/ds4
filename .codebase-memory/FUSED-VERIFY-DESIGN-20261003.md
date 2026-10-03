@@ -100,7 +100,13 @@ full `make test` green (25 OK, exit 0). Prefill-tail and shallow paths gain
 the expert dedup too (small free bonus at T=2). NOT yet default - operator
 flip decision after B3.
 
-### B3 - NEXT: policy re-tune (the remaining unlock)
+### B3 - CLOSED 2026-10-04 (no re-tune): rowe-era economics measure deep at
+### C3/C2 = 32.1/24.96 = 1.286 vs forced-3's token ratio 1.266 => deep still
+### ~1.6% net-negative per cycle; shipped policy (perfect-8-bit windows,
+### ~10% firing tonight) stays. Reopen only if the decode split-ladder drops
+### deep below ~1.26x. Numbers: OVERNIGHT-20261003.md B3 decision block.
+
+### Original B3 intent (history): policy re-tune (the remaining unlock)
 `qwen4_spec_depth`'s engagement gates (perfect-8-bit window, reject-streak
 disengagements) were calibrated against the OLD verify delta (5.0 ms deep
 vs 22.9 shallow); exact grouped cuts it to ~3.7 and makes deep cycles

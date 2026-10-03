@@ -506,3 +506,21 @@ the sparse-regime identity oracle for all future prefill work). Named next
 at 160k+), C1 prefilter-for-prefill (small), C4 attn_mm KT (NOT bit-exact
 => operator golden decision), and the two fronts that actually matter:
 MoE/GDN prefill rate recon.
+
+## B3 DEPTH-POLICY DECISION 2026-10-04 01:0x (gated on 0', now measured):
+## DO NOT re-tune to fire deep more — margin still negative.
+rowe-era cycle economics (MTP_PROFILE, adaptive, untraced battery):
+shallow 22.85+2.11 = 24.96 ms/cycle; deep 27.88+4.22 = 32.1 => C3/C2 =
+1.286 vs the measured +26.6% tokens/cycle of forced-3 (ratio 1.266) =>
+deep fires ~1.6% net-negative per cycle on this class (rowe narrowed deep
+verify 30.3-31.7 -> 27.0-27.9 but shallow moved with it). Policy as
+shipped (deep on perfect-8-bit windows only, ~10% of tonight's cycles)
+stays; revisit only if the decode-side per-row split ladder drops deep
+below ~1.26x. Battery observation: adaptive-exact-single-session NOW
+55.5 s UNTRACED vs the traced 60.0/62.4 banks -- DS4_QWEN4_SPEC_TRACE
+costs ~2.5-4.5 s/battery; comparisons must state the trace mode (mode
+table numbers are traced; production runs untraced).
+### Tail tallies: R2b field measurement + Scenario L reclaim NOT
+## constructible overnight (no resume/evict traffic at 02:0x; 178 field
+## .kv files wait for the next real-session day; logs clean of both
+## event types). Left in queue.
