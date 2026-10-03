@@ -59,8 +59,18 @@
 | per-row v2 alone | 71.6 / 77.0 | ~28.0 | ~38.4 |
 | v2 + `VERIFY_INDEXER_BATCH=1` | 71.5 / 71.7 | 27.98 | 38.4 |
 | v2 + batch + `MOE_GROUP_EXACT=1` | **66.8 / 67.0** | 27.9 | **37.0** |
+| **SINGLE_TREE** (22:1x, one ext tree incl. T=1) | 67.7 | 25.5 | 31.7 |
+| **SINGLE_TREE + `MOE_GROUP_EXACT=1`** | **62.4 / 63.0** | 25.8 | 31.2 |
+| SINGLE_TREE serial fallback (spec off) | 67.1 | - | - |
 
 The exact stack now BEATS serial by ~4-9% while being bit-identical to it.
+Single-tree update (22:4x): `DS4_QWEN4_VERIFY_SINGLE_TREE` retires the
+per-row dispatch entirely by routing T=1 through the row-invariant mv_ext
+family (one tree for spec AND serial). Fastest exact mode: ST+group 62.4/63.0
+(run-identical) and its own serial fallback 67.1 beats the old plain-mv
+serial (~71.7). Caveat: ST shifts the greedy stream on one known near-tie
+(prompt 7 @1555) - it is a NEW reference tree, goldens/banked comparisons
+must be re-captured under it; v2 stays the reference-preserving audit mode.
 Remaining gap to the drifting default is the per-row matvec weight re-reads
 (~4.5-5 ms/cycle); that is the invariant-mv_ext kernel target (B2), not more
 host plumbing. Evidence: 20261003_pr3_idxbatch_*, 20261003_pr4_group_*.

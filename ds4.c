@@ -58532,7 +58532,9 @@ static bool qwen4_graph_attention_tail(ds4_qwen4_gpu_graph *g, const ds4_model *
      * attention layer's blk, hc xn/lo identical).  Prefill (T>8) and serial
      * T=1 rows keep their historical paths. */
     static int attn_per_row = -1;
-    if (attn_per_row < 0) attn_per_row = getenv("DS4_QWEN4_VERIFY_PER_ROW") != NULL;
+    if (attn_per_row < 0)
+        attn_per_row = getenv("DS4_QWEN4_VERIFY_PER_ROW") != NULL ||
+                       getenv("DS4_QWEN4_VERIFY_SINGLE_TREE") != NULL;
     if (attn_per_row && T >= 2u && T <= 8u) {
         /* DS4_QWEN4_VERIFY_INDEXER_BATCH=1 (item-0 B1 probe, default off):
          * does the per-row universe actually bind BITWISE, or only the
@@ -58547,7 +58549,8 @@ static bool qwen4_graph_attention_tail(ds4_qwen4_gpu_graph *g, const ds4_model *
          * decode dispatch. */
         static int idx_batch = -1;
         if (idx_batch < 0)
-            idx_batch = getenv("DS4_QWEN4_VERIFY_INDEXER_BATCH") != NULL;
+            idx_batch = getenv("DS4_QWEN4_VERIFY_INDEXER_BATCH") != NULL ||
+                        getenv("DS4_QWEN4_VERIFY_SINGLE_TREE") != NULL;
         if (idx_batch) {
             const uint32_t sparse_pos = (g->k_blocks + 1u) * ratio - 1u;
             const uint32_t clast = pos0 + T - 1u;

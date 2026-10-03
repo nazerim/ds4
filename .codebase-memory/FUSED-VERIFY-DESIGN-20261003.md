@@ -214,7 +214,52 @@ per layer. Expected C3/C2 from >1.266 to ~1.15: forced depth-3 flips from
 (`DS4_QWEN4_VERIFY_FUSED_INDEXER`, default off), RED via mtp-verify-depth
 before enabling.
 
-### B2 — per-row split ladder (the real fusion, kernel work)
+### B2 — RESULT 22:0x-22:4x (window 3): SINGLE-TREE implementation (env
+`DS4_QWEN4_VERIFY_SINGLE_TREE`, default off) — one tree for everything, no
+per-row dispatch cost.
+
+Design pivot: the ext matvec family (kernel_mul_mv_ext_*_f32_r1_N) is
+row-invariant by construction — each token row keeps its own lane walk +
+shuffle tree inside one threadgroup, weights dequantized once (lx[ch]) and
+shared across rows. The identity doc's drift was ext(T>=2) vs PLAIN-mv(T=1)
+— different families. So instead of making the chunked path per-row, route
+T=1 THROUGH ext (the same kernel, r1ptg(1)->2) and flip the two other
+row-count-sensitive choices: HC gate/mix pair->generic (row-invariant per
+tonight's NO_HC_PAIR proof) and keep attention decode per-row (the only
+genuinely row-count-sensitive stage). Net: serial decode and spec verify
+share one reduction tree by construction; the plain-mv tree is retired in
+this mode.
+
+Gates (this window): rowcount-ab 110 pairs T=2 grid + 60 pairs T=3 grid
+prompt-03, all maxabs EXACTLY 0.0, 962/962 stage hashes identical; identity
+3-grid flips=0 on 03/06/07 think-none AND think-high; battery: st_adaptive,
+st_group x2 (run-identical), st_serial_ref — ALL mutually 10/10 (spec ==
+serial in-tree, the defining property); vs the banked plain-tree streams the
+ST world differs on exactly ONE near-tie (prompt 7 @ char 1555 — the same
+site that surfaced as the v1 residual; the two trees break that tie
+differently, both self-consistent). Default path (ST unset): full suite
+26 OK / 0 ERR, goldens unbroken.
+
+Cost (M5 Max battery, wall): ST plain 67.7 s; ST+MOE_GROUP_EXACT 62.4/63.0
+(run-identical texts); ST serial (spec off) 67.1 s — spec pays ~6% inside
+the ST world (drift world: 55.4 vs plain serial ~71.7). Per-cycle: shallow
+verify 25.5-25.8 ms ST vs 22.5 drift vs per-row-v2 28.0; deep 31.2-31.7 vs
+28.3/38.4. ST is the FASTEST known bit-exact mode (v2 66.8-67.0 -> 62.4)
+and its serial fallback is also faster than the plain-mv serial (67.1 vs
+~71.7) — the ext kernel wins at T=1 on this GPU. Remaining gap to drift is
+the ext T=2 kernel itself (25.5 vs 22.5): it reads x per row and streams
+weights once per threadgroup, but the plain-mv T=1 it replaced was already
+bandwidth-optimal; closing 25.5 -> ~23 needs the true fused kernel (x
+multi-row staging), the ORIGINAL B2 kernel work, still open.
+
+Decision implications: ST changes the serial reference (one near-tie moves),
+so it CANNOT be a drop-in default without golden re-capture; v2 remains the
+default-audit mode that preserves today's exact stream. For an audit-only
+mode, ST at 62.4 s beats v2 at 66.8. The p7@1555 near-tie is the empirical
+proof that "the" greedy stream is tree-dependent — worth a line in the
+identity doc next time it's touched.
+
+### B2 — per-row split ladder (the real fusion, kernel work) [historical spec]
 Make the decode kernel's split geometry row-local: `n_splits_r =
 ceil((pos0+r+1)/split_keys)`, per-row `keys_per_split_r`, partial buffer
 sized `sum_r n_splits_r × head_dim...` (host computes via the existing

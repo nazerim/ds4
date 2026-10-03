@@ -282,6 +282,39 @@ ROOT-CAUSE-2):
   skips honest). Binary-artifact hygiene re-checked clean. Engine restored
   production defaults (new binary, flag OFF) - smoke ok, 0 WARN.
 
+### ITEM-0 SECOND INROAD: SINGLE-TREE mode landed (21:4x-22:4x, operator
+"go for next window now" - second engine-stopped stretch in day 3)
+- Insight: the mv_ext small-batch family is ROW-INVARIANT by construction
+  (each token row keeps its own lane walk/shuffle tree; weights dequantized
+  once per threadgroup and shared) - the drift was ext(T>=2) vs PLAIN-mv(T=1),
+  i.e. two families, not row-count sensitivity inside one. So instead of
+  paying per-row dispatch (v2), route T=1 THROUGH ext: env
+  DS4_QWEN4_VERIFY_SINGLE_TREE=1 (ds4_metal.m: r1ptg(1)->2, q8/f16/f32 impl
+  T1-branch bypass, HC gate/mix pair off; ds4.c: attention core stays
+  per-row decode - the one stage that genuinely splits by key count - with
+  chunk-wide indexer selection per the B1 verdict).
+- Gates ALL green: rowcount-ab 110 pairs (T=2 grid) + 60 pairs (T=3 grid)
+  maxabs EXACTLY 0.0; identity 3-grid flips=0 on 03/06/07 think-none AND
+  think-high; battery ST{adaptive, group x2 run-identical, serial_ref} all
+  mutually 10/10 (spec == serial IN TREE); default path untouched (suite
+  26 OK / 0 ERR, goldens OK, engine restored flag-off PID 51796 smoke ok).
+- World-difference audit: ST vs banked plain-tree streams differ on exactly
+  ONE prompt (7 @ char 1555 - the v1-residual near-tie site; the trees break
+  that tie differently, both self-consistent). "The" greedy stream is
+  tree-dependent - first hard demonstration.
+- Economics (battery): ST 67.7 | ST+GROUP_EXACT 62.4/63.0 | ST serial 67.1
+  (ext kernel also BEATS the plain-mv serial ~71.7!). Per-cycle shallow
+  verify: drift 22.5 | ST 25.5-25.8 | v2-per-row 27.98-28.0 | deep: 28.3 /
+  31.2 / 38.4. ST is the fastest known BIT-EXACT mode (62.4 vs v2 66.8) and
+  the fastest known serial fallback (67.1 vs 69.6). Spec now pays ~6-7%
+  inside its own tree (drift world: ~20%).
+- NOT default, NOT golden-compatible: changes the serial reference itself;
+  decision item (1) re-framed - ST + GROUP_EXACT (62.4 s, exact) is now the
+  candidate production-exact config IF the operator accepts a re-captured
+  golden (one near-tie moves); v2 stays the reference-preserving audit mode.
+- Remaining B2 tail: ST vs drift per-cycle gap is 3ms (25.5 vs 22.5) - the
+  ext kernel's T=2 x-streaming; true fused multi-row x staging closes it.
+
 ### ITEM-0 FIRST INROADS same window (20:0x-20:1x, operator continue)
 - B1 experiment (env `DS4_QWEN4_VERIFY_INDEXER_BATCH`, default off,
   `e02f173`): chunk-wide score/select/expand + per-row decode ONLY.
@@ -304,21 +337,12 @@ ROOT-CAUSE-2):
 
 ## NEXT queue (ranked) - UPDATED 6th time (item-0 inroading landed)
 
-0'. B2: invariant mv_ext projections (lane->K split reproducing the T=1
-    reduction tree for EVERY row inside one chunked dispatch; the rowcount-ab
-    stage hashes are the oracle). hc pair-kernel invariance is a smaller
-    sibling (0.5 ms). Decode-split ladder inside one dispatch: cheap
-    (0.5 ms), lower priority than the matvec. Target: stack wall from 67
-    toward drift-default 55.4 with identity intact; then the default-flip
-    + golden re-capture decision (1) is actually worth making.
-
-0. Fused ROW-INVARIANT verify windows (the one milestone delivering speed AND
-   identity): mv_ext lane->K split reproducing the T=1 tree per row, hc
-   gate/mix pair-kernel invariance, per-row selection universe in one
-   dispatch (the *_rows kernel family is the blueprint - batched-session
-   already does per-row geometry there). Gate: --qwen4-rowcount-ab maxabs=0
-   on 512-token streams x3 prompts + 3-grid identity flips=0 + battery text
-   == serial + wall between drift-default (55.4) and per-row-v2 (~72).
+0'. B2 tail: close the ST-vs-drift 3 ms/cycle (ext kernel x-streaming at
+    T=2 - true fused multi-row x staging, the original kernel work). Optional
+    operator move: adopt ST+GROUP (62.4 s exact, 67.1 s serial fallback) as
+    the DEFAULT with golden re-capture - trades one near-tie (p7@1555) for
+    the fastest bit-exact engine known. Gates: rowcount-ab + 3-grid identity
+    + battery==in-tree serial (all built and green this window).
 1. Decision record (was task 2): keep DS4_QWEN4_VERIFY_PER_ROW default OFF
    (v2 == serial cost, no speed argument); goldens keep drift-encoded until
    the invariant path lands or an audit run under v2 pins them. Revisit

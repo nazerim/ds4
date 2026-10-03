@@ -5637,6 +5637,23 @@ static int ds4_gpu_verify_per_row(void) {
     return v;
 }
 
+/* DS4_QWEN4_VERIFY_SINGLE_TREE=1 (item-0 B2, FUSED-VERIFY-DESIGN): route
+ * n_tok==1 matvecs through the SAME mul_mv_ext kernel family (and HC gate/
+ * mix through the row-agnostic generic kernel, pair off) that 2..16-token
+ * chunks use, so speculative and serial decode share one reduction tree by
+ * construction - no per-row dispatch cost.  The ext family's per-token row
+ * walk (nxpsg lanes, chpt=4 dots, shuffle_down tree) is identical for every
+ * row regardless of r1ptg/ne11 (metal/dense.metal:2071; r1ptg=2 covers a
+ * 1-token chunk with the row-ir1=1 arm guard-freed), so T=1 via ext ==
+ * T=2 row 0 == T=3 row 0 - the whole verify stack shares one tree.
+ * The serial (T=1) stream shifts ~1 ULP vs the plain-mv tree, so goldens
+ * and field comparisons must be re-captured under this env; default OFF. */
+static int ds4_gpu_verify_single_tree(void) {
+    static int v = -1;
+    if (v < 0) v = getenv("DS4_QWEN4_VERIFY_SINGLE_TREE") != NULL;
+    return v;
+}
+
 static int16_t ds4_gpu_mv_ext_nsg(void) {
     return (int16_t)ds4_gpu_env_u64("DS4_METAL_MV_EXT_NSG", 2u, 1u, 8u);
 }
@@ -5648,6 +5665,7 @@ static int16_t ds4_gpu_mv_ext_nxpsg(uint64_t in_dim, uint64_t n_tok) {
 }
 
 static int16_t ds4_gpu_mv_ext_r1ptg(uint64_t n_tok) {
+    if (n_tok == 1u && ds4_gpu_verify_single_tree()) return 2;
     switch (n_tok) {
     case 2: return 2;
     case 3:
@@ -19465,7 +19483,7 @@ static int ds4_gpu_matmul_q8_0_legacy_tensor(
         id<MTLCommandBuffer> cb = ds4_gpu_command_buffer(&owned);
         if (!cb) return 0;
 
-        if (n_tok == 1) {
+        if (n_tok == 1 && !(ds4_gpu_verify_single_tree() && (in_dim % 128u) == 0)) {
             if (ds4_gpu_mpp_available() &&
                 prefer_decode_mpp &&
                 (in_dim % 64u) == 0) {
@@ -19536,8 +19554,7 @@ static int ds4_gpu_matmul_q8_0_legacy_tensor(
             if (!pipeline) return 0;
 
             const int16_t nypsg = 32 / nxpsg;
-            const uint64_t r0ptg = (uint64_t)nypsg * (uint64_t)nsg;
-            ds4_gpu_mul_mv_ext_args args =
+            const uint64_t r0ptg = (uint64_t)nypsg * (uint64_t)nsg;            ds4_gpu_mul_mv_ext_args args =
                 ds4_gpu_make_mv_ext_args(in_dim, out_dim, n_tok, 34, row_bytes);
 
             id<MTLComputeCommandEncoder> enc = ds4_gpu_compute_encoder(cb);
@@ -21188,7 +21205,8 @@ static int ds4_gpu_matmul_f16_tensor_impl(
         id<MTLCommandBuffer> cb = ds4_gpu_command_buffer(&owned);
         if (!cb) return 0;
 
-        if (n_tok == 1 || exact_rows) {
+        if ((n_tok == 1 || exact_rows) &&
+            !(ds4_gpu_verify_single_tree() && (in_dim % 128u) == 0)) {
             ds4_gpu_f16_matvec_args mv_args = ds4_gpu_make_f16_mv_args(in_dim, out_dim);
             mv_args.ne11 = mv_args.ne1 = (int32_t)n_tok;
             mv_args.nb12 = mv_args.nb13 = n_tok * in_dim * sizeof(float);
@@ -21238,8 +21256,7 @@ static int ds4_gpu_matmul_f16_tensor_impl(
             if (!pipeline) return 0;
 
             const int16_t nypsg = 32 / nxpsg;
-            const uint64_t r0ptg = (uint64_t)nypsg * (uint64_t)nsg;
-            ds4_gpu_mul_mv_ext_args args =
+            const uint64_t r0ptg = (uint64_t)nypsg * (uint64_t)nsg;            ds4_gpu_mul_mv_ext_args args =
                 ds4_gpu_make_mv_ext_args(in_dim, out_dim, n_tok, sizeof(uint16_t), row_bytes);
 
             id<MTLComputeCommandEncoder> enc = ds4_gpu_compute_encoder(cb);
@@ -22096,7 +22113,7 @@ int ds4_gpu_matmul_f32_tensor(
         id<MTLCommandBuffer> cb = ds4_gpu_command_buffer(&owned);
         if (!cb) return 0;
 
-        if (n_tok == 1) {
+        if (n_tok == 1 && !(ds4_gpu_verify_single_tree() && (in_dim % 128u) == 0)) {
             ds4_gpu_q8_0_matvec_args mv_args = ds4_gpu_make_f32_mv_args(in_dim, out_dim, 1);
             ds4_gpu_mv_dispatch mv_dispatch = ds4_gpu_make_plain_mv_dispatch(in_dim, 1);
             if (ds4_gpu_plain_mv_single_row(out_dim)) {
@@ -22161,8 +22178,7 @@ int ds4_gpu_matmul_f32_tensor(
             if (!pipeline) return 0;
 
             const int16_t nypsg = 32 / nxpsg;
-            const uint64_t r0ptg = (uint64_t)nypsg * (uint64_t)nsg;
-            ds4_gpu_mul_mv_ext_args args =
+            const uint64_t r0ptg = (uint64_t)nypsg * (uint64_t)nsg;            ds4_gpu_mul_mv_ext_args args =
                 ds4_gpu_make_mv_ext_args(in_dim, out_dim, n_tok, sizeof(float), row_bytes);
 
             id<MTLComputeCommandEncoder> enc = ds4_gpu_compute_encoder(cb);
@@ -48810,7 +48826,8 @@ int ds4_gpu_qwen4_hc_gate_mix_tensor(
         !qwen4_bind_tensor(&b[3], mixed, (uint64_t)n_tokens * n_embd * sizeof(float), "hc mixed")) {
         return 0;
     }
-    const bool pair = n_tokens == 2u && getenv("DS4_QWEN4_NO_HC_PAIR") == NULL;
+    const bool pair = n_tokens == 2u && getenv("DS4_QWEN4_NO_HC_PAIR") == NULL &&
+        !ds4_gpu_verify_single_tree();
     /* Register-prefetched F16 rows (same lane order and rounding, pinned
      * against the plain kernel by tests/test_qwen4_kernels.c); M5 default. */
     const int prefetch_override = ds4_gpu_env_bool("DS4_QWEN4_HC_MIX_PREFETCH");
