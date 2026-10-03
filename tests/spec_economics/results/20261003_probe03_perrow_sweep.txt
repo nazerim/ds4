@@ -1,0 +1,6 @@
+ds4-test: qwen4-verify-identity[adaptive] n=512 max_chunk=3 flips=0 first=-1(abs -1, %4=-1, gap=0.0000) worst_gap=0.0000 at -1
+ds4-test: qwen4-verify-identity[depth2]: flip@gen 208 (abs 251, %4=3): committed 799 (logit 20.840044) vs replay argmax 9167 (logit 20.840090) gap 4.578e-05
+ds4-test: qwen4-verify-identity[depth2] n=512 max_chunk=2 flips=1 first=208(abs 251, %4=3, gap=0.0000) worst_gap=0.0000 at 208
+ds4-test: qwen4-verify-identity[depth3]: flip@gen 208 (abs 251, %4=3): committed 799 (logit 20.840044) vs replay argmax 9167 (logit 20.840090) gap 4.578e-05
+ds4-test: qwen4-verify-identity[depth3] n=512 max_chunk=3 flips=1 first=208(abs 251, %4=3, gap=0.0000) worst_gap=0.0000 at 208
+ds4-test: qwen4-verify-identity TOTAL flips=2 over 3 depth grids

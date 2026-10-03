@@ -7819,43 +7819,70 @@ static void test_qwen4_verify_identity(void) {
     TEST_ASSERT(prompt.len > 0);
     int *toks = malloc(512u * sizeof(int));
     TEST_ASSERT(toks != NULL);
-    int n = 0, chunk = 0;
-    const bool ok_cap = test_mtp_capture_speculative(engine, &prompt, 512, toks, &n, &chunk);
-    TEST_ASSERT(ok_cap && n > 128);
-    if (chunk < 2) {
-        fprintf(stderr, "ds4-test: qwen4-verify-identity: no multi-token spec chunks "
-                        "(engine MTP off? server uses --mtp) - max_chunk=%d\n", chunk);
-        free(toks); ds4_tokens_free(&prompt);
-        return;
-    }
-    ds4_session *session = NULL;
-    TEST_ASSERT(ds4_session_create(&session, engine, prompt.len + n + 16) == 0);
-    char err[160];
-    TEST_ASSERT(ds4_session_sync(session, &prompt, err, sizeof(err)) == 0);
-    int flips = 0, first_flip = -1, worst_at = -1;
-    float first_gap = 0.0f, worst = 0.0f;
-    for (int i = 0; i < n; i++) {
-        ds4_token_score best, cur;
-        TEST_ASSERT(ds4_session_top_logprobs(session, &best, 1) >= 1);
-        TEST_ASSERT(ds4_session_token_logprob(session, toks[i], &cur) == 1);
-        const float gap = best.logit - cur.logit;
-        if (best.id != toks[i]) {
-            if (!flips) { first_flip = i; first_gap = gap; }
-            flips++;
+    /* Sweep the depth grid: the adaptive policy engages deep (T=3) cycles
+     * only on a perfect accept window, and near-tie flips hide or surface
+     * depending on which positions land as verify rows (2026-10-03: the
+     * prompt-3 residual flipped ONLY under forced grids).  A single
+     * adaptive pass was luck-sensitive; DS4_QWEN4_MTP_DEPTH (if the caller
+     * pinned it) is honored for all modes. */
+    static const char *modes[] = {"adaptive", "depth2", "depth3"};
+    static const char *mode_env[] = {"0", "2", "3"};
+    const char *pinned = getenv("DS4_QWEN4_MTP_DEPTH");
+    const bool is_pinned = pinned && pinned[0];
+    int total_flips = 0;
+    for (unsigned mi = 0; mi < sizeof(modes)/sizeof(modes[0]); mi++) {
+        if (is_pinned && mi > 0) break; /* caller pinned one grid */
+        if (is_pinned) modes[0] = "pinned";
+        if (!is_pinned) setenv("DS4_QWEN4_MTP_DEPTH", mode_env[mi], 1);
+        int n = 0, chunk = 0;
+        const bool ok_cap = test_mtp_capture_speculative(engine, &prompt, 512, toks, &n, &chunk);
+        TEST_ASSERT(ok_cap && n > 128);
+        if (chunk < 2) {
+            fprintf(stderr, "ds4-test: qwen4-verify-identity[%s]: no multi-token spec chunks "
+                            "(engine MTP off? server uses --mtp) - max_chunk=%d\n",
+                    modes[mi], chunk);
+            break;
         }
-        if (gap > worst) { worst = gap; worst_at = i; }
-        TEST_ASSERT(ds4_session_eval(session, toks[i], err, sizeof(err)) == 0);
+        ds4_session *session = NULL;
+        TEST_ASSERT(ds4_session_create(&session, engine, prompt.len + n + 16) == 0);
+        char err[160];
+        TEST_ASSERT(ds4_session_sync(session, &prompt, err, sizeof(err)) == 0);
+        int flips = 0, first_flip = -1, worst_at = -1;
+        float first_gap = 0.0f, worst = 0.0f;
+        for (int i = 0; i < n; i++) {
+            ds4_token_score best, cur;
+            TEST_ASSERT(ds4_session_top_logprobs(session, &best, 1) >= 1);
+            TEST_ASSERT(ds4_session_token_logprob(session, toks[i], &cur) == 1);
+            const float gap = best.logit - cur.logit;
+            if (best.id != toks[i]) {
+                if (!flips) {
+                    first_flip = i; first_gap = gap;
+                    fprintf(stderr,
+                            "ds4-test: qwen4-verify-identity[%s]: flip@gen %d (abs %d, %%4=%d): "
+                            "committed %d (logit %.6f) vs replay argmax %d (logit %.6f) gap %.3e\n",
+                            modes[mi], i, prompt.len + i, (prompt.len + i) % 4,
+                            toks[i], cur.logit, best.id, best.logit, gap);
+                }
+                flips++;
+            }
+            if (gap > worst) { worst = gap; worst_at = i; }
+            TEST_ASSERT(ds4_session_eval(session, toks[i], err, sizeof(err)) == 0);
+        }
+        fprintf(stderr,
+                "ds4-test: qwen4-verify-identity[%s] n=%d max_chunk=%d flips=%d "
+                "first=%d(abs %d, %%4=%d, gap=%.4f) worst_gap=%.4f at %d\n",
+                modes[mi], n, chunk, flips, first_flip,
+                first_flip >= 0 ? prompt.len + first_flip : -1,
+                first_flip >= 0 ? (prompt.len + first_flip) % 4 : -1,
+                first_gap, worst, worst_at);
+        total_flips += flips;
+        ds4_session_free(session);
     }
-    fprintf(stderr,
-            "ds4-test: qwen4-verify-identity n=%d max_chunk=%d flips=%d "
-            "first=%d(abs %d, %%4=%d, gap=%.4f) worst_gap=%.4f at %d\n",
-            n, chunk, flips, first_flip,
-            first_flip >= 0 ? prompt.len + first_flip : -1,
-            first_flip >= 0 ? (prompt.len + first_flip) % 4 : -1,
-            first_gap, worst, worst_at);
+    if (!is_pinned) unsetenv("DS4_QWEN4_MTP_DEPTH");
+    fprintf(stderr, "ds4-test: qwen4-verify-identity TOTAL flips=%d over %s\n",
+            total_flips, is_pinned ? "the caller-pinned grid" : "3 depth grids");
     free(toks);
     free(ptext);
-    ds4_session_free(session);
     ds4_tokens_free(&prompt);
 }
 
