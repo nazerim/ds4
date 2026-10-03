@@ -486,3 +486,23 @@ agent (27938/29373/48448/flash_attn.metal:1433); the draft's "no limit check
 anywhere" wording was corrected to "none on the two affected families"
 before posting (upstream legacy paths DO query, ~60 sites). Draft file now
 carries the POSTED record.
+
+## FIFTH WINDOW 2026-10-04 00:45-01:5x: queue item 1 (QSA tile widening) —
+## attribution landed, C3 (query waves) implemented, PROVEN INVARIANT,
+## MEASURED FLAT, reverted; next lever named. Full record:
+## .codebase-memory/QSA-ATTRIBUTION-20261004.md
+Key numbers: ds4 cold prefill 1347-1428 t/s @16k, 1371-1408 @64k (boot
+spread ~6%); stage shares at >=32k ctx: moe ~39% / gdn ~28% / attn ~26% /
+hc ~13%; attn bucket decomposed (model-free benches): attn_mm ~60-75%,
+idx_score_mm ~14-28% (B-linear; 28% at the 64k-block bench shape), select
+~4-8%. The omlx prefill gap is fundamentally MoE+GDN rate, not QSA. C3 was
+the literal #3934 analogue (score-sheet query waves W=512/1024/2048):
+greedy 16k texts byte-identical across all W and the no-wave control
+(per-token independence proof holds empirically), suite + prefill-checkpoints
+green under waves, but TTFT flat-to-noise (1305 control vs 1290-1299 wave)
+=> reverted, tooling kept (prefill_probe.py incl. fixed-nonce text mode =
+the sparse-regime identity oracle for all future prefill work). Named next
+(QSA-ATTRIBUTION §4): C2 score-MM TM widen (~1.5-2% ceiling at 64k, more
+at 160k+), C1 prefilter-for-prefill (small), C4 attn_mm KT (NOT bit-exact
+=> operator golden decision), and the two fronts that actually matter:
+MoE/GDN prefill rate recon.
