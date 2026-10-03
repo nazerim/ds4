@@ -478,3 +478,11 @@ both worlds; production engine restarted on the final binary (umbrella incl.
 HC_PAIR), battery 10/10 byte-identical to the banked prodbatch stream,
 0 WARN. Deep(T=3) cycles also ride the rowe 2-row half (depth-3 rcab grids
 covered at the main gate round).
+### RISK-1 POSTED (operator pre-approved, cites re-verified before filing):
+antirez/ds4 issue #1176 — "Metal: split-K attention reduce and qwen4 indexer
+select dispatched at 1024 threads/threadgroup with no per-pipeline limit
+check". All cites spot-confirmed against origin/main (0aaea5a) by the main
+agent (27938/29373/48448/flash_attn.metal:1433); the draft's "no limit check
+anywhere" wording was corrected to "none on the two affected families"
+before posting (upstream legacy paths DO query, ~60 sites). Draft file now
+carries the POSTED record.

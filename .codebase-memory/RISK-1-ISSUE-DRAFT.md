@@ -7,7 +7,11 @@ which had three cite errors fixed here: reduce pipeline getters are at **:3783/:
 (not :3782/:3829), the packed-reduce limit guard is at **:29467** (not :29594), and the
 "no limit query anywhere" framing corrected to "none on the two affected paths"
 (upstream has ~60 queries in the older dsv4 dense code, first :4964, last :45586).
-**NOT POSTED** — per operator instruction; posting target is `antirez/ds4`.
+**POSTED 2026-10-04 00:4x as antirez/ds4 issue #1176**
+(https://github.com/antirez/ds4/issues/1176); posted title: "Metal: split-K
+attention reduce and qwen4 indexer select dispatched at 1024 threads/
+threadgroup with no per-pipeline limit check" (body above, plus a note that
+the fork ships the guard shape).
 
 ---
 
