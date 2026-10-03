@@ -71,6 +71,14 @@ QWEN_VISION="${QWEN_VISION:-gguf/mmproj-Qwen3.8-Flash-Next-Q8_0.gguf}"
 # short prompts).  Set QWEN_CTX=262144 + QWEN_YARN=0 for native-only.
 QWEN_CTX="${QWEN_CTX:-524288}"
 QWEN_YARN="${QWEN_YARN:-2}"
+# QWEN_EXACT_VERIFY=1 (default since 2026-10-03): SINGLE-TREE spec verify -
+# T=1 matvecs share the row-invariant mv_ext tree with speculative verify,
+# so spec output is bit-identical to serial by construction (grouped MoE
+# exact path too).  Costs ~12% wall vs the drifting default (62.4s vs 55.4s
+# on the acceptance battery) and defines the canonical golden tree
+# (tests/test-vectors/qwen38-flashnext).  QWEN_EXACT_VERIFY=0 restores the
+# historical drifting dispatch for perf baselining only.
+QWEN_EXACT_VERIFY="${QWEN_EXACT_VERIFY:-1}"
 QWEN_TOKENS="${QWEN_TOKENS:-65536}"
 # Batched MTP across concurrent sessions (upstream server flag); 0 = off.
 # Qwen3.8 on Metal needs BOTH --batched-session and --mtp to speculate in
@@ -228,6 +236,10 @@ start_server() {
       CTX="${CTX:-$QWEN_CTX}"
       if [ "$QWEN_YARN" != "0" ] && [ "$CTX" -gt 262144 ]; then
         export DS4_QWEN4_YARN_FACTOR="$QWEN_YARN"
+      fi
+      if [ "$QWEN_EXACT_VERIFY" = "1" ]; then
+        export DS4_QWEN4_VERIFY_SINGLE_TREE=1
+        export DS4_QWEN4_MOE_GROUP_EXACT=1
       fi
       TOKENS="${TOKENS:-$QWEN_TOKENS}"
       PORT="${PORT:-$QWEN_PORT}"

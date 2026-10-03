@@ -335,7 +335,21 @@ ROOT-CAUSE-2):
 - Engine restored production defaults after the measurement cycle
   (flag OFF; PID via status; smoke ok; 0 WARN).
 
-## NEXT queue (ranked) - UPDATED 6th time (item-0 inroading landed)
+### OPERATOR DECISION EXECUTED 22:5x: ST+GROUP is the production default
+Approved "do both" framing -> rolled as: production default = ST+GROUP
+(ds4-server.sh QWEN_EXACT_VERIFY=1; battery 58.4s batched production,
+10/10 byte-identical to single-session ST spec AND ST serial AND the new
+golden); v2 PER_ROW retained as the legacy-stream oracle (plain-mv tree,
+preserves recorded outputs); drift knobs retained as perf baseline only.
+Goldens re-captured under ST (--local-golden-capture; ULP-only logit shifts,
+token order identical, one generation-level near-tie moved: prompt 7 @1555).
+Suite: 26 OK / 0 ERR BOTH default-env and ST-pinned runs; the paired-Q8
+vs-standalone unit test now skips honestly under ST (its invariant is
+defined against the plain tree; ext-tree invariants are rowcount-ab's job).
+Rollback: QWEN_EXACT_VERIFY=0 (one line) + old golden in git history.
+Engine PID 53424 running the new default.
+
+## NEXT queue (ranked) - UPDATED 7th time (production flipped exact)
 
 0'. B2 tail: close the ST-vs-drift 3 ms/cycle (ext kernel x-streaming at
     T=2 - true fused multi-row x staging, the original kernel work). Optional

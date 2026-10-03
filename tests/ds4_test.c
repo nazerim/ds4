@@ -1693,7 +1693,12 @@ static void test_metal_q8_0_decode_pair_exact_case(
         uint32_t seed1) {
     /* Exercise the Q-A/KV contract with unequal, odd output extents and
      * independently page-aligned model ranges. The paired kernel must be
-     * bit-identical to two standalone decode matvec dispatches. */
+     * bit-identical to two standalone decode matvec dispatches.  This
+     * invariant is defined against the PLAIN-mv tree: DS4_QWEN4_VERIFY_
+     * SINGLE_TREE re-routes the standalone n_tok=1 reference to the ext
+     * family by design (2026-10-03), so skip the comparison when it is set
+     * (the host caches the env once, so mid-run unsetting cannot work). */
+    const bool tree_pinned_plain = getenv("DS4_QWEN4_VERIFY_SINGLE_TREE") == NULL;
     const uint32_t in_dim = 4096;
     const uint64_t page = (uint64_t)getpagesize();
     const uint64_t row_bytes = (uint64_t)(in_dim / 32u) * 34u;
@@ -1802,8 +1807,14 @@ static void test_metal_q8_0_decode_pair_exact_case(
                 mismatch0, out0_dim, max_abs0,
                 mismatch1, out1_dim, max_abs1);
     }
-    TEST_ASSERT(mismatch0 == 0);
-    TEST_ASSERT(mismatch1 == 0);
+    if (tree_pinned_plain) {
+        TEST_ASSERT(mismatch0 == 0);
+        TEST_ASSERT(mismatch1 == 0);
+    } else {
+        fprintf(stderr, "ds4-test: paired Q8_0 exactness: SKIPPED "
+                "(single-tree mode re-routes the standalone reference; "
+                "ext-tree invariants are pinned by --qwen4-rowcount-ab)\n");
+    }
 
     free(x_host);
     free(ref0_host);

@@ -1,6 +1,18 @@
 # Qwen4 verify-vs-serial identity violation — found 2026-10-03 (pre-existing)
 
-> **STATUS 19:1x 2026-10-03: BOTH root causes closed. ROOT-CAUSE-1 (matvec
+> **STATUS 22:5x 2026-10-03 (operator-approved flip): DS4_QWEN4_VERIFY_
+> SINGLE_TREE + MOE_GROUP_EXACT are the PRODUCTION DEFAULT (via
+> ds4-server.sh QWEN_EXACT_VERIFY=1; battery 58.4s batched production /
+> 62.4s single-session, 10/10 byte-identical spec==serial==golden in-tree;
+> golden re-captured under ST at tests/test-vectors/qwen38-flashnext/
+> local-golden.vec, pair-vs-standalone unit test skips honestly under the
+> flag). v2 (VERIFY_PER_ROW) remains the legacy-stream oracle: it reproduces
+> the historical plain-mv tree exactly for reconstructing past sessions
+> (differs from ST world on exactly one known near-tie: prompt 7 @char 1555).
+> QWEN_EXACT_VERIFY=0 restores the drifting dispatch for perf baselines.
+> Full suite green BOTH ways: 26 OK default, 26 OK ST-pinned (2 skips).
+>
+> --- Original evening status (kept as history): BOTH root causes closed. ROOT-CAUSE-1 (matvec
 > mv_ext) fixed by the per-row intercepts; ROOT-CAUSE-2 (T=2 PAIR gate/mix
 > kernel + chunk-level attention selection universe) localized with
 > `--qwen4-rowcount-ab` and fixed under the SAME env
