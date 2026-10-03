@@ -282,7 +282,35 @@ ROOT-CAUSE-2):
   skips honest). Binary-artifact hygiene re-checked clean. Engine restored
   production defaults (new binary, flag OFF) - smoke ok, 0 WARN.
 
-## NEXT queue (ranked) - UPDATED 5th time (ROOT-CAUSE-2 CLOSED)
+### ITEM-0 FIRST INROADS same window (20:0x-20:1x, operator continue)
+- B1 experiment (env `DS4_QWEN4_VERIFY_INDEXER_BATCH`, default off,
+  `e02f173`): chunk-wide score/select/expand + per-row decode ONLY.
+  VERDICT: bit-exact (rowcount-ab 110 pairs abs 63..263 both grids,
+  962/962 hashes, maxabs EXACTLY 0.0; identity flips=0 03/06/07; battery
+  10/10 serial-equal 71.5/71.7 s) => the per-row selection universe never
+  binds (kernel-side visible masking suffices); only per-row DECODE key
+  counts matter - and they cost ~0.5 ms/cycle. Harness bug fixed too
+  (rowcount-ab prefix now = prompt ++ stream; capture 512->1024).
+- Grouped MoE revalidated under the exact stack (`MOE_GROUP_EXACT` +
+  batch + v2): battery 10/10 serial-equal, x2 run-identical (66.8/67.0 s),
+  3-grid flips=0. The exact stack now BEATS serial (69.6/73.8) while being
+  bit-identical to it. Deep(T=3) cycles: 37.0 vs drift 28.3.
+- Attribution (DS4_QWEN4_MTP_PROFILE=1): remaining tax vs drift is the
+  per-row matvec weight re-reads, ~4.5-5 ms/cycle (shallow verify 22.5
+  drift vs 27.9 per-row-v2; plain step 20.4-21.0 in all configs) => the
+  B2 milestone is precisely the invariant mv_ext kernel family.
+- Engine restored production defaults after the measurement cycle
+  (flag OFF; PID via status; smoke ok; 0 WARN).
+
+## NEXT queue (ranked) - UPDATED 6th time (item-0 inroading landed)
+
+0'. B2: invariant mv_ext projections (lane->K split reproducing the T=1
+    reduction tree for EVERY row inside one chunked dispatch; the rowcount-ab
+    stage hashes are the oracle). hc pair-kernel invariance is a smaller
+    sibling (0.5 ms). Decode-split ladder inside one dispatch: cheap
+    (0.5 ms), lower priority than the matvec. Target: stack wall from 67
+    toward drift-default 55.4 with identity intact; then the default-flip
+    + golden re-capture decision (1) is actually worth making.
 
 0. Fused ROW-INVARIANT verify windows (the one milestone delivering speed AND
    identity): mv_ext lane->K split reproducing the T=1 tree per row, hc

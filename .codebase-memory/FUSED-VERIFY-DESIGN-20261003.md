@@ -182,7 +182,29 @@ cross-stop ds4-server first).
 - If not: identify which stage trusts the universe (instrument sel_blocks /
   n_sel diffs per row), fix that stage's per-row masking, retest.
 
-### B1 — split only the decode half (host change, small)
+### B1 — RESULT 2026-10-03 (evening, `e02f173`): chunk-wide selection is
+### BIT-EXACT; the decode split geometry is what binds.
+Experiment under PER_ROW (env `DS4_QWEN4_VERIFY_INDEXER_BATCH`, default off):
+verify chunks run score/select/expand ONCE chunk-wide (legacy universe,
+tile_max) and split ONLY attn_decode per row. rowcount-ab 110 pairs abs
+63..263 (entire sparse regime) on both T=2 and T=3 grids: every stage hash
+identical, maxabs EXACTLY 0.0; identity 3-grid flips=0 (03/06/07 + copy
+default); battery x2 run-identical, 10/10 serial-equal, 71.5/71.7 s.
+=> the per-row block universe never binds (the in-kernel visible masking is
+sufficient, as the original code comment suspected); only per-row DECODE
+key counts/splits must change. BUT the prize is small (~0-5%): with the
+indexer already batched, per-row decode costs only ~0.5 ms/cycle. The
+dominant remaining tax is the matvec per-row WEIGHT RE-READS
+(~4.5-5 ms/cycle, shallow verify 22.53 drift vs 27.98 per-row-v2; profiler
+numbers 20:1x) - i.e. the fused window must make the mv_ext projection
+kernels row-INVARIANT (per-row reduction tree == T=1 tree inside one
+chunked dispatch), which is the real B2 kernel work, not the decode ladder.
+Stack bonus: adding `DS4_QWEN4_MOE_GROUP_EXACT=1` (B2, validated tonight
+under per-row: battery 10/10 serial-equal, 3-grid flips=0, x2 run-identical)
+takes the verify stack to 66.8-67.0 s - FASTER than serial (69.6-73.8)
+while bit-identical to it; deep(T=3) cycles 37.0 ms vs 28.3 drift.
+
+### B1 — split only the decode half (host change, small) [historical spec, superseded above]
 `attention_core`: run score/select/expand ONCE at chunk width (all cT rows,
 `tile_max` + vec always passed), keep the 2/1 sub-batch loop ONLY around
 `ds4_gpu_qwen4_attn_decode_tensor`. Saves ~4 of ~10 exact-path dispatches

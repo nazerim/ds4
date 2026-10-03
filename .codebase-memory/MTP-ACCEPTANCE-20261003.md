@@ -50,6 +50,22 @@
   correctness knob (bit-identical to serial end-to-end; matvec+hc+attention
   all per-row under the flag) at serial cost.
 
+## CORRECTNESS-STACK re-measure 20:1x (v2 + batched indexer + grouped MoE)
+
+| stack (all bits-exact vs serial, battery 10/10, 3-grid flips=0) | wall | shallow T=2 verify ms | deep T=3 verify ms |
+|---|---|---|---|
+| drift-default (fastest, NOT exact) | 55.4 | 22.5 | 28.3 |
+| serial reference | 69.6 / 73.8 | - | - |
+| per-row v2 alone | 71.6 / 77.0 | ~28.0 | ~38.4 |
+| v2 + `VERIFY_INDEXER_BATCH=1` | 71.5 / 71.7 | 27.98 | 38.4 |
+| v2 + batch + `MOE_GROUP_EXACT=1` | **66.8 / 67.0** | 27.9 | **37.0** |
+
+The exact stack now BEATS serial by ~4-9% while being bit-identical to it.
+Remaining gap to the drifting default is the per-row matvec weight re-reads
+(~4.5-5 ms/cycle); that is the invariant-mv_ext kernel target (B2), not more
+host plumbing. Evidence: 20261003_pr3_idxbatch_*, 20261003_pr4_group_*.
+Profiled via `DS4_QWEN4_MTP_PROFILE=1` at 2048-cycle marks.
+
 Answers open question #1 of `.codebase-memory/omlx-v070-mtp-row-exact.md`
 (the wide-T lift business case). Overnight window, engine on M5 Max, single
 session (`QWEN_BATCH_SESSION=0`), `DS4_QWEN4_SPEC_TRACE=1`, temperature 0,
