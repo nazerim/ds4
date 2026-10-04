@@ -1,0 +1,15 @@
+watcher start 2026-10-04 11:01:06
+target=32768 prompt_tokens=25699 gen=64 wall=20.57s e2e_tok_s=1252.6 (prefill share ~19.0s)
+  log decode @ctx~25699: chunk=43.74 t/s avg=36.79 t/s
+target=65536 prompt_tokens=51249 gen=64 wall=40.08s e2e_tok_s=1280.3 (prefill share ~38.0s)
+  log decode @ctx~51249: chunk=41.22 t/s avg=42.68 t/s
+target=131072 prompt_tokens=102349 gen=64 wall=81.88s e2e_tok_s=1250.8 (prefill share ~75.8s)
+  log decode @ctx~102349: chunk=40.74 t/s avg=41.11 t/s
+target=163840 prompt_tokens=127899 gen=64 wall=104.60s e2e_tok_s=1223.3 (prefill share ~94.7s)
+  log decode @ctx~127899: chunk=40.94 t/s avg=41.47 t/s
+target=262144 prompt_tokens=204622 gen=64 wall=171.64s e2e_tok_s=1192.5 (prefill share ~151.6s)
+  log decode @ctx~204622: chunk=42.27 t/s avg=41.19 t/s
+target=327680 prompt_tokens=255722 gen=64 wall=219.07s e2e_tok_s=1167.6 (prefill share ~189.4s)
+  log decode @ctx~255722: chunk=35.70 t/s avg=33.35 t/s
+target=409600 prompt_tokens=319597 gen=64 wall=283.08s e2e_tok_s=1129.2 (prefill share ~236.7s)
+  log decode @ctx~319597: chunk=36.82 t/s avg=39.33 t/s

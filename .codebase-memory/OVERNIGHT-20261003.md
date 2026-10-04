@@ -524,3 +524,24 @@ table numbers are traced; production runs untraced).
 ## constructible overnight (no resume/evict traffic at 02:0x; 178 field
 ## .kv files wait for the next real-session day; logs clean of both
 ## event types). Left in queue.
+
+## DAYTIME FOLLOW-UP 2026-10-04 11:45-12:30 (operator report, live window):
+## deep-context decode regression FOUND, ROOT-CAUSED, FIXED.
+Operator: "prior to all this work we hit 50-60 t/s at high context to
+300-400k". Confirmed real: exact stack solo = 41 @100k/37 @320k vs drift
+57.6/54.3 (same probes) — cliff at the sparse switch (~2k ctx), flat beyond.
+MTP_PROFILE isolated it: verify 38.6 vs 24.8 ms at 80k (cycle TIME, not
+acceptance). Cause: ds4.c:58649 gave the split ladder only to decode row 0
+(`r == 0u ? attn_part : NULL`) — rows 1+ serially gathered ~2052 scattered
+keys per layer (+14 ms/cycle at depth; invisible to the 400-token battery).
+Fix: per-row ladder region (the attn_part alloc already has 3 row regions;
+v2 world proved per-row ladders serial-identical; row 0 bytes unchanged;
+r>=3 keeps the old NULL fallback with one-time stderr). Independent review:
+all 5 invariants confirmed, no blockers. Gates: rcab 150 pairs maxabs=0.0,
+identity flips=0 x6, suite 26 OK both worlds, battery + prodbatch texts
+byte-identical to banks. After: 61.8 @102k / 55.5 @320k — baseline restored
+and beaten, exact mode keeps bit-identity. Full record:
+.codebase-memory/DEEP-CTX-DECODE-20261004.md.
+NEW STANDING RULE for prefill/sparse-adjacent changes: the battery cannot
+validate deep decode — run ctx_curve.py probes (>=100k) on anything
+touching verify geometry.

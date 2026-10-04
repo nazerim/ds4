@@ -1,0 +1,673 @@
+ds4: Qwen3.8 YaRN factor 2 over 262144 native tokens (pairs 14..22 blended, mscale 1.0693)
+ds4: Qwen BF16 n-grams: 95.37 GiB, disk reads only
+ds4: Metal device Apple M5 Max, 128.00 GiB RAM
+ds4: Metal 4 tensor API enabled for Tensor kernels
+ds4: drift-patch flags hc_stable=on norm_unify=on kv_raw_f32=off rope_exp2_log2=off math_safe=off tensor_matmul=on
+ds4: Metal model views created in 1.633 ms, residency requested in 352.478 ms, warmup 3.645 ms (mapped 71400.44 MiB from offset 10.51 MiB)
+ds4: Metal mapped mmaped model as 1 overlapping shared buffers
+ds4: Metal model views created in 0.044 ms, residency requested in 338.063 ms, warmup 1.152 ms (mapped 588.12 MiB from offset 0.02 MiB)
+ds4: Metal mapped mmaped model as 2 overlapping shared buffers
+ds4: metal backend initialized for graph diagnostics
+ds4: memory: KV 16.66 GiB (raw 13.01 + compressed 3.66) + buffers 15.24 GiB + resident model 69.73 GiB = 101.63 GiB planned
+ds4: memory detail: ctx=524288 prefill_cap=8192 raw_kv_rows=524288 compressed_kv_rows=131073 backend=metal
+1004 11:42:29 ds4-server: context buffers 32672.72 MiB (ctx=524288, backend=metal, prefill_chunk=8192, raw_kv_rows=524288, compressed_kv_rows=131073)
+1004 11:42:30 ds4-server: KV disk cache /Volumes/FireCuda520/ds4-kv-qwen (budget=524288 MiB, cross-quant=accept, min=512, cold_max=30000, continued=10000, trim=32, align=2048, hit_half_life=21600s)
+1004 11:42:30 ds4-server: KV retention anchor_step=8192 continued_step=8192 (doubles above 49152 tokens) prefill_chunk=4096 small_dense=49152 tail=2 mid_spacing=131072 min_anchors=4 max_conversations=0 model_fp=9911305607209564945
+1004 11:42:30 ds4-server: tracing session to ./log/ds4-qwen.trace
+1004 11:42:30 ds4-server: listening on http://127.0.0.1:8002
+1004 11:42:32 ds4-server: completion ctx=0..59:59 prompt start
+1004 11:42:32 ds4-server: completion ctx=0..59:59 prefill chunk 59/59 (100.0%) chunk=0.00 t/s avg=131.39 t/s 0.449s
+1004 11:42:32 ds4-server: completion ctx=0..59:59 prompt done 0.449s
+ds4: spec pos 59 token 1596 plain
+1004 11:42:32 ds4-server: completion ctx=59..60:1 gen=1 THINKING decoding chunk=23.91 t/s avg=23.91 t/s 0.042s
+1004 11:42:32 ds4-server: completion ctx=0..59:59 gen=1 THINKING finish=length 0.491s
+1004 11:42:32 ds4-server: live kv cache miss live=60 prompt=102349 common=51 vision=match reason=token-mismatch
+1004 11:42:32 ds4-server: completion ctx=0..102349:102349 prompt start
+1004 11:42:37 ds4-server: completion ctx=0..102349:102349 prefill chunk 8192/102349 (8.0%) chunk=0.00 t/s avg=1688.49 t/s 4.852s
+1004 11:42:37 ds4-server: kv cache stored tokens=8192 trimmed=0 reason=continued key=token-text sha=a0d948b2 size=359.73 MiB save=105.5 ms
+1004 11:42:42 ds4-server: completion ctx=0..102349:102349 prefill chunk 16384/102349 (16.0%) chunk=1587.86 t/s avg=1636.63 t/s 10.011s
+1004 11:42:43 ds4-server: kv cache stored tokens=16384 trimmed=0 reason=continued key=token-text sha=eff77852 delta=8192..16384 size=359.82 MiB save=90.0 ms
+1004 11:42:48 ds4-server: completion ctx=0..102349:102349 prefill chunk 24576/102349 (24.0%) chunk=1579.15 t/s avg=1617.01 t/s 15.198s
+1004 11:42:48 ds4-server: kv cache stored tokens=24576 trimmed=0 reason=continued key=token-text sha=29314694 delta=16384..24576 size=359.90 MiB save=86.6 ms
+1004 11:42:53 ds4-server: completion ctx=0..102349:102349 prefill chunk 32768/102349 (32.0%) chunk=1544.59 t/s avg=1598.28 t/s 20.502s
+1004 11:42:53 ds4-server: kv cache stored tokens=32768 trimmed=0 reason=continued key=token-text sha=f48e3242 delta=24576..32768 size=359.99 MiB save=87.2 ms
+1004 11:42:58 ds4-server: completion ctx=0..102349:102349 prefill chunk 40960/102349 (40.0%) chunk=1520.24 t/s avg=1582.03 t/s 25.891s
+1004 11:42:58 ds4-server: kv cache stored tokens=40960 trimmed=0 reason=continued key=token-text sha=212423c2 delta=32768..40960 size=360.08 MiB save=91.0 ms
+1004 11:43:04 ds4-server: completion ctx=0..102349:102349 prefill chunk 49152/102349 (48.0%) chunk=1505.56 t/s avg=1568.75 t/s 31.332s
+1004 11:43:04 ds4-server: kv cache stored tokens=49152 trimmed=0 reason=continued key=token-text sha=f3e3dfae delta=40960..49152 size=360.16 MiB save=90.6 ms
+1004 11:43:09 ds4-server: completion ctx=0..102349:102349 prefill chunk 57344/102349 (56.0%) chunk=1490.93 t/s avg=1557.14 t/s 36.826s
+1004 11:43:15 ds4-server: completion ctx=0..102349:102349 prefill chunk 65536/102349 (64.0%) chunk=1504.23 t/s avg=1550.33 t/s 42.272s
+1004 11:43:15 ds4-server: kv cache stored tokens=65536 trimmed=0 reason=continued key=token-text sha=10dca2b5 delta=49152..65536 size=606.46 MiB save=154.3 ms
+1004 11:43:20 ds4-server: completion ctx=0..102349:102349 prefill chunk 73728/102349 (72.0%) chunk=1431.85 t/s avg=1536.20 t/s 47.994s
+1004 11:43:26 ds4-server: completion ctx=0..102349:102349 prefill chunk 81920/102349 (80.0%) chunk=1478.93 t/s avg=1530.28 t/s 53.533s
+1004 11:43:26 ds4-server: kv cache stored tokens=81920 trimmed=0 reason=continued key=token-text sha=d16d99db delta=65536..81920 size=606.63 MiB save=153.9 ms
+1004 11:43:32 ds4-server: completion ctx=0..102349:102349 prefill chunk 90112/102349 (88.0%) chunk=1418.63 t/s avg=1519.41 t/s 59.307s
+1004 11:43:37 ds4-server: completion ctx=0..102349:102349 prefill chunk 98304/102349 (96.0%) chunk=1459.77 t/s avg=1514.25 t/s 64.919s
+1004 11:43:38 ds4-server: kv cache stored tokens=98304 trimmed=0 reason=continued key=token-text sha=ec3212c2 delta=81920..98304 size=606.81 MiB save=149.9 ms
+1004 11:43:41 ds4-server: completion ctx=0..102349:102349 prefill chunk 102349/102349 (100.0%) chunk=1157.84 t/s avg=1496.05 t/s 68.413s
+1004 11:43:41 ds4-server: completion ctx=0..102349:102349 prompt done 68.413s
+ds4: spec pos 102349 token 1596 plain
+ds4: spec pos 102350 token 1144 draft 4087 accept
+ds4: spec pos 102352 token 1156 draft 579 accept
+ds4: spec pos 102354 token 1622 draft 13 accept
+ds4: spec pos 102356 token 2570 draft 2640 reject
+ds4: spec pos 102357 token 25 draft 10232 accept
+ds4: spec pos 102359 token 9301 draft 59326 reject
+ds4: spec pos 102360 token 12 draft 59326 reject
+ds4: spec pos 102361 token 620 draft 60 reject
+ds4: spec pos 102362 token 16 draft 22 accept
+ds4: spec pos 102364 token 24 draft 16 accept
+ds4: spec pos 102366 token 15 draft 16 reject
+ds4: spec pos 102367 token 23 draft 20 accept
+ds4: spec pos 102369 token 18 draft 20 accept
+ds4: spec pos 102371 token 17 draft 60 accept
+ds4: spec pos 102373 token 21134 draft 9522 reject
+ds4: spec pos 102374 token 25899 draft 13 accept
+ds4: spec pos 102376 token 198 draft 58 reject
+ds4: spec pos 102377 token 18718 draft 1076 reject
+ds4: spec pos 102378 token 48736 draft 2423 reject
+ds4: spec pos 102379 token 6310 draft 2423 reject
+ds4: spec pos 102380 token 23752 draft 2423 reject
+ds4: spec pos 102381 token 19874 draft 19874 reject
+ds4: spec pos 102382 token 4687 draft 2423 reject
+ds4: spec pos 102383 token 58228 draft 75530 reject
+ds4: spec pos 102384 token 7892 draft 2423 reject
+ds4: spec pos 102385 token 8516 draft 2423 reject
+ds4: spec pos 102386 token 10498 draft 20564 reject
+ds4: spec pos 102387 token 7302 draft 10498 reject
+ds4: spec pos 102388 token 43611 draft 7892 reject
+ds4: spec pos 102389 token 23177 draft 23177 reject
+ds4: spec pos 102390 token 4649 draft 22561 accept
+ds4: spec pos 102392 token 35603 draft 2423 reject
+ds4: spec pos 102393 token 10810 draft 10810 reject
+ds4: spec pos 102394 token 17471 draft 75530 accept
+ds4: spec pos 102396 token 11173 draft 1599 accept
+ds4: spec pos 102398 token 2942 draft 13 accept
+1004 11:43:42 ds4-server: completion ctx=102349..102399:50 gen=50 THINKING decoding chunk=49.85 t/s avg=49.85 t/s 1.003s
+ds4: spec pos 102400 token 14235 draft 4222 reject
+ds4: spec pos 102401 token 22846 draft 6970 reject
+ds4: spec pos 102402 token 3274 draft 30 accept
+ds4: spec pos 102404 token 2302 draft 4222 reject
+ds4: spec pos 102405 token 1910 draft 4087 reject
+ds4: spec pos 102406 token 21134 draft 25899 accept
+ds4: spec pos 102408 token 13 draft 10380 accept
+ds4: spec pos 102410 token 781 draft 1318 reject
+ds4: spec pos 102411 token 1660 draft 264 accept
+1004 11:43:42 ds4-server: completion ctx=102399..102413:14 gen=64 THINKING decoding chunk=59.51 t/s avg=51.69 t/s 1.238s
+1004 11:43:42 ds4-server: completion ctx=0..102349:102349 gen=64 THINKING finish=length 69.651s
+1004 11:43:43 ds4-server: live kv cache miss live=102413 prompt=204622 common=62 vision=match reason=token-mismatch
+1004 11:43:43 ds4-server: kv cache stored tokens=102413 trimmed=0 reason=evict key=token-text sha=57a67349 delta=98304..102413 size=248.33 MiB save=70.9 ms
+1004 11:43:44 ds4-server: completion ctx=0..204622:204622 prompt start
+1004 11:43:49 ds4-server: completion ctx=0..204622:204622 prefill chunk 8192/204622 (4.0%) chunk=0.00 t/s avg=1588.59 t/s 5.157s
+1004 11:43:49 ds4-server: kv cache stored tokens=8192 trimmed=0 reason=continued key=token-text sha=4948d426 size=359.73 MiB save=92.0 ms
+1004 11:43:54 ds4-server: completion ctx=0..204622:204622 prefill chunk 16384/204622 (8.0%) chunk=1438.20 t/s avg=1509.66 t/s 10.853s
+1004 11:43:55 ds4-server: kv cache stored tokens=16384 trimmed=0 reason=continued key=token-text sha=dfc9abf5 delta=8192..16384 size=359.82 MiB save=90.6 ms
+1004 11:44:00 ds4-server: completion ctx=0..204622:204622 prefill chunk 24576/204622 (12.0%) chunk=1427.01 t/s avg=1481.06 t/s 16.593s
+1004 11:44:00 ds4-server: kv cache stored tokens=24576 trimmed=0 reason=continued key=token-text sha=c6b393fc delta=16384..24576 size=359.90 MiB save=91.9 ms
+1004 11:44:06 ds4-server: completion ctx=0..204622:204622 prefill chunk 32768/204622 (16.0%) chunk=1430.99 t/s avg=1468.22 t/s 22.318s
+1004 11:44:06 ds4-server: kv cache stored tokens=32768 trimmed=0 reason=continued key=token-text sha=aa4f6a20 delta=24576..32768 size=359.99 MiB save=91.8 ms
+1004 11:44:12 ds4-server: completion ctx=0..204622:204622 prefill chunk 40960/204622 (20.0%) chunk=1431.86 t/s avg=1460.80 t/s 28.039s
+1004 11:44:12 ds4-server: kv cache stored tokens=40960 trimmed=0 reason=continued key=token-text sha=febe4022 delta=32768..40960 size=360.08 MiB save=97.2 ms
+1004 11:44:17 ds4-server: completion ctx=0..204622:204622 prefill chunk 49152/204622 (24.0%) chunk=1429.33 t/s avg=1455.46 t/s 33.771s
+1004 11:44:18 ds4-server: kv cache stored tokens=49152 trimmed=0 reason=continued key=token-text sha=fce2d611 delta=40960..49152 size=360.16 MiB save=91.1 ms
+1004 11:44:23 ds4-server: completion ctx=0..204622:204622 prefill chunk 57344/204622 (28.0%) chunk=1430.33 t/s avg=1451.82 t/s 39.498s
+1004 11:44:29 ds4-server: completion ctx=0..204622:204622 prefill chunk 65536/204622 (32.0%) chunk=1426.90 t/s avg=1448.65 t/s 45.239s
+1004 11:44:29 ds4-server: kv cache stored tokens=65536 trimmed=0 reason=continued key=token-text sha=8d2e7d65 delta=49152..65536 size=606.46 MiB save=149.5 ms
+1004 11:44:35 ds4-server: completion ctx=0..204622:204622 prefill chunk 73728/204622 (36.0%) chunk=1395.91 t/s avg=1442.60 t/s 51.108s
+1004 11:44:40 ds4-server: completion ctx=0..204622:204622 prefill chunk 81920/204622 (40.0%) chunk=1432.80 t/s avg=1441.61 t/s 56.825s
+1004 11:44:41 ds4-server: kv cache stored tokens=81920 trimmed=0 reason=continued key=token-text sha=d79c86e8 delta=65536..81920 size=606.63 MiB save=154.0 ms
+1004 11:44:46 ds4-server: completion ctx=0..204622:204622 prefill chunk 90112/204622 (44.0%) chunk=1382.98 t/s avg=1436.08 t/s 62.749s
+1004 11:44:52 ds4-server: completion ctx=0..204622:204622 prefill chunk 98304/204622 (48.0%) chunk=1407.05 t/s avg=1433.61 t/s 68.571s
+1004 11:44:52 ds4-server: kv cache stored tokens=98304 trimmed=0 reason=continued key=token-text sha=6a28a406 delta=81920..98304 size=606.81 MiB save=154.7 ms
+1004 11:44:58 ds4-server: completion ctx=0..204622:204622 prefill chunk 106496/204622 (52.0%) chunk=1345.77 t/s avg=1426.45 t/s 74.658s
+1004 11:45:04 ds4-server: completion ctx=0..204622:204622 prefill chunk 114688/204622 (56.0%) chunk=1381.94 t/s avg=1423.18 t/s 80.586s
+1004 11:45:04 ds4-server: kv cache stored tokens=114688 trimmed=0 reason=continued key=token-text sha=0e478a5f delta=98304..114688 size=606.98 MiB save=153.4 ms
+1004 11:45:10 ds4-server: completion ctx=0..204622:204622 prefill chunk 122880/204622 (60.1%) chunk=1338.10 t/s avg=1417.17 t/s 86.708s
+1004 11:45:16 ds4-server: completion ctx=0..204622:204622 prefill chunk 131072/204622 (64.1%) chunk=1403.58 t/s avg=1416.31 t/s 92.545s
+1004 11:45:16 ds4-server: kv cache stored tokens=131072 trimmed=0 reason=continued key=token-text sha=e7bbb992 delta=114688..131072 size=607.15 MiB save=156.1 ms
+1004 11:45:22 ds4-server: completion ctx=0..204622:204622 prefill chunk 139264/204622 (68.1%) chunk=1335.78 t/s avg=1411.31 t/s 98.677s
+1004 11:45:28 ds4-server: completion ctx=0..204622:204622 prefill chunk 147456/204622 (72.1%) chunk=1383.94 t/s avg=1409.76 t/s 104.597s
+1004 11:45:28 ds4-server: kv cache stored tokens=147456 trimmed=0 reason=continued key=token-text sha=b7df4284 delta=131072..147456 size=607.33 MiB save=153.3 ms
+1004 11:45:35 ds4-server: completion ctx=0..204622:204622 prefill chunk 155648/204622 (76.1%) chunk=1304.76 t/s avg=1403.81 t/s 110.875s
+1004 11:45:41 ds4-server: completion ctx=0..204622:204622 prefill chunk 163840/204622 (80.1%) chunk=1367.26 t/s avg=1401.94 t/s 116.867s
+1004 11:45:41 ds4-server: kv cache stored tokens=163840 trimmed=0 reason=continued key=token-text sha=deb6a475 delta=147456..163840 size=607.50 MiB save=158.3 ms
+1004 11:45:47 ds4-server: completion ctx=0..204622:204622 prefill chunk 172032/204622 (84.1%) chunk=1315.74 t/s avg=1397.58 t/s 123.093s
+1004 11:45:53 ds4-server: completion ctx=0..204622:204622 prefill chunk 180224/204622 (88.1%) chunk=1353.76 t/s avg=1395.53 t/s 129.144s
+1004 11:45:53 ds4-server: kv cache stored tokens=180224 trimmed=0 reason=continued key=token-text sha=55882afd delta=163840..180224 size=607.67 MiB save=160.7 ms
+1004 11:45:59 ds4-server: completion ctx=0..204622:204622 prefill chunk 188416/204622 (92.1%) chunk=1298.86 t/s avg=1391.02 t/s 135.451s
+1004 11:46:05 ds4-server: completion ctx=0..204622:204622 prefill chunk 196608/204622 (96.1%) chunk=1341.43 t/s avg=1388.88 t/s 141.558s
+1004 11:46:05 ds4-server: kv cache stored tokens=196608 trimmed=0 reason=continued key=token-text sha=6ad20937 delta=180224..196608 size=607.85 MiB save=155.6 ms
+1004 11:46:05 ds4-server: kv cache stats: stores=25 reused=0 chained=23 (10.87 GiB, avg 0.473 GiB) full=2 (0.70 GiB, avg 0.351 GiB) full/chained=0.7x
+1004 11:46:12 ds4-server: completion ctx=0..204622:204622 prefill chunk 204622/204622 (100.0%) chunk=1149.51 t/s avg=1377.65 t/s 148.530s
+1004 11:46:12 ds4-server: completion ctx=0..204622:204622 prompt done 148.530s
+ds4: spec pos 204622 token 1596 plain
+ds4: spec pos 204623 token 1144 draft 4087 accept
+ds4: spec pos 204625 token 1156 draft 579 accept
+ds4: spec pos 204627 token 1622 draft 13 accept
+ds4: spec pos 204629 token 2570 draft 2640 reject
+ds4: spec pos 204630 token 25 draft 10232 accept
+ds4: spec pos 204632 token 9301 draft 12 accept
+ds4: spec pos 204634 token 620 draft 16 accept
+ds4: spec pos 204636 token 22 draft 24 accept
+ds4: spec pos 204638 token 16 draft 15 accept
+ds4: spec pos 204640 token 23 draft 20 accept
+ds4: spec pos 204642 token 19 draft 17 accept
+ds4: spec pos 204644 token 18 draft 60 accept
+ds4: spec pos 204646 token 21134 draft 25899 accept
+ds4: spec pos 204648 token 13 draft 198 accept +reject2
+ds4: spec pos 204650 token 18718 draft 48736 accept +accept2
+ds4: spec pos 204653 token 23752 draft 2423 reject +reject2
+ds4: spec pos 204654 token 19874 draft 4687 accept +accept2
+ds4: spec pos 204657 token 7892 draft 8516 accept +reject2
+ds4: spec pos 204659 token 10498 draft 7302 accept +reject2
+ds4: spec pos 204661 token 43611 draft 23177 accept
+ds4: spec pos 204663 token 4649 draft 22561 accept
+ds4: spec pos 204665 token 35603 draft 10810 accept
+ds4: spec pos 204667 token 17471 draft 75530 accept
+ds4: spec pos 204669 token 11173 draft 1599 accept
+ds4: spec pos 204671 token 2942 draft 13 accept
+1004 11:46:13 ds4-server: completion ctx=204622..204672:50 gen=50 THINKING decoding chunk=60.77 t/s avg=60.77 t/s 0.823s
+ds4: spec pos 204673 token 14235 draft 4087 reject
+ds4: spec pos 204674 token 22846 draft 3274 accept
+ds4: spec pos 204676 token 30 draft 2302 reject
+ds4: spec pos 204677 token 1049 draft 579 reject
+ds4: spec pos 204678 token 4816 draft 1040 reject
+ds4: spec pos 204679 token 6970 draft 781 accept
+ds4: spec pos 204681 token 1318 draft 4087 accept
+ds4: spec pos 204683 token 25899 draft 30 accept
+ds4: spec pos 204685 token 2532 plain
+1004 11:46:13 ds4-server: completion ctx=204672..204686:14 gen=64 THINKING decoding chunk=57.93 t/s avg=60.12 t/s 1.064s
+1004 11:46:13 ds4-server: completion ctx=0..204622:204622 gen=64 THINKING finish=length 149.595s
+1004 11:46:29 ds4-server: live kv cache miss live=204686 prompt=80075 common=52 vision=match reason=token-mismatch
+1004 11:46:29 ds4-server: kv cache stored tokens=204686 trimmed=0 reason=evict key=token-text sha=9dfa387f delta=196608..204686 size=378.59 MiB save=119.1 ms
+1004 11:46:30 ds4-server: completion ctx=0..80075:80075 prompt start
+1004 11:46:35 ds4-server: completion ctx=0..80075:80075 prefill chunk 8192/80075 (10.2%) chunk=0.00 t/s avg=1524.56 t/s 5.373s
+1004 11:46:35 ds4-server: kv cache stored tokens=8192 trimmed=0 reason=continued key=token-text sha=48633693 size=359.73 MiB save=92.6 ms
+1004 11:46:41 ds4-server: completion ctx=0..80075:80075 prefill chunk 16384/80075 (20.5%) chunk=1445.32 t/s avg=1483.89 t/s 11.041s
+1004 11:46:41 ds4-server: kv cache stored tokens=16384 trimmed=0 reason=continued key=token-text sha=0aa6fa48 delta=8192..16384 size=359.82 MiB save=92.5 ms
+1004 11:46:46 ds4-server: completion ctx=0..80075:80075 prefill chunk 24576/80075 (30.7%) chunk=1437.67 t/s avg=1468.15 t/s 16.739s
+1004 11:46:46 ds4-server: kv cache stored tokens=24576 trimmed=0 reason=continued key=token-text sha=12dece15 delta=16384..24576 size=359.90 MiB save=92.4 ms
+1004 11:46:52 ds4-server: completion ctx=0..80075:80075 prefill chunk 32768/80075 (40.9%) chunk=1427.16 t/s avg=1457.69 t/s 22.479s
+1004 11:46:52 ds4-server: kv cache stored tokens=32768 trimmed=0 reason=continued key=token-text sha=f9b5e21d delta=24576..32768 size=359.99 MiB save=91.8 ms
+1004 11:46:58 ds4-server: completion ctx=0..80075:80075 prefill chunk 40960/80075 (51.2%) chunk=1429.59 t/s avg=1451.98 t/s 28.210s
+1004 11:46:58 ds4-server: kv cache stored tokens=40960 trimmed=0 reason=continued key=token-text sha=8b9b183e delta=32768..40960 size=360.08 MiB save=93.2 ms
+1004 11:47:04 ds4-server: completion ctx=0..80075:80075 prefill chunk 49152/80075 (61.4%) chunk=1417.21 t/s avg=1446.06 t/s 33.990s
+1004 11:47:04 ds4-server: kv cache stored tokens=49152 trimmed=0 reason=continued key=token-text sha=7a67d2e0 delta=40960..49152 size=360.16 MiB save=92.1 ms
+1004 11:47:09 ds4-server: completion ctx=0..80075:80075 prefill chunk 57344/80075 (71.6%) chunk=1382.01 t/s avg=1436.55 t/s 39.918s
+1004 11:47:15 ds4-server: completion ctx=0..80075:80075 prefill chunk 65536/80075 (81.8%) chunk=1429.16 t/s avg=1435.62 t/s 45.650s
+1004 11:47:15 ds4-server: kv cache stored tokens=65536 trimmed=0 reason=continued key=token-text sha=28281508 delta=49152..65536 size=606.46 MiB save=153.9 ms
+1004 11:47:21 ds4-server: completion ctx=0..80075:80075 prefill chunk 73728/80075 (92.1%) chunk=1396.59 t/s avg=1431.18 t/s 51.516s
+1004 11:47:26 ds4-server: completion ctx=0..80075:80075 prefill chunk 80075/80075 (100.0%) chunk=1237.46 t/s avg=1413.64 t/s 56.645s
+1004 11:47:26 ds4-server: completion ctx=0..80075:80075 prompt done 56.645s
+ds4: spec pos 80075 token 1596 plain
+ds4: spec pos 80076 token 1144 draft 4087 accept
+ds4: spec pos 80078 token 1156 draft 579 accept
+ds4: spec pos 80080 token 1622 draft 13 accept
+ds4: spec pos 80082 token 2570 draft 2640 reject
+ds4: spec pos 80083 token 25 draft 10232 accept
+ds4: spec pos 80085 token 7912 draft 562 reject
+ds4: spec pos 80086 token 32 draft 12 reject
+ds4: spec pos 80087 token 18081 draft 2017 accept
+ds4: spec pos 80089 token 60 draft 21134 accept
+ds4: spec pos 80091 token 25899 draft 13 reject
+ds4: spec pos 80092 token 1149 draft 1179 reject
+ds4: spec pos 80093 token 4844 draft 6552 accept
+ds4: spec pos 80095 token 11173 draft 1414 accept
+ds4: spec pos 80097 token 25 draft 328 accept
+ds4: spec pos 80099 token 18718 draft 2981 reject
+ds4: spec pos 80100 token 48736 draft 2423 reject
+ds4: spec pos 80101 token 6310 draft 20564 reject
+ds4: spec pos 80102 token 23752 draft 20564 reject
+ds4: spec pos 80103 token 19874 draft 19874 reject
+ds4: spec pos 80104 token 4687 draft 20564 reject
+ds4: spec pos 80105 token 58228 draft 20564 reject
+ds4: spec pos 80106 token 7892 draft 8516 accept
+ds4: spec pos 80108 token 10498 draft 8516 reject
+ds4: spec pos 80109 token 7302 draft 43611 accept
+ds4: spec pos 80111 token 23177 draft 23177 reject
+ds4: spec pos 80112 token 4649 draft 22561 accept
+ds4: spec pos 80114 token 35603 draft 75530 reject
+ds4: spec pos 80115 token 10810 draft 10810 reject
+ds4: spec pos 80116 token 17471 draft 75530 accept
+ds4: spec pos 80118 token 11173 draft 13 reject
+ds4: spec pos 80119 token 1599 draft 2942 accept
+ds4: spec pos 80121 token 13 draft 14235 accept
+ds4: spec pos 80123 token 22846 draft 6970 reject
+ds4: spec pos 80124 token 3274 draft 30 accept
+1004 11:47:27 ds4-server: completion ctx=80075..80125:50 gen=50 THINKING decoding chunk=51.24 t/s avg=51.24 t/s 0.976s
+ds4: spec pos 80126 token 1049 draft 579 reject
+ds4: spec pos 80127 token 2640 draft 498 reject
+ds4: spec pos 80128 token 21134 draft 25899 accept
+ds4: spec pos 80130 token 13 draft 10380 accept
+ds4: spec pos 80132 token 781 draft 1318 reject
+ds4: spec pos 80133 token 1660 draft 874 reject
+ds4: spec pos 80134 token 9522 draft 4087 accept
+ds4: spec pos 80136 token 30 draft 16018 reject
+ds4: spec pos 80137 token 2532 draft 369 accept
+ds4: spec pos 80139 token 874 draft 11135 accept
+ds4: spec pos 80141 token 3296 draft 3525 reject
+ds4: spec pos 80142 token 13 draft 16018 accept
+ds4: spec pos 80144 token 381 draft 264 accept
+ds4: spec pos 80146 token 9640 draft 24277 accept
+ds4: spec pos 80148 token 3336 draft 40012 accept
+ds4: spec pos 80150 token 30 draft 14235 reject
+ds4: spec pos 80151 token 10232 draft 7912 accept
+ds4: spec pos 80153 token 32 draft 18081 accept
+ds4: spec pos 80155 token 2017 draft 18597 accept
+ds4: spec pos 80157 token 6970 draft 1228 reject
+ds4: spec pos 80158 token 4619 draft 30 reject
+ds4: spec pos 80159 token 13 draft 14235 accept
+ds4: spec pos 80161 token 5707 draft 25899 accept
+ds4: spec pos 80163 token 13 draft 14235 accept
+ds4: spec pos 80165 token 6970 draft 10229 accept
+ds4: spec pos 80167 token 11173 draft 10885 reject
+ds4: spec pos 80168 token 4105 draft 30 accept
+ds4: spec pos 80170 token 16018 draft 381 accept
+ds4: spec pos 80172 token 9859 draft 310 accept
+ds4: spec pos 80174 token 4087 draft 30 reject
+1004 11:47:28 ds4-server: completion ctx=80125..80175:50 gen=100 THINKING decoding chunk=61.17 t/s avg=55.77 t/s 1.793s
+ds4: spec pos 80175 token 25899 draft 694 reject
+ds4: spec pos 80176 token 11 draft 694 accept
+ds4: spec pos 80178 token 874 draft 3296 accept
+ds4: spec pos 80180 token 13 draft 10380 reject
+ds4: spec pos 80181 token 1165 draft 1144 accept
+ds4: spec pos 80183 token 25705 draft 13 reject
+ds4: spec pos 80184 token 25 draft 4222 accept
+ds4: spec pos 80186 token 2468 draft 2414 reject
+ds4: spec pos 80187 token 61446 draft 4087 reject
+ds4: spec pos 80188 token 11782 draft 6970 reject
+ds4: spec pos 80189 token 30 draft 14235 reject
+ds4: spec pos 80190 token 561 draft 11173 reject
+ds4: spec pos 80191 token 2144 draft 369 accept
+ds4: spec pos 80193 token 1066 draft 11173 accept
+ds4: spec pos 80195 token 1103 draft 314 accept
+ds4: spec pos 80197 token 16519 draft 13505 reject
+ds4: spec pos 80198 token 3665 draft 13 accept
+ds4: spec pos 80200 token 10380 draft 4087 accept
+ds4: spec pos 80202 token 25 draft 328 accept
+ds4: spec pos 80204 token 2665 draft 21716 reject
+ds4: spec pos 80205 token 3296 draft 26 reject
+ds4: spec pos 80206 token 3766 draft 26 reject
+ds4: spec pos 80207 token 1149 draft 1921 accept
+ds4: spec pos 80209 token 328 draft 15666 accept
+ds4: spec pos 80211 token 25899 draft 1 reject
+ds4: spec pos 80212 token 1149 draft 16018 accept
+ds4: spec pos 80214 token 381 draft 494 accept
+ds4: spec pos 80216 token 27502 draft 1332 accept
+ds4: spec pos 80218 token 1558 draft 682 reject
+ds4: spec pos 80219 token 1902 draft 10817 reject
+ds4: spec pos 80220 token 9738 draft 32524 reject
+ds4: spec pos 80221 token 11173 draft 11639 reject
+ds4: spec pos 80222 token 10885 draft 321 accept
+ds4: spec pos 80224 token 4087 draft 25899 reject
+1004 11:47:29 ds4-server: completion ctx=80175..80225:50 gen=150 THINKING decoding chunk=53.32 t/s avg=54.92 t/s 2.731s
+ds4: spec pos 80225 token 30 draft 14235 accept
+ds4: spec pos 80227 token 6970 draft 2468 reject
+ds4: spec pos 80228 token 10817 draft 30 reject
+ds4: spec pos 80229 token 32524 draft 30 accept
+ds4: spec pos 80231 token 561 draft 7359 reject
+ds4: spec pos 80232 token 8978 draft 6970 reject
+ds4: spec pos 80233 token 498 draft 7912 accept
+ds4: spec pos 80235 token 32 draft 18081 accept
+ds4: spec pos 80237 token 2017 draft 60 accept
+ds4: spec pos 80239 token 6970 draft 14378 accept
+ds4: spec pos 80241 token 264 draft 32524 accept
+ds4: spec pos 80243 token 1228 draft 30 reject
+ds4: spec pos 80244 token 13 draft 14235 accept
+ds4: spec pos 80246 token 4087 draft 25899 accept
+ds4: spec pos 80248 token 13 draft 16018 accept
+ds4: spec pos 80250 token 381 draft 264 reject
+ds4: spec pos 80251 token 781 draft 1660 reject
+ds4: spec pos 80252 token 1318 draft 310 reject
+ds4: spec pos 80253 token 264 draft 2716 accept
+ds4: spec pos 80255 token 4087 draft 310 accept
+ds4: spec pos 80257 token 7920 draft 9640 reject
+ds4: spec pos 80258 token 3296 draft 30 accept
+ds4: spec pos 80260 token 561 draft 11173 accept
+ds4: spec pos 80262 token 1414 draft 369 reject
+ds4: spec pos 80263 token 2493 draft 381 accept
+ds4: spec pos 80265 token 11639 draft 13 accept
+ds4: spec pos 80267 token 1165 draft 1144 accept
+ds4: spec pos 80269 token 7936 draft 61446 reject
+ds4: spec pos 80270 token 9522 draft 4087 accept
+ds4: spec pos 80272 token 13 draft 10380 reject
+ds4: spec pos 80273 token 3437 draft 369 accept
+1004 11:47:30 ds4-server: completion ctx=80225..80275:50 gen=200 THINKING decoding chunk=58.07 t/s avg=55.68 t/s 3.592s
+ds4: spec pos 80275 token 59661 draft 30 accept
+ds4: spec pos 80277 token 328 draft 2665 accept
+ds4: spec pos 80279 token 3296 draft 3766 reject
+ds4: spec pos 80280 token 557 draft 3766 reject
+ds4: spec pos 80281 token 4439 draft 1149 accept
+ds4: spec pos 80283 token 1921 draft 9522 reject
+ds4: spec pos 80284 token 6970 draft 781 accept
+ds4: spec pos 80286 token 1660 draft 310 reject
+ds4: spec pos 80287 token 328 draft 2665 reject
+ds4: spec pos 80288 token 18718 draft 42418 accept
+ds4: spec pos 80290 token 6558 draft 579 accept
+ds4: spec pos 80292 token 22903 draft 13 accept
+ds4: spec pos 80294 token 271 draft 1421 accept
+ds4: spec pos 80296 token 2144 draft 25 accept
+ds4: spec pos 80298 token 198 draft 58 accept
+ds4: spec pos 80300 token 7912 draft 32 accept
+ds4: spec pos 80302 token 18081 draft 2017 accept
+ds4: spec pos 80304 token 60 draft 21134 accept
+ds4: spec pos 80306 token 25899 draft 13 accept +accept2
+ds4: spec pos 80309 token 18718 draft 48736 accept +accept2
+ds4: spec pos 80312 token 23752 draft 19874 accept +accept2
+ds4: spec pos 80315 token 58228 draft 7892 accept +reject2
+ds4: spec pos 80317 token 8516 draft 10498 accept +accept2
+ds4: spec pos 80320 token 43611 draft 23177 accept +reject2
+ds4: spec pos 80322 token 4649 draft 22561 accept +accept2
+1004 11:47:31 ds4-server: completion ctx=80275..80325:50 gen=250 THINKING decoding chunk=65.75 t/s avg=57.44 t/s 4.352s
+ds4: spec pos 80325 token 10810 draft 17471 accept +accept2
+ds4: spec pos 80328 token 11173 draft 1599 reject +reject2
+ds4: spec pos 80329 token 13 draft 271 accept +accept2
+ds4: spec pos 80332 token 3296 draft 13 accept +accept2
+ds4: spec pos 80335 token 381 draft 264 accept +accept2
+ds4: spec pos 80338 token 314 draft 328 reject +reject2
+ds4: spec pos 80339 token 7359 draft 2614 accept +accept2
+ds4: spec pos 80342 token 4087 draft 25899 accept +accept2
+ds4: spec pos 80345 token 10380 draft 4087 accept +reject2
+ds4: spec pos 80347 token 440 draft 264 reject +reject2
+ds4: spec pos 80348 token 799 draft 3299 accept +accept2
+ds4: spec pos 80351 token 561 draft 11173 accept +reject2
+ds4: spec pos 80353 token 8240 draft 6970 accept +reject2
+ds4: spec pos 80355 token 264 draft 328 reject
+ds4: spec pos 80356 token 1103 draft 314 accept
+ds4: spec pos 80358 token 20209 draft 13 accept
+ds4: spec pos 80360 token 16018 draft 2466 accept
+ds4: spec pos 80362 token 310 draft 4087 accept
+ds4: spec pos 80364 token 25899 draft 694 accept
+ds4: mtp-prof total=256 | shallow(T2) n=225 verify=24.84ms tail=2.45ms | deep(T3) n=26 verify=31.43ms tail=5.80ms | plain n=5 verify=29.80ms tail=10.00ms
+ds4: spec pos 80366 token 874 draft 3296 reject
+ds4: spec pos 80367 token 3134 draft 13 accept
+ds4: spec pos 80369 token 1165 draft 628 accept
+ds4: spec pos 80371 token 1910 draft 328 accept
+ds4: spec pos 80373 token 2665 draft 3296 accept
+1004 11:47:31 ds4-server: completion ctx=80325..80375:50 gen=300 THINKING decoding chunk=63.37 t/s avg=58.35 t/s 5.142s
+ds4: spec pos 80375 token 1149 draft 1921 reject
+ds4: spec pos 80376 token 35312 draft 13 accept
+ds4: spec pos 80378 token 271 draft 22916 accept
+ds4: spec pos 80380 token 1534 draft 4087 reject
+ds4: spec pos 80381 token 1132 draft 13 reject
+ds4: spec pos 80382 token 9522 draft 13 accept
+ds4: spec pos 80384 token 28320 draft 524 accept
+ds4: spec pos 80386 token 2166 draft 1248 accept
+ds4: spec pos 80388 token 13 draft 16018 reject
+ds4: spec pos 80389 token 10380 draft 328 accept
+ds4: spec pos 80391 token 2665 draft 3296 accept
+ds4: spec pos 80393 token 3766 draft 1149 accept
+ds4: spec pos 80395 token 2844 draft 579 accept
+ds4: spec pos 80397 token 9522 draft 13 accept
+ds4: spec pos 80399 token 1921 draft 6970 reject
+ds4: spec pos 80400 token 413 draft 781 accept
+ds4: spec pos 80402 token 1660 draft 4087 accept
+ds4: spec pos 80404 token 310 draft 2414 accept
+ds4: spec pos 80406 token 30 draft 10380 reject
+ds4: spec pos 80407 token 16018 draft 381 accept
+ds4: spec pos 80409 token 328 draft 18718 accept
+ds4: spec pos 80411 token 42418 draft 6558 reject
+ds4: spec pos 80412 token 561 draft 16629 reject
+ds4: spec pos 80413 token 1118 draft 3817 reject
+ds4: spec pos 80414 token 3299 draft 369 reject
+ds4: spec pos 80415 token 11173 draft 13 accept
+ds4: spec pos 80417 token 85152 draft 13 accept
+ds4: spec pos 80419 token 271 draft 760 reject
+ds4: spec pos 80420 token 20734 draft 1017 reject
+ds4: spec pos 80421 token 498 draft 7912 accept
+ds4: spec pos 80423 token 32 draft 18081 accept
+1004 11:47:32 ds4-server: completion ctx=80375..80425:50 gen=350 THINKING decoding chunk=58.30 t/s avg=58.34 t/s 5.999s
+ds4: spec pos 80425 token 2017 draft 60 accept
+ds4: spec pos 80427 token 369 draft 264 accept
+ds4: spec pos 80429 token 10811 draft 364 accept
+ds4: spec pos 80431 token 264 draft 3050 reject
+ds4: spec pos 80432 token 32524 draft 1228 reject
+ds4: spec pos 80433 token 3250 draft 25 accept
+ds4: spec pos 80435 token 11173 draft 10885 accept
+ds4: spec pos 80437 token 310 draft 47123 reject
+ds4: spec pos 80438 token 5073 draft 32524 reject
+ds4: spec pos 80439 token 1558 draft 310 accept
+ds4: spec pos 80441 token 2468 draft 2414 reject
+ds4: spec pos 80442 token 11173 draft 10885 accept
+ds4: spec pos 80444 token 13 draft 14235 accept
+ds4: spec pos 80446 token 21422 draft 321 accept
+ds4: spec pos 80448 token 4087 draft 25899 accept
+ds4: spec pos 80450 token 13 draft 16018 accept
+ds4: spec pos 80452 token 4087 draft 25 accept
+ds4: spec pos 80454 token 328 draft 40 accept
+ds4: spec pos 80456 token 1144 draft 264 accept
+ds4: spec pos 80458 token 3296 draft 1149 accept
+ds4: spec pos 80460 token 1921 draft 9522 accept
+ds4: spec pos 80462 token 13 draft 271 accept
+ds4: spec pos 80464 token 22916 draft 1534 accept
+ds4: spec pos 80466 token 25 draft 328 accept
+ds4: spec pos 80468 token 2665 draft 3296 accept
+ds4: spec pos 80470 token 3766 draft 1149 accept
+ds4: spec pos 80472 token 466 draft 328 accept
+ds4: spec pos 80474 token 5328 draft 2466 accept
+1004 11:47:33 ds4-server: completion ctx=80425..80475:50 gen=400 THINKING decoding chunk=64.88 t/s avg=59.09 t/s 6.770s
+ds4: spec pos 80476 token 264 draft 3296 accept
+ds4: spec pos 80478 token 1149 draft 8439 accept
+ds4: spec pos 80480 token 4087 draft 25899 accept
+ds4: spec pos 80482 token 13 draft 10380 reject
+ds4: spec pos 80483 token 353 draft 4035 reject
+ds4: spec pos 80484 token 3172 draft 2468 accept
+ds4: spec pos 80486 token 328 draft 2665 accept
+ds4: spec pos 80488 token 3296 draft 3766 accept
+ds4: spec pos 80490 token 1149 draft 2844 reject
+ds4: spec pos 80491 token 198 draft 248069 accept
+ds4: spec pos 80493 token 271 draft 2665 accept
+ds4: spec pos 80495 token 3296 draft 3766 accept
+ds4: spec pos 80497 token 13 draft 248046 accept
+1004 11:47:33 ds4-server: completion ctx=80475..80498:23 gen=423 decoding chunk=63.73 t/s avg=59.32 t/s 7.131s
+1004 11:47:33 ds4-server: completion ctx=0..80075:80075 gen=423 finish=stop 63.776s
+1004 11:47:33 ds4-server: live kv cache miss live=80498 prompt=159937 common=53 vision=match reason=token-mismatch
+1004 11:47:34 ds4-server: kv cache stored tokens=80498 trimmed=0 reason=evict key=token-text sha=1fc27986 delta=65536..80498 size=601.33 MiB save=150.6 ms
+1004 11:47:34 ds4-server: completion ctx=0..159937:159937 prompt start
+1004 11:47:39 ds4-server: completion ctx=0..159937:159937 prefill chunk 8192/159937 (5.1%) chunk=0.00 t/s avg=1546.36 t/s 5.298s
+1004 11:47:39 ds4-server: kv cache stored tokens=8192 trimmed=0 reason=continued key=token-text sha=5d5fde3b size=359.73 MiB save=90.9 ms
+1004 11:47:45 ds4-server: completion ctx=0..159937:159937 prefill chunk 16384/159937 (10.2%) chunk=1461.15 t/s avg=1502.55 t/s 10.904s
+1004 11:47:45 ds4-server: kv cache stored tokens=16384 trimmed=0 reason=continued key=token-text sha=f2ab579c delta=8192..16384 size=359.82 MiB save=91.6 ms
+1004 11:47:51 ds4-server: completion ctx=0..159937:159937 prefill chunk 24576/159937 (15.4%) chunk=1414.01 t/s avg=1471.83 t/s 16.698s
+1004 11:47:51 ds4-server: kv cache stored tokens=24576 trimmed=0 reason=continued key=token-text sha=347c4ec7 delta=16384..24576 size=359.90 MiB save=91.0 ms
+1004 11:47:56 ds4-server: completion ctx=0..159937:159937 prefill chunk 32768/159937 (20.5%) chunk=1409.05 t/s avg=1455.62 t/s 22.511s
+1004 11:47:57 ds4-server: kv cache stored tokens=32768 trimmed=0 reason=continued key=token-text sha=3feffa5b delta=24576..32768 size=359.99 MiB save=91.8 ms
+1004 11:48:02 ds4-server: completion ctx=0..159937:159937 prefill chunk 40960/159937 (25.6%) chunk=1422.75 t/s avg=1448.92 t/s 28.269s
+1004 11:48:02 ds4-server: kv cache stored tokens=40960 trimmed=0 reason=continued key=token-text sha=e01d2791 delta=32768..40960 size=360.08 MiB save=92.7 ms
+1004 11:48:08 ds4-server: completion ctx=0..159937:159937 prefill chunk 49152/159937 (30.7%) chunk=1410.33 t/s avg=1442.34 t/s 34.078s
+1004 11:48:08 ds4-server: kv cache stored tokens=49152 trimmed=0 reason=continued key=token-text sha=7b55ad8f delta=40960..49152 size=360.16 MiB save=92.5 ms
+1004 11:48:14 ds4-server: completion ctx=0..159937:159937 prefill chunk 57344/159937 (35.9%) chunk=1399.83 t/s avg=1436.11 t/s 39.930s
+1004 11:48:20 ds4-server: completion ctx=0..159937:159937 prefill chunk 65536/159937 (41.0%) chunk=1425.06 t/s avg=1434.72 t/s 45.679s
+1004 11:48:20 ds4-server: kv cache stored tokens=65536 trimmed=0 reason=continued key=token-text sha=5d605368 delta=49152..65536 size=606.46 MiB save=150.6 ms
+1004 11:48:26 ds4-server: completion ctx=0..159937:159937 prefill chunk 73728/159937 (46.1%) chunk=1368.42 t/s avg=1427.04 t/s 51.665s
+1004 11:48:31 ds4-server: completion ctx=0..159937:159937 prefill chunk 81920/159937 (51.2%) chunk=1406.37 t/s avg=1424.95 t/s 57.490s
+1004 11:48:32 ds4-server: kv cache stored tokens=81920 trimmed=0 reason=continued key=token-text sha=abba5405 delta=65536..81920 size=606.63 MiB save=154.1 ms
+1004 11:48:37 ds4-server: completion ctx=0..159937:159937 prefill chunk 90112/159937 (56.3%) chunk=1368.38 t/s avg=1419.61 t/s 63.477s
+1004 11:48:43 ds4-server: completion ctx=0..159937:159937 prefill chunk 98304/159937 (61.5%) chunk=1373.06 t/s avg=1415.61 t/s 69.443s
+1004 11:48:44 ds4-server: kv cache stored tokens=98304 trimmed=0 reason=continued key=token-text sha=0f0e9b95 delta=81920..98304 size=606.81 MiB save=156.2 ms
+1004 11:48:50 ds4-server: completion ctx=0..159937:159937 prefill chunk 106496/159937 (66.6%) chunk=1317.05 t/s avg=1407.51 t/s 75.663s
+1004 11:48:56 ds4-server: completion ctx=0..159937:159937 prefill chunk 114688/159937 (71.7%) chunk=1390.28 t/s avg=1406.26 t/s 81.555s
+1004 11:48:56 ds4-server: kv cache stored tokens=114688 trimmed=0 reason=continued key=token-text sha=a68119f7 delta=98304..114688 size=606.98 MiB save=151.1 ms
+1004 11:49:02 ds4-server: completion ctx=0..159937:159937 prefill chunk 122880/159937 (76.8%) chunk=1315.08 t/s avg=1399.79 t/s 87.784s
+1004 11:49:08 ds4-server: completion ctx=0..159937:159937 prefill chunk 131072/159937 (82.0%) chunk=1365.53 t/s avg=1397.60 t/s 93.784s
+1004 11:49:08 ds4-server: kv cache stored tokens=131072 trimmed=0 reason=continued key=token-text sha=d383f949 delta=114688..131072 size=607.15 MiB save=157.6 ms
+1004 11:49:14 ds4-server: completion ctx=0..159937:159937 prefill chunk 139264/159937 (87.1%) chunk=1299.39 t/s avg=1391.42 t/s 100.088s
+1004 11:49:20 ds4-server: completion ctx=0..159937:159937 prefill chunk 147456/159937 (92.2%) chunk=1367.39 t/s avg=1390.06 t/s 106.079s
+1004 11:49:20 ds4-server: kv cache stored tokens=147456 trimmed=0 reason=continued key=token-text sha=f34c8e9c delta=131072..147456 size=607.33 MiB save=156.9 ms
+1004 11:49:26 ds4-server: completion ctx=0..159937:159937 prefill chunk 155648/159937 (97.3%) chunk=1285.47 t/s avg=1384.13 t/s 112.452s
+1004 11:49:30 ds4-server: completion ctx=0..159937:159937 prefill chunk 159937/159937 (100.0%) chunk=1176.45 t/s avg=1377.61 t/s 116.097s
+1004 11:49:30 ds4-server: completion ctx=0..159937:159937 prompt done 116.098s
+ds4: spec pos 159937 token 1596 plain
+ds4: spec pos 159938 token 1144 draft 4087 accept
+ds4: spec pos 159940 token 1156 draft 579 accept
+ds4: spec pos 159942 token 1622 draft 13 accept
+ds4: spec pos 159944 token 2570 draft 2640 reject
+ds4: spec pos 159945 token 25 draft 10232 accept
+ds4: spec pos 159947 token 7912 draft 32 reject
+ds4: spec pos 159948 token 33 draft 18081 accept
+ds4: spec pos 159950 token 2017 draft 60 accept
+ds4: spec pos 159952 token 21134 draft 25899 accept
+ds4: spec pos 159954 token 1149 draft 1179 reject
+ds4: spec pos 159955 token 4844 draft 6552 accept
+ds4: spec pos 159957 token 11173 draft 1414 accept
+ds4: spec pos 159959 token 25 draft 328 accept
+ds4: spec pos 159961 token 18718 draft 48736 accept
+ds4: spec pos 159963 token 6310 draft 23752 accept
+ds4: spec pos 159965 token 19874 draft 4687 accept
+ds4: spec pos 159967 token 58228 draft 7892 accept
+ds4: spec pos 159969 token 8516 draft 10498 accept
+ds4: spec pos 159971 token 7302 draft 43611 accept
+ds4: spec pos 159973 token 23177 draft 4649 accept +accept2
+ds4: spec pos 159976 token 35603 draft 10810 accept +accept2
+ds4: spec pos 159979 token 75530 draft 11173 accept +reject2
+ds4: spec pos 159981 token 1599 draft 2942 accept +accept2
+ds4: spec pos 159984 token 14235 draft 4222 reject +reject2
+ds4: spec pos 159985 token 22846 draft 3274 accept +accept2
+1004 11:49:31 ds4-server: completion ctx=159937..159987:50 gen=50 THINKING decoding chunk=62.17 t/s avg=62.17 t/s 0.804s
+ds4: spec pos 159988 token 1049 draft 2640 accept +accept2
+ds4: spec pos 159991 token 25899 draft 13 accept +accept2
+ds4: spec pos 159994 token 781 draft 1318 reject +reject2
+ds4: spec pos 159995 token 1660 draft 2414 reject +reject2
+ds4: spec pos 159996 token 9522 draft 4087 accept
+ds4: spec pos 159998 token 30 draft 16018 accept
+ds4: spec pos 160000 token 381 draft 264 accept
+ds4: spec pos 160002 token 9640 draft 24277 accept
+ds4: spec pos 160004 token 3336 draft 40012 accept
+ds4: spec pos 160006 token 30 draft 14235 accept
+ds4: spec pos 160008 token 5707 draft 310 reject
+ds4: spec pos 160009 token 25899 draft 13 accept
+ds4: spec pos 160011 token 14235 draft 6970 accept
+ds4: spec pos 160013 token 10229 draft 11173 accept
+ds4: spec pos 160015 token 16629 draft 30 accept
+ds4: spec pos 160017 token 561 draft 9640 reject
+ds4: spec pos 160018 token 4619 draft 498 accept
+ds4: spec pos 160020 token 7912 draft 33 accept
+ds4: spec pos 160022 token 18081 draft 2017 accept
+ds4: spec pos 160024 token 60 draft 6970 accept
+ds4: spec pos 160026 token 27502 draft 30 reject
+ds4: spec pos 160027 token 364 draft 32524 accept
+ds4: spec pos 160029 token 30 draft 14235 accept
+ds4: spec pos 160031 token 4087 draft 25899 accept
+ds4: spec pos 160033 token 4222 draft 310 accept
+ds4: spec pos 160035 token 1010 draft 3296 reject
+ds4: spec pos 160036 token 7920 draft 3296 accept
+1004 11:49:32 ds4-server: completion ctx=159987..160037:50 gen=100 THINKING decoding chunk=63.82 t/s avg=62.99 t/s 1.588s
+ds4: spec pos 160038 token 30 draft 2532 accept
+ds4: spec pos 160040 token 369 draft 874 accept
+ds4: spec pos 160042 token 11135 draft 3296 accept
+ds4: spec pos 160044 token 3525 draft 11173 accept
+ds4: spec pos 160046 token 10885 draft 13 accept
+ds4: spec pos 160048 token 16018 draft 381 accept
+ds4: spec pos 160050 token 9859 draft 310 accept
+ds4: spec pos 160052 token 4087 draft 30 reject
+ds4: spec pos 160053 token 25899 draft 11 reject +reject2
+ds4: spec pos 160054 token 6970 draft 4087 reject +reject2
+ds4: spec pos 160055 token 59987 draft 30 accept
+ds4: spec pos 160057 token 1165 draft 1144 accept
+ds4: spec pos 160059 token 7936 draft 61446 accept
+ds4: spec pos 160061 token 1965 draft 13 accept
+ds4: spec pos 160063 token 14235 draft 6970 accept
+ds4: spec pos 160065 token 1910 draft 328 accept
+ds4: spec pos 160067 token 2665 draft 21716 reject
+ds4: spec pos 160068 token 2708 draft 3296 accept
+ds4: spec pos 160070 token 1149 draft 1921 accept
+ds4: spec pos 160072 token 6970 draft 781 accept
+ds4: spec pos 160074 token 1318 draft 4087 accept
+ds4: spec pos 160076 token 310 draft 279 reject
+ds4: spec pos 160077 token 2414 draft 30 accept
+ds4: spec pos 160079 token 561 draft 11173 accept
+ds4: spec pos 160081 token 1414 draft 369 accept
+ds4: spec pos 160083 token 264 draft 1103 accept
+ds4: spec pos 160085 token 314 draft 5713 reject
+ds4: spec pos 160086 token 16519 draft 13505 reject
+1004 11:49:32 ds4-server: completion ctx=160037..160087:50 gen=150 THINKING decoding chunk=62.62 t/s avg=62.86 t/s 2.386s
+ds4: spec pos 160087 token 3665 draft 13 accept
+ds4: spec pos 160089 token 16018 draft 381 accept
+ds4: spec pos 160091 token 264 draft 1228 accept
+ds4: spec pos 160093 token 314 draft 1248 reject
+ds4: spec pos 160094 token 11256 draft 32524 reject
+ds4: spec pos 160095 token 56127 draft 11639 reject
+ds4: spec pos 160096 token 1879 draft 13 accept
+ds4: spec pos 160098 token 14235 draft 4087 accept
+ds4: spec pos 160100 token 25899 draft 13 accept
+ds4: spec pos 160102 token 10380 draft 328 reject
+ds4: spec pos 160103 token 2468 draft 25 accept
+ds4: spec pos 160105 token 328 draft 2665 accept
+ds4: spec pos 160107 token 3296 draft 3766 accept
+ds4: spec pos 160109 token 1149 draft 1921 accept
+ds4: spec pos 160111 token 5790 draft 4087 reject
+ds4: spec pos 160112 token 10631 draft 13 accept
+ds4: spec pos 160114 token 16018 draft 381 reject
+ds4: spec pos 160115 token 1910 draft 25 accept
+ds4: spec pos 160117 token 328 draft 40 accept
+ds4: spec pos 160119 token 1436 draft 874 reject
+ds4: spec pos 160120 token 11173 draft 16519 reject
+ds4: spec pos 160121 token 2981 draft 13505 reject
+ds4: spec pos 160122 token 14 draft 60562 accept
+ds4: spec pos 160124 token 3665 draft 26 accept
+ds4: spec pos 160126 token 874 draft 2708 reject
+ds4: spec pos 160127 token 3296 draft 4439 reject
+ds4: spec pos 160128 token 310 draft 4087 accept
+ds4: spec pos 160130 token 1149 draft 14235 reject
+ds4: spec pos 160131 token 35312 draft 13 accept
+ds4: spec pos 160133 token 271 draft 22916 accept
+ds4: spec pos 160135 token 2814 draft 413 accept
+1004 11:49:33 ds4-server: completion ctx=160087..160137:50 gen=200 THINKING decoding chunk=57.45 t/s avg=61.42 t/s 3.256s
+ds4: spec pos 160137 token 1017 draft 369 accept
+ds4: spec pos 160139 token 7920 draft 7359 accept
+ds4: spec pos 160141 token 30 draft 498 accept
+ds4: spec pos 160143 token 7912 draft 33 accept
+ds4: spec pos 160145 token 18081 draft 2017 accept
+ds4: spec pos 160147 token 60 draft 6970 accept
+ds4: spec pos 160149 token 3254 draft 4087 accept +reject2
+ds4: spec pos 160151 token 32524 draft 30 accept +accept2
+ds4: spec pos 160154 token 381 draft 494 accept +accept2
+ds4: spec pos 160157 token 1332 draft 4087 reject +reject2
+ds4: spec pos 160158 token 1558 draft 1220 accept +accept2
+ds4: spec pos 160161 token 381 draft 47078 accept +reject2
+ds4: spec pos 160163 token 539 draft 6552 reject +reject2
+ds4: spec pos 160164 token 11173 draft 1414 reject +reject2
+ds4: spec pos 160165 token 2193 draft 13 accept
+ds4: spec pos 160167 token 561 draft 9640 reject
+ds4: spec pos 160168 token 4880 draft 9640 reject
+ds4: spec pos 160169 token 7359 draft 6970 reject
+ds4: spec pos 160170 token 25 draft 328 accept
+ds4: spec pos 160172 token 15666 draft 25899 accept
+ds4: spec pos 160174 token 1149 draft 4844 reject
+ds4: spec pos 160175 token 2532 draft 369 accept
+ds4: spec pos 160177 token 874 draft 3296 accept
+ds4: spec pos 160179 token 13 draft 10380 reject
+ds4: spec pos 160180 token 1987 draft 4087 reject
+ds4: spec pos 160181 token 9522 draft 4087 accept
+ds4: spec pos 160183 token 25 draft 328 accept
+ds4: spec pos 160185 token 2665 draft 3296 accept
+1004 11:49:34 ds4-server: completion ctx=160137..160187:50 gen=250 THINKING decoding chunk=57.46 t/s avg=60.58 t/s 4.127s
+ds4: spec pos 160187 token 3766 draft 1149 accept
+ds4: spec pos 160189 token 2441 draft 6970 reject
+ds4: spec pos 160190 token 328 draft 5328 accept
+ds4: spec pos 160192 token 2466 draft 264 accept
+ds4: spec pos 160194 token 3296 draft 1149 accept
+ds4: spec pos 160196 token 14235 draft 6970 accept
+ds4: spec pos 160198 token 6088 draft 524 reject
+ds4: spec pos 160199 token 11173 draft 3665 accept
+ds4: spec pos 160201 token 30 draft 328 reject
+ds4: spec pos 160202 token 8439 draft 1156 reject
+ds4: spec pos 160203 token 4087 draft 1220 reject
+ds4: spec pos 160204 token 25899 draft 11 reject
+ds4: spec pos 160205 token 13 draft 271 reject
+ds4: spec pos 160206 token 12650 draft 25 accept
+ds4: spec pos 160208 token 328 draft 2665 accept
+ds4: spec pos 160210 token 2708 draft 3296 accept
+ds4: spec pos 160212 token 2218 draft 3138 reject
+ds4: spec pos 160213 token 29038 draft 3300 reject
+ds4: spec pos 160214 token 2466 draft 1149 accept
+ds4: spec pos 160216 token 28320 draft 524 accept
+ds4: spec pos 160218 token 2166 draft 1248 accept
+ds4: spec pos 160220 token 13 draft 198 accept
+ds4: spec pos 160222 token 248069 draft 271 accept
+ds4: spec pos 160224 token 2665 draft 2708 accept
+ds4: spec pos 160226 token 3296 draft 13 reject
+ds4: spec pos 160227 token 2218 draft 29038 accept
+ds4: spec pos 160229 token 2466 draft 13 accept
+1004 11:49:35 ds4-server: completion ctx=160187..160231:44 gen=294 decoding chunk=57.81 t/s avg=60.15 t/s 4.888s
+1004 11:49:35 ds4-server: completion ctx=0..159937:159937 gen=294 finish=stop 120.985s

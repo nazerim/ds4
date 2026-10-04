@@ -58632,6 +58632,17 @@ static bool qwen4_graph_attention_tail(ds4_qwen4_gpu_graph *g, const ds4_model *
                 return false;
             for (uint32_t r = 0; r < n_sparse; r++) {
                 const uint32_t rp = sp0 + r;
+                /* Each row decodes over its OWN causal universe with its OWN
+                 * split ladder: the part buffer is allocated for 3 rows
+                 * (qwen4_graph alloc), so every row gets its own region
+                 * instead of row 0 alone.  Row r's ladder == row r's serial
+                 * T=1 step by construction (proven: the v2 world runs the
+                 * laddered per-row core for every row and rowcount-ab is
+                 * maxabs=0 against serial; and ST's r>0 unsplit gather was
+                 * likewise serial-equal -- both trees agree, only the wall
+                 * time differed: the serial walk of ~2052 scattered selected
+                 * keys per layer cost ~+14 ms per verify cycle at 80k ctx,
+                 * the deep-context decode regression of 2026-10-04). */
                 ds4_gpu_tensor *q = ds4_gpu_tensor_view(g->q, (uint64_t)(n_dense + r) * q_dim * sizeof(float),
                                                         q_dim * sizeof(float));
                 ds4_gpu_tensor *gate = ds4_gpu_tensor_view(g->gate, (uint64_t)(n_dense + r) * q_dim * sizeof(float),
@@ -58641,14 +58652,32 @@ static bool qwen4_graph_attention_tail(ds4_qwen4_gpu_graph *g, const ds4_model *
                 ds4_gpu_tensor *sel = ds4_gpu_tensor_view(g->sel_tokens,
                         (uint64_t)r * g->sel_stride * sizeof(int32_t),
                         (uint64_t)n_sparse * g->sel_stride * sizeof(int32_t));
+                /* extent deliberately generous (n_sparse rows although only
+                 * row r is read): safe because sel scratch is sized for
+                 * cap_tokens rows, not this call's T */
                 ds4_gpu_tensor *nsel = ds4_gpu_tensor_view(g->n_sel, (uint64_t)r * sizeof(uint32_t),
                                                            (uint64_t)n_sparse * sizeof(uint32_t));
+                const uint64_t region_floats = ds4_gpu_qwen4_attn_part_floats(1u, DS4_N_HEAD, DS4_N_HEAD_DIM);
+                /* the part buffer carries 3 row regions; rows beyond that
+                 * (edge shapes) pass NULL and keep the serial-gather fallback */
+                ds4_gpu_tensor *partv = r < 3u ?
+                    ds4_gpu_tensor_view(g->attn_part, (uint64_t)r * region_floats * sizeof(float),
+                                        region_floats * sizeof(float)) : NULL;
+                if (r < 3u && !partv) {
+                    static int part_warned;
+                    if (!part_warned) {
+                        part_warned = 1;
+                        fprintf(stderr, "ds4: Qwen3.8 attn part view failed for row %u - "
+                                "falling back to serial sparse gather (slower, exact)\n", r);
+                    }
+                }
                 const bool rok = q && gate && o && sel && nsel &&
                     ds4_gpu_qwen4_attn_decode_tensor(o, q, gate, g->layer_k_cache[il],
                                                      g->layer_v_cache[il], sel, nsel,
-                                                     r == 0u ? g->attn_part : NULL, 1u,
+                                                     partv, 1u,
                                                      DS4_N_HEAD, DS4_N_HEAD_KV, DS4_N_HEAD_DIM,
                                                      rp, true, g->sel_stride, scale);
+                if (partv) ds4_gpu_tensor_free(partv);
                 if (nsel) ds4_gpu_tensor_free(nsel);
                 if (sel) ds4_gpu_tensor_free(sel);
                 if (o) ds4_gpu_tensor_free(o);
