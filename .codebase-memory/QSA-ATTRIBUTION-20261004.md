@@ -101,3 +101,22 @@ invariance stand as the record; revisit only if a future score epilogue
   the epilogue enumeration bound must be tokens x blocks, not rows x
   blocks -- a wrong constant there let band 0 scribble band 1's rows with
   C-garbage and looked exactly like a staging bug.
+
+## MoE/GDN prefill recon SEED 2026-10-04 (13:5x, from QWEN4_BENCH matrix,
+model-free, M5). The last queue item's starting data:
+- Kernel-choice wins are SHAPE-SPECIFIC and already mixed: prefill T=256 —
+  router f32: dense-mm 142us vs custom 727us (mm 5.1x faster); q8 gemm
+  6144x2560: custom 258us vs mm 795us (custom 3.1x faster); hc down f16:
+  mm 272 vs custom 417 (mm faster); hc up f16: custom 69 vs mm 208
+  (custom faster). => a per-(type,shape,rows) dispatch audit of the ACTUAL
+  prefill path (which of the two arms every projection takes at chunk=8192)
+  is step 1; several arms may be on the wrong side of that crossover.
+- moe q4k/mxfp4 32-expert T=2048 x10 slots = 6643us/layer-chunk-arm; the
+  live moe bucket is ~2.1s per 8192-token chunk (40% of that sits in the
+  routed experts): compare against grouped-path rates at 8192 rows.
+- gdn scan r4 T=1024 = 1137us/layer -> x36 linear layers x 8 chunks ~ too
+  low to explain the 1.5s gdn bucket alone: the bucket is qkv/z/ga gemv +
+  conv + prep + scan + out; attribute per-kernel inside the live path with
+  TIMING=2 sub-buckets or a DS4_METAL_* stage profile before touching.
+- Ceiling check: dense mm reference 21.8 TF/s; at 8192-row chunks Q4
+  experts should approach it if occupancy holds.
