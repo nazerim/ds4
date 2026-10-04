@@ -574,3 +574,17 @@ deep streaks vary"):
 - Gates: rcab 150 pairs grid... (spot 4x15 p03/p07 x T2/T3 maxabs=0),
   identity flips=0, suite 26 OK/0 ERR both worlds, battery x2 + prodbatch
   byte-identical to banked streams. Engine restored production, no log noise.
+
+## DAYTIME-3 2026-10-04 13:5x-14:0x: C4 priced to DEATH and closed (no
+## golden decision required): KT=32 attn_mm needs 44,416 B threadgroup
+## memory vs the 32,768 B Metal device maximum at head_dim=256 -- probe
+## build failed pipeline creation loudly, reverted, engine restored clean.
+## Tooling audit: attr_parse.py REMOVED (its sync-regime deltas were
+## misleading; MTP_PROFILE + ctx_curve + the A/B-knob method supersede it);
+## quiet_probe.sh removed earlier (buggy watcher); ctx_curve.py /
+## prefill_probe.py (incl. fixed-nonce text mode) / battery / order_probe /
+## rcab / identity all PROVEN their keep this cycle. Gate ladder tightened:
+## rcab spot 2 prompts x 15 x {T2,T3} (~10 min) per kernel change; full
+## 150-pair grid only at default/umbrella flips. MoE/GDN potential sized
+## (see QSA-ATTRIBUTION rewrite): realistic +11-15% prefill, ceiling ~opmlx
+## parity at 1.5x; step 1 is a zero-engine-cycle dispatch audit.
