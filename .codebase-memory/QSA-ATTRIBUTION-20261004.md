@@ -81,3 +81,23 @@ invariance stand as the record; revisit only if a future score epilogue
 - Bench n_blocks=65536 is the 256k shape; at 64k everything scales ~B/64k
   linearly for score/select, attn_mm depends on top-k rows not B.
 - prefill_probe filler ~1.3 tok/word; prompt_tokens from usage is truth.
+
+## C2 RESOLVED NEGATIVE 2026-10-04 (quiet window): both score-MM widening
+## shapes tested, both LOST, reverted (HEAD clean):
+- wide tile (32 tok x 32 blk, 24.9 KB smem): bit-identical via the new
+  harness pin (7 guard shapes, byte-exact vs the 16x64 tile), but bench
+  8461 vs 5757 us at T=1024/n=65536 (+47%); Bk-resident 16x64 variant even
+  worse (9283 us). The extra threadgroup memory halves occupancy and the
+  occupancy cost dominates the staging savings -- the scorer is
+  concurrency/barrier-bound, not staging-bound. DSv4 Lever-1's "not
+  promoted" verdict now has a Qwen3.8 twin.
+- Meaning for the 11.9/21.8 TF/s plateau: it is NOT tiling/staging. The
+  remaining levers are the MMA datapath itself (oMLX #4020-class: move
+  score+attn to tensor units / MPP-style specialization) -- a much larger
+  project than the queue slot assumed -- or accepting the plateau.
+- KEEP from the experiment: the bit-exact mm-vs-variant harness pattern
+  (env-toggle, byte-compare across guard shapes) is the right pre-bench
+  gate for any future scorer/attn kernel work; bring-up lesson pinned here:
+  the epilogue enumeration bound must be tokens x blocks, not rows x
+  blocks -- a wrong constant there let band 0 scribble band 1's rows with
+  C-garbage and looked exactly like a staging bug.
