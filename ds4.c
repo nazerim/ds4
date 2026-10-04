@@ -58147,6 +58147,34 @@ static void qwen4_graph_reset(ds4_qwen4_gpu_graph *g) {
         if (g->layer_lin_hist[il]) ds4_gpu_tensor_fill_f32(g->layer_lin_hist[il], 0.0f, (uint64_t)(DS4_N_LIN_CONV - 1u) * conv_dim);
     }
     ds4_gpu_tensor_fill_f32(g->ple_hist, 0.0f, (uint64_t)(DS4_N_PLE_CONV - 1u) * DS4_N_PLE_NGRAM * DS4_N_EMBD * DS4_N_HC);
+
+
+    /* The real culprit for the first-request draft divergence: pos3 is one
+     * shared row table, and the PREVIOUS occupant's speculative drafts wrote
+     * rows at absolute positions this request will reach before its own
+     * trunk pass rewrites them; the nextn chain step reads its key window
+     * through those rows, so first-request deep-streak drafts varied with
+     * slot history (zeroed on a cold engine, stale after reuse).  Committed
+     * tokens never moved -- verify gates every proposal -- but traces did. */
+    if (g->pos3) ds4_gpu_tensor_fill_f32(g->pos3, 0.0f, ds4_gpu_tensor_bytes(g->pos3) / 4u);
+    /* Predictor cold-equivalence (2026-10-03 residual, fixed 2026-10-04):
+     * the nextn layer's raw caches are written ONLY by draft steps, so a
+     * reused slot would otherwise start a new request with the previous
+     * occupant's speculative rows where a cold engine has Metal's
+     * zero-filled buffers.  Empirically the visible first-request deep-streak
+     * divergence rode on POS3 (below); these four fills are the same stale
+     * class at the same cost, so zero them together for determinism.
+     * Committed tokens never moved -- verify gates every proposal.
+     * (f16 rows are covered pairwise by the f32 zero fills.) */
+    {
+        const uint32_t il = DS4_N_LAYER - 1u;
+        const uint64_t kv_elems = (uint64_t)g->ctx_cap * DS4_N_HEAD_KV * DS4_N_HEAD_DIM;
+        const uint64_t bk_elems = (uint64_t)g->n_block_cap * DS4_N_INDEXER_HEAD_DIM;
+        if (g->layer_k_cache[il]) ds4_gpu_tensor_fill_f32(g->layer_k_cache[il], 0.0f, kv_elems / 2u);
+        if (g->layer_v_cache[il]) ds4_gpu_tensor_fill_f32(g->layer_v_cache[il], 0.0f, kv_elems / 2u);
+        if (g->layer_ik_cache[il]) ds4_gpu_tensor_fill_f32(g->layer_ik_cache[il], 0.0f, (uint64_t)g->ctx_cap * DS4_N_INDEXER_HEAD_DIM);
+        if (g->layer_block_key[il]) ds4_gpu_tensor_fill_f32(g->layer_block_key[il], 0.0f, bk_elems / 2u);
+    }
     for (uint32_t i = 0; i < DS4_MAX_PLE_NGRAM; i++) g->ple_prev[i] = DS4_PLE_EOS_ID;
     g->pos = 0;
     g->mtp_pos = 0;

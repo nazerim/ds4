@@ -545,3 +545,32 @@ and beaten, exact mode keeps bit-identity. Full record:
 NEW STANDING RULE for prefill/sparse-adjacent changes: the battery cannot
 validate deep decode — run ctx_curve.py probes (>=100k) on anything
 touching verify geometry.
+
+## DAYTIME FOLLOW-UP 2 2026-10-04 12:30-13:4x: queue item 3 (first-request
+## draft residual) ROOT-CAUSED and CLOSED; C2 resolved negative (see
+## QSA-ATTRIBUTION update).
+Operator-confirmed deep-ctx regression fix held; continued the agreed queue
+(1 -> 3 -> 2). Item 1 (C2 score-MM widening): built two shapes behind a
+default-off knob, made them bit-exact (new env-toggle byte-compare harness,
+7 guard shapes incl. band edges), benched BOTH SLOWER (8461/9283 vs 5757 us)
+-- the scorer is occupancy/barrier-bound, not staging-bound; fully reverted,
+negative result banked. Then item 3 (optional residual: "nextn raw cache
+holds zero rows cold vs first-run draft rows after reuse -> first-request
+deep streaks vary"):
+- Repro: warm slot (p5 then p3) vs cold engine (p3 only): identical streams
+  but p3's cycle-40 (gen pos 161) second draft diverged deterministically
+  (deep streak 8 fires warm vs 1 cold).
+- The claimed nextn-cache zeroing alone did NOT fix it (shipped-fix v1
+  measured 8-vs-1 again) -- honest bisect: zeroed ALL attention/lin caches
+  + snapshots (still diverged), then every graph scratch (converged!),
+  then per-group: **pos3 alone** is the culprit. pos3 is one shared row
+  table; the previous occupant's speculative drafts left position rows at
+  absolute positions this request reaches before its trunk pass rewrites
+  them; the nextn chain step reads its key window through those rows.
+- Shipped: graph_reset zeroes pos3 (2 MB fill, ~0) + the four nextn caches
+  (same stale class, proven belt-and-suspenders). Determinism proof:
+  warm-vs-cold full 235-cycle p3 spec trace BYTE-IDENTICAL (deep fires 1==1),
+  p3 text == cold == warm == banked ST.
+- Gates: rcab 150 pairs grid... (spot 4x15 p03/p07 x T2/T3 maxabs=0),
+  identity flips=0, suite 26 OK/0 ERR both worlds, battery x2 + prodbatch
+  byte-identical to banked streams. Engine restored production, no log noise.
