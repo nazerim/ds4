@@ -48,9 +48,16 @@ invariance stand as the record; revisit only if a future score epilogue
 ## 4. Ranked next levers (by measured share of prefill at >=64k)
 
 1. **MoE prefill rate (~39% of time)** and **GDN scan (~28%)** dominate;
-   the omlx gap is fundamentally there, not in QSA. Both need their own
-   recon pass (no candidates banked yet; check grouped/dense MM choices at
-   8192-row shapes vs `metal_prefill_variant_bench`).
+   the omlx gap is fundamentally there, not in QSA. POTENTIAL (sized
+   2026-10-04): moe+gdn = 67% of >=32k prefill. 1.2-1.3x on both buckets
+   (realistic arm-selection win): prefill +~11-15% (1350 -> ~1500-1560).
+   Full 1.5x (tensor rate both): +~21% (~1660) -- near omlx parity
+   (1733-1748). Below ~1.2x both, omlx stays ahead at long ctx. Bench fat:
+   router f32 custom 727us vs dense-mm 142us; hc down f16 417 vs 272;
+   counterexamples where custom wins (q8 gemm 258 vs 795, hc up 69 vs 208)
+   -- the choice is per-(type,shape,rows) and step 1 is a dispatch audit of
+   what the live prefill path ACTUALLY uses at 8192-row chunks (read-only +
+   bench arms; zero engine cycles).
 2. **C2 — idx_score_mm token-tile widen TM 16->32 + key-table staging
    reuse across row bands** (the true "wide QSA tiles"): score is 28% of
    the bench slice at n_blocks=65536 but scales with B, so at 64k ctx the
@@ -66,10 +73,17 @@ invariance stand as the record; revisit only if a future score epilogue
    per-8-block maxima; select reads B/8 + compact keys): ~1.7 ms of
    ~10 ms/layer-chunk at 256k => small; gate `test_idx_prefilter` must
    extend to T>2 rows first.
-4. **C4 — attn_mm KT 16->32**: the biggest attn-bucket item but NOT
-   bit-exact (online-softmax accumulation order) => moves the committed
-   stream => operator golden decision (HARD RULE stop-and-ask); only ever
-   after the exact-world items land.
+4. **C4 — attn_mm KT 16->32: CLOSED INFEASIBLE 2026-10-04, no golden
+   decision needed.** Probe build (reverted same hour): the kernel declares
+   KV[2*KT*256] half + Qs[16*256] + Sx/Ps/Dg/Id ~= 44,416 B of threadgroup
+   memory at KT=32 vs the Metal device maximum of 32,768 B; pipeline
+   creation fails loudly ("Threadgroup memory size (44416) exceeds the
+   maximum threadgroup memory allowed (32768)"). At head_dim 256 a K+V pair
+   of 32 keys is 32 KB alone -- tile width is HARD-CAPPED by smem, and
+   dim-split staging workarounds reintroduce the same PV-chain order
+   question while costing a day. The live lever for attn_mm is the
+   tensor-unit rewrite class (oMLX #4020 / MPP) -- a separate project whose
+   payoff must be measured against the MoE/GDN fronts (2.4x larger share).
 5. Decode-side residual from 0': per-row split ladder in the T=2 decode
    dispatch (~0.5 ms/cycle, FUSED-VERIFY-DESIGN B2 historical spec).
 
