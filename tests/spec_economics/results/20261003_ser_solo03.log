@@ -1,0 +1,29 @@
+ds4: Qwen3.8 YaRN factor 2 over 262144 native tokens (pairs 14..22 blended, mscale 1.0693)
+ds4: Qwen BF16 n-grams: 95.37 GiB, disk reads only
+ds4: Metal device Apple M5 Max, 128.00 GiB RAM
+ds4: Metal 4 tensor API enabled for Tensor kernels
+ds4: drift-patch flags hc_stable=on norm_unify=on kv_raw_f32=off rope_exp2_log2=off math_safe=off tensor_matmul=on
+ds4: Metal model views created in 1.598 ms, residency requested in 309.572 ms, warmup 3.256 ms (mapped 71400.44 MiB from offset 10.51 MiB)
+ds4: Metal mapped mmaped model as 1 overlapping shared buffers
+ds4: Metal model views created in 0.049 ms, residency requested in 310.900 ms, warmup 1.153 ms (mapped 588.12 MiB from offset 0.02 MiB)
+ds4: Metal mapped mmaped model as 2 overlapping shared buffers
+ds4: metal backend initialized for graph diagnostics
+ds4: memory: KV 16.66 GiB (raw 13.01 + compressed 3.66) + buffers 15.24 GiB + resident model 69.73 GiB = 101.63 GiB planned
+ds4: memory detail: ctx=524288 prefill_cap=8192 raw_kv_rows=524288 compressed_kv_rows=131073 backend=metal
+1003 17:33:56 ds4-server: context buffers 32672.72 MiB (ctx=524288, backend=metal, prefill_chunk=8192, raw_kv_rows=524288, compressed_kv_rows=131073)
+1003 17:33:56 ds4-server: KV disk cache /Volumes/FireCuda520/ds4-kv-qwen (budget=524288 MiB, cross-quant=accept, min=512, cold_max=30000, continued=10000, trim=32, align=2048, hit_half_life=21600s)
+1003 17:33:56 ds4-server: KV retention anchor_step=8192 continued_step=8192 (doubles above 49152 tokens) prefill_chunk=4096 small_dense=49152 tail=2 mid_spacing=131072 min_anchors=4 max_conversations=0 model_fp=9911305607209564945
+1003 17:33:56 ds4-server: tracing session to ./log/ds4-qwen.trace
+1003 17:33:56 ds4-server: listening on http://127.0.0.1:8002
+1003 17:33:59 ds4-server: completion ctx=0..89:89 prompt start
+1003 17:34:00 ds4-server: completion ctx=0..89:89 prefill chunk 89/89 (100.0%) chunk=0.00 t/s avg=184.86 t/s 0.481s
+1003 17:34:00 ds4-server: completion ctx=0..89:89 prompt done 0.481s
+1003 17:34:01 ds4-server: completion ctx=89..139:50 gen=50 THINKING decoding chunk=55.41 t/s avg=55.41 t/s 0.902s
+1003 17:34:01 ds4-server: completion ctx=139..189:50 gen=100 THINKING decoding chunk=55.68 t/s avg=55.54 t/s 1.800s
+1003 17:34:02 ds4-server: completion ctx=189..239:50 gen=150 THINKING decoding chunk=55.65 t/s avg=55.58 t/s 2.699s
+1003 17:34:03 ds4-server: completion ctx=239..289:50 gen=200 THINKING decoding chunk=55.58 t/s avg=55.58 t/s 3.598s
+1003 17:34:04 ds4-server: completion ctx=289..339:50 gen=250 THINKING decoding chunk=55.60 t/s avg=55.58 t/s 4.498s
+1003 17:34:05 ds4-server: completion ctx=339..389:50 gen=300 THINKING decoding chunk=55.57 t/s avg=55.58 t/s 5.397s
+1003 17:34:06 ds4-server: completion ctx=389..439:50 gen=350 THINKING decoding chunk=55.73 t/s avg=55.60 t/s 6.295s
+1003 17:34:07 ds4-server: completion ctx=439..489:50 gen=400 THINKING decoding chunk=55.66 t/s avg=55.61 t/s 7.193s
+1003 17:34:07 ds4-server: completion ctx=0..89:89 gen=400 THINKING finish=length 7.675s

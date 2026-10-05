@@ -91,19 +91,20 @@ def maxabs(x, y):
     return float(np.max(np.abs(x.astype(np.float64) - y.astype(np.float64))))
 
 
-nh = int(sys.argv[1]) if len(sys.argv) > 1 else 4
-print(f"D={D} T={T} chunk={C} heads={nh}   (anchor = serial fp64)")
-names = ["serial_f32", "chunked_f64", "chunked_f32", "chunked_f16"]
-print(f"{'head':5s}" + "".join(f"{n:>14s}" for n in names) + "   (max|do| / max|dS|)")
-for idx in range(nh):
-    g, beta, q, k, v = gen_head(idx)
-    o64, S64 = serial(g, beta, q, k, v, np.float64)
-    cells = []
-    for fn in [lambda: serial(g, beta, q, k, v, np.float32),
-               lambda: chunked(g, beta, q, k, v, np.float64),
-               lambda: chunked(g, beta, q, k, v, np.float32),
-               lambda: chunked(g, beta, q, k, v, np.float32, True)]:
-        o, S = fn()
-        cells.append(f"{maxabs(o, o64):6.2e}/{maxabs(S, S64):5.2e}")
-    print(f"h{idx:<4d}" + "".join(f"{c:>14s}" for c in cells))
-print("\nscale check: |o| ~", maxabs(o64, np.zeros_like(o64)))
+if __name__ == "__main__":
+    nh = int(sys.argv[1]) if len(sys.argv) > 1 else 4
+    print(f"D={D} T={T} chunk={C} heads={nh}   (anchor = serial fp64)")
+    names = ["serial_f32", "chunked_f64", "chunked_f32", "chunked_f16"]
+    print(f"{'head':5s}" + "".join(f"{n:>14s}" for n in names) + "   (max|do| / max|dS|)")
+    for idx in range(nh):
+        g, beta, q, k, v = gen_head(idx)
+        o64, S64 = serial(g, beta, q, k, v, np.float64)
+        cells = []
+        for fn in [lambda: serial(g, beta, q, k, v, np.float32),
+                   lambda: chunked(g, beta, q, k, v, np.float64),
+                   lambda: chunked(g, beta, q, k, v, np.float32),
+                   lambda: chunked(g, beta, q, k, v, np.float32, True)]:
+            o, S = fn()
+            cells.append(f"{maxabs(o, o64):6.2e}/{maxabs(S, S64):5.2e}")
+        print(f"h{idx:<4d}" + "".join(f"{c:>14s}" for c in cells))
+    print("\nscale check: |o| ~", maxabs(o64, np.zeros_like(o64)))

@@ -42,8 +42,8 @@ def chunk_ut(g, beta, q, k, v, dtype):
         # pairwise decay ratio matrix R[t,s] = exp(gc_t - gc_s), t>=s
         idx = np.arange(n)
         lower = idx[:, None] >= idx[None, :]
-        R = np.where(lower, np.exp(gc[:, None] - gc[None, :]), 0.0)
-        Gk = kc * (bt[:, None] * np.exp(gc))[:, None]   # beta_t exp(gc_t) k_t
+        Rd = gc[:, None] - gc[None, :]
+        R = np.where(lower, np.exp(np.where(lower, Rd, 0.0)), 0.0)
         # strictly-lower coupling T[t,s] = R[t,s] beta_t (k_t.k_s), s < t
         KK = kc @ kc.T
         Tm = R * KK * bt[:, None]
@@ -63,9 +63,6 @@ def chunk_ut(g, beta, q, k, v, dtype):
         last = np.exp(gc[-1] - gc)
         S = np.asarray(np.exp(gc[-1]) * np.asarray(S, np.float64) + (U * last[:, None]).T @ kc,
                        dtype=dtype)
-        # store the f32-rounded U/k back into o loop? the kernel would compute
-        # the dtype-rounded pieces; emulate: round inputs per chunk
-        o = np.asarray(o, dtype)
     return o, S
 
 
@@ -86,7 +83,8 @@ def chunk_ut_f32(g, beta, q, k, v):
         gc = np.cumsum(np.log(gt.astype(np.float64))).astype(dtype)
         idx = np.arange(n)
         lower = idx[:, None] >= idx[None, :]
-        R = np.where(lower, np.exp(gc[:, None] - gc[None, :]).astype(dtype), dtype(0))
+        Rd = (gc[:, None] - gc[None, :]).astype(dtype)
+        R = np.where(lower, np.exp(np.where(lower, Rd, dtype(0))).astype(dtype), dtype(0))
         expg = np.exp(gc).astype(dtype)
         KK = (kc @ kc.T).astype(dtype)
         Tm = (R * KK * bt[:, None]).astype(dtype)

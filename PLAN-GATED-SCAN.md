@@ -29,16 +29,18 @@ D4). Est. 4-7 windows total (Phases 1-3).
   candidate that is not a golden re-capture project on its own.
 
 ## Phase 1 stories
-- P1a (0.5 window, numpy only): run the UT reference
-  tests/spec_economics/gdn_chunk_ut_reference.py and validate the
-  derivation: expect ut_f64 ~1e-14 class vs serial anchor (if not, the
-  algebra is wrong — fix before anything else), ut_f32 <= ~1e-7. KNOWN
-  BOOT BUG: it `from gdn_chunk_scan_probe import ...` but that probe's
-  __main__ block is unguarded (import executes the whole probe). Guard the
-  probe's bottom block first. The chunk_ut() f64 path has a leftover
-  `o = np.asarray(o, dtype)` inside the chunk loop — remove; it is also
-  only a sketch: check shapes (Sk orientation, KQ include-diagonal) against
-  the derivation in its docstring.
+- P1a DONE 2026-10-05, PASS (log results/20261005_utref.log):
+  ut_f64 vs serial anchor = 1.2-3.3e-16 -> the REALIZABLE UT formulation
+  (pairwise exp(gc_t-gc_s) ratios, strictly-lower forward substitution) is
+  algebraically exact; ut_f32 = 0.8-1.9e-7 outputs / <=2.1e-7 state — ~10x
+  the serial fp32 floor but the same 1e-7 ST-flip decision class. Also
+  re-verified against gdn_reference (tests/test_qwen4_kernels.c:688): g and
+  beta are PER-HEAD SCALARS (ssm_a[j], ab scalar) -> scalar cumsum gc is
+  faithful, no per-dim ratio tensor needed; q,k shared per kh=j%Hk (3
+  v-heads : 1 k-head) -> K1 grid is Hv=48, k/q tiles amortize 3x. np.where
+  evaluates both branches (exp overflow warning) — masked away, kernel
+  materializes lower triangle only.
+  (Fixed boot bugs: probe __main__ guarded; stray cast/dead line removed.)
 - P1b (1-2 windows, Metal): kernel design, three dispatches per layer:
   K1 chunk-local UT (grid heads x chunks): build KK/KQ/R (64x64 from
   128-dot rows), forward-substitution solve U, intra-chunk output part,
