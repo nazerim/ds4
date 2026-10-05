@@ -3415,11 +3415,11 @@ static int kv_cache_try_load_one(ds4_kvstore *kc, ds4_engine *engine,
         ds4_kvstore_touch_file(path, hdr.hits + 1, hdr.stale, hdr.level,
                                (uint64_t)time(NULL));
         kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
-                "%s: kv cache hit text%s%s tokens=%d text=%u quant=%u key=%s load=%.1f ms file=%s",
+                "%s: kv cache hit text%s%s tokens=%d text=%u quant=%u key=%s chain=%d load=%.1f ms file=%s",
                 kv_log_name(kc),
                 responses_protocol ? " " : "",
                 responses_protocol ? "RESPPROTO" : "",
-                loaded, text_bytes, hdr.quant_bits, key_kind, load_ms, path);
+                loaded, text_bytes, hdr.quant_bits, key_kind, nchain, load_ms, path);
         if (result) {
             result->tokens = loaded;
             result->text_bytes = text_bytes;
