@@ -3067,6 +3067,60 @@ static void test_gdn_prefill_dispatch(void) {
     }
 }
 
+#ifdef __APPLE__
+/* The chunked (linearized UT) prefill scan against the serial scan: same
+ * inputs, the same starting state, outputs and final states compared on the
+ * CPU.  T=2048 exercises full chunks and T=2000 the masked tail chunk; both
+ * share the Cn=32 scratch tiles. */
+static void test_gdn_chunked(void) {
+    const uint32_t Hk = 16u, Hv = 48u, D = 128u;
+    const uint64_t C = (2u * Hk + Hv) * D, V = Hv * D, S = V * D;
+    const uint64_t Cn = 32u, tile = Hv * Cn * D * D;
+    float *qkv = rand_vec(2048u * C, 0.05f);
+    float *initial = rand_vec(S, 0.01f);
+    ds4_gpu_tensor *gqkv = upload(qkv, 2048u * C);
+    ds4_gpu_tensor *ga = upload(NULL, 2048u * Hv);
+    ds4_gpu_tensor *gb = upload(NULL, 2048u * Hv);
+    ds4_gpu_tensor *gs = upload(initial, S);
+    ds4_gpu_tensor *go = upload(NULL, 2048u * V);
+    free(qkv);
+    require_ok(ds4_gpu_tensor_fill_f32(ga, 0.95f, 2048u * Hv) &&
+               ds4_gpu_tensor_fill_f32(gb, 0.25f, 2048u * Hv), "GDN chunked gates");
+    ds4_gpu_tensor *A = upload(NULL, tile), *B = upload(NULL, tile), *SI = upload(NULL, tile);
+    ds4_gpu_tensor *O0 = upload(NULL, 2048u * V), *G = upload(NULL, 2048u * V);
+    require_ok(A && B && SI && O0 && G, "GDN chunked scratch alloc");
+    const uint32_t Ts[2] = { 2048u, 2000u };
+    for (uint32_t ti = 0; ti < 2u; ti++) {
+        const uint32_t T = Ts[ti];
+        require_ok(ds4_gpu_tensor_write(gs, 0, initial, S * sizeof(float)), "GDN chunked serial reset");
+        require_ok(ds4_gpu_qwen4_gdn_scan_tensor(go, gs, gqkv, ga, gb, T, Hk, Hv, D,
+                                                 NULL, 0u, NULL, 0u), "GDN chunked serial scan");
+        float *ref_out = download(go, T * V), *ref_state = download(gs, S);
+        require_ok(ds4_gpu_tensor_write(gs, 0, initial, S * sizeof(float)), "GDN chunked reset");
+        require_ok(ds4_gpu_qwen4_gdn_scan_chunked_tensor(go, gs, gqkv, ga, gb, T, Hk, Hv, D,
+                                                         A, B, SI, O0, G, NULL), "GDN chunked scan");
+        float *out = download(go, T * V), *state = download(gs, S);
+        double worst_o = 0.0, worst_s = 0.0;
+        for (uint64_t i = 0; i < T * V; i++) {
+            const double d = fabs((double)out[i] - (double)ref_out[i]);
+            if (d > worst_o) worst_o = d;
+        }
+        for (uint64_t i = 0; i < S; i++) {
+            const double d = fabs((double)state[i] - (double)ref_state[i]);
+            if (d > worst_s) worst_s = d;
+        }
+        printf("  GDN chunked T=%u vs serial scan: max|do|=%.3e max|dState|=%.3e\n", T, worst_o, worst_s);
+        require_ok(worst_o < 5e-7 && worst_s < 5e-7, "GDN chunked scan drift vs serial");
+        free(out); free(state); free(ref_out); free(ref_state);
+    }
+    free(initial);
+    ds4_gpu_tensor_free(G); ds4_gpu_tensor_free(O0); ds4_gpu_tensor_free(SI);
+    ds4_gpu_tensor_free(B); ds4_gpu_tensor_free(A);
+    ds4_gpu_tensor_free(go); ds4_gpu_tensor_free(gs);
+    ds4_gpu_tensor_free(gqkv); ds4_gpu_tensor_free(ga); ds4_gpu_tensor_free(gb);
+}
+#endif
+
 static double bench_now(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -3296,6 +3350,38 @@ static int bench_gdn_p_scan(void *ud) {
     }
     return ds4_gpu_qwen4_gdn_scan_tensor(out, stt, qkv, a8, b8, 8192, 16, 48, 128, NULL, 0u, NULL, 0u);
 }
+/* the chunked (UT) scan at the same T=8192 shape; Cn=128 makes the three
+ * [Hv][Cn][D][D] tiles 503 MB each and the two [T][Hv*D] tiles 201 MB each,
+ * ~1.9 GB of scratch peak.  Inputs must carry real decays: the chunked form
+ * takes log(g), so a zero-filled ga (the r4 arm's input) is not an option.
+ * DS4_QWEN4_GDN_STAGES prices the individual dispatches (a masked run is a
+ * partial, deliberately wrong scan; only its timing is used). */
+static int bench_gdn_p_chunked_impl(uint32_t stages) {
+    static ds4_gpu_tensor *qkv, *a8, *b8, *out, *stt, *A, *B, *SI, *O0, *G;
+    static int once;
+    if (!once++) {
+        qkv = upload(NULL, 8192ull * 10240); a8 = upload(NULL, 8192ull * 48);
+        b8 = upload(NULL, 8192ull * 48); out = upload(NULL, 8192ull * 48 * 128);
+        stt = upload(NULL, 48ull * 128 * 128);
+        A = upload(NULL, 48ull * 128ull * 128 * 128); B = upload(NULL, 48ull * 128ull * 128 * 128);
+        SI = upload(NULL, 48ull * 128ull * 128 * 128);
+        O0 = upload(NULL, 8192ull * 48 * 128); G = upload(NULL, 8192ull * 48 * 128);
+        require_ok(qkv && a8 && b8 && out && stt && A && B && SI && O0 && G, "gdn chunked scan buffers");
+        require_ok(ds4_gpu_tensor_fill_f32(a8, 0.95f, 8192ull * 48) &&
+                   ds4_gpu_tensor_fill_f32(b8, 0.25f, 8192ull * 48), "gdn chunked scan gates");
+    }
+    char buf[4];
+    snprintf(buf, sizeof(buf), "%u", stages);
+    require_ok(setenv("DS4_QWEN4_GDN_STAGES", buf, 1) == 0, "gdn chunked stages env");
+    const int rc = ds4_gpu_qwen4_gdn_scan_chunked_tensor(out, stt, qkv, a8, b8, 8192, 16, 48, 128,
+                                                          A, B, SI, O0, G, NULL);
+    unsetenv("DS4_QWEN4_GDN_STAGES");
+    return rc;
+}
+static int bench_gdn_p_chunked(void *ud) { (void)ud; return bench_gdn_p_chunked_impl(7u); }
+static int bench_gdn_p_chunked_ck1(void *ud) { (void)ud; return bench_gdn_p_chunked_impl(1u); }
+static int bench_gdn_p_chunked_ck2(void *ud) { (void)ud; return bench_gdn_p_chunked_impl(2u); }
+static int bench_gdn_p_chunked_ck3(void *ud) { (void)ud; return bench_gdn_p_chunked_impl(4u); }
 static int bench_p_moe_mm(void *ud) {
     bench_ctx *c = ud;
     return ds4_gpu_qwen4_moe_build_lists_tensor(c->t[20], c->t[21], c->t[16], 256, 10, 16, 256) &&
@@ -3541,6 +3627,10 @@ static void bench_dispatch(arena_t *a) {
     bench_run("gdn prefill T=8192: qkv proj (q8 NAX)", bench_gdn_p_qkv, &c, 5);
     bench_run("gdn prefill T=8192: ab-gemv+conv+prep", bench_gdn_p_convprep, &c, 5);
     bench_run("gdn prefill T=8192: scan r4", bench_gdn_p_scan, &c, 5);
+    bench_run("gdn prefill T=8192: scan chunked CK1+CK2+CK3", bench_gdn_p_chunked, &c, 5);
+    bench_run("gdn prefill T=8192: scan chunked CK1", bench_gdn_p_chunked_ck1, &c, 5);
+    bench_run("gdn prefill T=8192: scan chunked CK2", bench_gdn_p_chunked_ck2, &c, 5);
+    bench_run("gdn prefill T=8192: scan chunked CK3", bench_gdn_p_chunked_ck3, &c, 5);
     bench_run("idx score n=65536 T=32", bench_p_idx_score, &c, 10);
     bench_run("idx argsort top-512 n=65536 T=32", bench_p_idx_argsort, &c, 5);
     bench_run("idx select top-512 n=65536 T=32", bench_p_idx_select, &c, 10);
@@ -3960,6 +4050,9 @@ int main(void) {
     test_mtp(&arena, 64, 4);
     test_hc_norm_reuse(&arena);
     test_gdn_prefill_dispatch();
+#ifdef __APPLE__
+    test_gdn_chunked();
+#endif
     printf("all qwen4 kernel tests passed\n");
     return 0;
 }

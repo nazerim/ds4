@@ -1020,6 +1020,302 @@ kernel void kernel_qwen4_gdn_scan_r4(
     for (uint r = 0; r < 4; r++) *(device float4 *)(srow + r * D) = s[r];
 }
 
+/* ---- chunked GDN prefill scan (PLAN-GATED-SCAN P1b) --------------------- *
+ *
+ * Linearized UT form of the recurrence above, per chunk of GQ4_C tokens.
+ * With gc the cumsum of log g (chunk-local base, gc_t <= 0) kept as a
+ * compensated float pair, R[t,s] = exp(gc_t - gc_s) always as one exp of the
+ * pair difference -- never exp(a)*exp(-b) (the k/gamma overflow trap; and a
+ * plain fp32 cumsum would put ~ulp(|gc|) exponent error on moderate ratios
+ * after deep-decay history).  Apple-silicon Metal has no double, so the
+ * fp64 cumsum the plan mandates is realized as Kahan hi/lo: gc is monotone
+ * (log g <= 0), so the TwoSum difference of two pairs keeps the pairwise
+ * ratio error at exp's own 1-2 ulp instead of the plan's 1e-4 trap.
+ * Tm = tril_strict(R o (K K^T) o beta-row), KQ = tril_incl(R o (Q K^T)):
+ *   (I+Tm) U0 = beta*V              [C][dv]   (forward substitution)
+ *   (I+Tm) L  = diag(beta*exp(gc)) K [C][dk]
+ *   A_c = (diag(last) U0)^T K  [dv][dk],  last_s = exp(gc_C - gc_s)
+ *   B_c = (diag(last) L  )^T K  [dk][dk]
+ *   O0_c = KQ U0  [C][dv],            G_c = KQ L  [C][dk]
+ * U is affine in the incoming state S, so the per-chunk solves are S-free:
+ * CK1 computes all chunks in parallel (one threadgroup per head-chunk-slab;
+ * slab 0 solves all of U0 and writes A_c + O0_c, slab 1 all of L and writes
+ * B_c + G_c), CK2 streams the state sequentially over chunks
+ *   S_c = exp(gc_C) S_{c-1} + A_c - S_{c-1} B_c,
+ * stashing S_{c-1} for CK3, and writes the final state with the same
+ * [dv][dk] layout as kernel_qwen4_gdn_scan_r4.  CK3 is fully parallel:
+ *   o[t] = O0_c[t] + (exp(gc_t) q_t - G_c[t]) @ S_{c-1}^T.
+ * head_dim is 128 as in kernel_qwen4_gdn_scan_r4; the tail chunk masks every
+ * phase to the present tokens.  Only CK2 carries sequential work; its thread-
+ * group memory is exactly the 32 KiB budget (Sx 16 KiB + Bb 16 KiB), so the
+ * chunk decay EG is recomputed redundantly per thread instead of staged. */
+
+#define GQ4_C 64
+#define GQ4_D 128
+#define GQ4_NTHREADS 256    /* ck1 only; ck2/ck3 dispatch 128-thread groups */
+
+/* Pair (hi,lo) helpers for the chunk decay cumsum; |lo| <= ~1 ulp of hi.
+ * pdiff returns oh+ol = (ah+al) - (bh+bl) with the Knuth two-sum residual;
+ * pexp is the single exp of the pair.  No fusions here, so compiler
+ * contraction cannot rewrite the residual terms. */
+static inline float qwen4_gdn_pexp(float hi, float lo) {
+    return exp(hi) * (1.0f + lo);
+}
+
+/* exp of the pair difference in one call: the two-sum residual rides into
+ * the (1 + lo) scale, so only one exp is taken of the difference. */
+static inline float qwen4_gdn_pratio(float ah, float al, float bh, float bl) {
+    const float b = -bh;
+    const float s = ah + b;
+    const float v = s - ah;
+    const float e = (ah - (s - v)) + (b - v);
+    return exp(s) * (1.0f + (e + (al - bl)));
+}
+
+struct ds4_metal_args_qwen4_gdn_chunk {
+    uint32_t n_tokens;
+    uint32_t n_k_head;
+    uint32_t n_v_head;
+    uint32_t head_dim;
+    uint32_t n_chunks;     /* ceil(n_tokens / GQ4_C) */
+    uint32_t stages;       /* harness per-stage timing: bit0 CK1, bit1 CK2, bit2 CK3 */
+    uint32_t pad1;
+    uint32_t pad2;
+};
+
+kernel void kernel_qwen4_gdn_ck1(
+        constant ds4_metal_args_qwen4_gdn_chunk & args,
+        device const float *qkv,
+        device const float *ga,
+        device const float *gb,
+        device float       *scratchA,   /* [Hv][Cn][D][D] as [dv][dk] */
+        device float       *scratchB,   /* [Hv][Cn][D][D] as [dk1][dk2] */
+        device float       *scratchO0,  /* [T][Hv*D] */
+        device float       *scratchG,   /* [T][Hv*D] */
+        uint3 tgpig [[threadgroup_position_in_grid]],
+        ushort tid [[thread_index_in_threadgroup]]) {
+    const uint c = tgpig.x, h = tgpig.y, slab = tgpig.z;
+    if (c >= args.n_chunks || h >= args.n_v_head) return;
+    const uint D = args.head_dim, Cn = args.n_chunks, Hv = args.n_v_head;
+    const uint c0 = c * GQ4_C, n = min((uint)GQ4_C, args.n_tokens - c0);
+    const uint kh = h % args.n_k_head;
+    const uint cd = 2u * args.n_k_head * D + Hv * D;
+    const uint qws = cd / 4u;                       /* float4 row stride of qkv */
+    device const float *qbase = qkv + (uint64_t)c0 * cd + kh * D;
+    device const float *kbase = qkv + (uint64_t)c0 * cd + (args.n_k_head + kh) * D;
+    device const float *vbase = qkv + (uint64_t)c0 * cd + 2u * args.n_k_head * D + h * D;
+    device const float *g0 = ga + (uint64_t)c0 * Hv + h;
+    device const float *b0 = gb + (uint64_t)c0 * Hv + h;
+
+    threadgroup float buf[GQ4_C * GQ4_C];           /* Tm, then reused for KQ */
+    threadgroup float gchi[GQ4_C], gclo[GQ4_C];     /* fp64-emulated chunk cumsum */
+    if (tid == 0u) {
+        float sum = 0.0f, comp = 0.0f;              /* Kahan two-term sum */
+        for (uint t = 0u; t < n; t++) {
+            const float y = log(g0[(uint64_t)t * Hv]) - comp;
+            const float nn = sum + y;
+            comp = (nn - sum) - y;
+            sum = nn;
+            gchi[t] = sum;
+            gclo[t] = -comp;
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    /* Tm[t,s] = R[t,s] * beta_t * (k_t . k_s), strictly lower. */
+    for (uint p = tid; p < n * (n - 1u) / 2u; p += GQ4_NTHREADS) {
+        uint sp = p, t = 1u;
+        while (sp >= t) { sp -= t; t++; }
+        device const float4 *kt = (device const float4 *)(kbase + (uint64_t)t * cd);
+        device const float4 *ks = (device const float4 *)(kbase + (uint64_t)sp * cd);
+        float acc = 0.0f;
+        for (uint j = 0u; j < D / 4u; j++) acc += dot(kt[j], ks[j]);
+        buf[t * GQ4_C + sp] =
+            qwen4_gdn_pratio(gchi[t], gclo[t], gchi[sp], gclo[sp]) * b0[(uint64_t)t * Hv] * acc;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    /* Forward substitution (I+Tm) X = P.  Thread col owns solve column col:
+     * slab 0 solves X=U0 with P = beta*V (columns are dv), slab 1 solves
+     * X=L with P = diag(beta*exp(gc)) K (columns are dk).  head_dim is 128,
+     * so the 128 upper threads idle through the column-parallel phases and
+     * only pick up slack in the strided pair loops. */
+    float xcol[GQ4_C];
+    const uint col = tid;
+    if (col < D) for (uint t = 0u; t < n; t++) {
+        float acc = slab == 0u
+            ? b0[(uint64_t)t * Hv] * vbase[(uint64_t)t * cd + col]
+            : qwen4_gdn_pexp(gchi[t], gclo[t]) * b0[(uint64_t)t * Hv] * kbase[(uint64_t)t * cd + col];
+        for (uint s = 0u; s < t; s++) acc -= buf[t * GQ4_C + s] * xcol[s];
+        xcol[t] = acc;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    /* KQ[t,s] = R[t,s] * (q_t . k_s), s <= t; overwrites Tm, no longer read. */
+    for (uint p = tid; p < n * (n + 1u) / 2u; p += GQ4_NTHREADS) {
+        uint sp = p, t = 0u;
+        while (sp > t) { sp -= t + 1u; t++; }
+        device const float4 *qt = (device const float4 *)(qbase + (uint64_t)t * cd);
+        device const float4 *ks = (device const float4 *)(kbase + (uint64_t)sp * cd);
+        float acc = 0.0f;
+        for (uint j = 0u; j < D / 4u; j++) acc += dot(qt[j], ks[j]);
+        buf[t * GQ4_C + sp] = qwen4_gdn_pratio(gchi[t], gclo[t], gchi[sp], gclo[sp]) * acc;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (col < D) {
+        /* Column outputs: O0_c (slab 0) / G_c (slab 1) = KQ X. */
+        device float *oc = (slab == 0u ? scratchO0 : scratchG) + ((uint64_t)c0 * Hv + h) * D + col;
+        for (uint t = 0u; t < n; t++) {
+            float acc = 0.0f;
+            for (uint s = 0u; s <= t; s++) acc += buf[t * GQ4_C + s] * xcol[s];
+            oc[(uint64_t)t * Hv * D] = acc;
+        }
+        /* Row outputs: A_c (slab 0) / B_c (slab 1) row col = sum_t last_t X[t][col] k_t.
+         * Scale after the KQ dots: they read the unscaled xcol. */
+        for (uint t = 0u; t < n; t++)
+            xcol[t] *= qwen4_gdn_pratio(gchi[n - 1u], gclo[n - 1u], gchi[t], gclo[t]);
+        device float4 *dst = (device float4 *)((slab == 0u ? scratchA : scratchB) +
+                                               (((uint64_t)h * Cn + c) * D + col) * D);
+        device const float4 *krow = (device const float4 *)kbase;
+        for (uint j = 0u; j < D / 4u; j++) {
+            float4 acc = float4(0.0f);
+            for (uint t = 0u; t < n; t++) acc += xcol[t] * krow[t * qws + j];
+            dst[j] = acc;
+        }
+    }
+}
+
+/* Sequential state pass.  One threadgroup per (v-head, 32 dv rows); the 128
+ * threads are r = tid % 32 rows by q8 = tid / 32 column quarters, each owning
+ * the eight float4 columns q8*8 .. q8*8+7 of its row as s4[].  Per chunk the
+ * row is staged into Sx, the B_c block rows into Bb (each row's eight output
+ * quads for its own q8, so the four column-quarter threads of a row never
+ * collide), and S_c = EG*S + A_c - S@B_c accumulates 1024 float4 FMAs per
+ * thread.  S_{c-1} is stashed to scratchSIn for CK3; the final S lands in
+ * state[] exactly where kernel_qwen4_gdn_scan_r4 leaves it. */
+kernel void kernel_qwen4_gdn_ck2(
+        constant ds4_metal_args_qwen4_gdn_chunk & args,
+        device const float *ga,
+        device float       *state,
+        device const float *scratchA,
+        device const float *scratchB,
+        device float       *scratchSIn,
+        uint3 tgpig [[threadgroup_position_in_grid]],
+        ushort tid [[thread_index_in_threadgroup]]) {
+    const uint h = tgpig.x, rowblk = tgpig.y;
+    if (h >= args.n_v_head || rowblk >= 4u) return;
+    const uint D = args.head_dim, Cn = args.n_chunks, Hv = args.n_v_head;
+    const uint r = tid & 31u, q8 = tid >> 5u;
+    const uint dv = rowblk * 32u + r;
+
+    threadgroup float4 Sx[32][32];                  /* staged S_prev rows, [row][quad] */
+    threadgroup float4 Bb[32][4][8];                /* B block rows dk1 0..31, [row][q8][this quarter's 8 quads] */
+
+    device float4 *srow = (device float4 *)(state + ((uint64_t)h * D + dv) * D);
+    float4 s4[8];
+    for (uint i = 0u; i < 8u; i++) s4[i] = srow[q8 * 8u + i];
+
+    for (uint cc = 0u; cc < Cn; cc++) {
+        /* EG_C with ck1's Kahan-pair cumsum recipe, redundant per thread
+         * (the threadgroup budget is full at exactly 32 KiB). */
+        const uint c0 = cc * GQ4_C, n = min((uint)GQ4_C, args.n_tokens - c0);
+        device const float *g0 = ga + (uint64_t)c0 * Hv + h;
+        float sum = 0.0f, comp = 0.0f;
+        for (uint t = 0u; t < n; t++) {
+            const float y = log(g0[(uint64_t)t * Hv]) - comp;
+            const float nn = sum + y;
+            comp = (nn - sum) - y;
+            sum = nn;
+        }
+        const float EG = qwen4_gdn_pexp(sum, -comp);
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        device float4 *si = (device float4 *)(scratchSIn + (((uint64_t)h * Cn + cc) * D + dv) * D);
+        for (uint i = 0u; i < 8u; i++) { Sx[r][q8 * 8u + i] = s4[i]; si[q8 * 8u + i] = s4[i]; }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        float4 SB[8];
+        for (uint i = 0u; i < 8u; i++) SB[i] = float4(0.0f);
+        for (uint blk = 0u; blk < 4u; blk++) {
+            /* stage the block's 32 B_c rows (dk1 = blk*32 + r), this q8's eight
+             * output quads per row, so the four column threads never collide */
+            device const float4 *br = (device const float4 *)(scratchB +
+                    (((uint64_t)h * Cn + cc) * D + blk * 32u + r) * D);
+            for (uint i = 0u; i < 8u; i++) Bb[r][q8][i] = br[q8 * 8u + i];
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            for (uint m = 0u; m < 8u; m++) {
+                const float4 sp = Sx[r][blk * 8u + m];
+                for (uint cc2 = 0u; cc2 < 4u; cc2++) {
+                    const float wv = cc2 == 0u ? sp.x : cc2 == 1u ? sp.y : cc2 == 2u ? sp.z : sp.w;
+                    for (uint i = 0u; i < 8u; i++) SB[i] += Bb[4u * m + cc2][q8][i] * wv;
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+
+        device const float4 *ar = (device const float4 *)(scratchA + (((uint64_t)h * Cn + cc) * D + dv) * D);
+        for (uint i = 0u; i < 8u; i++) s4[i] = s4[i] * EG + ar[q8 * 8u + i] - SB[i];
+    }
+    for (uint i = 0u; i < 8u; i++) srow[q8 * 8u + i] = s4[i];
+}
+
+/* Parallel output pass: o[t] = O0_c[t] + (exp(gc_t) q_t - G_c[t]) @ S_{c-1}^T.
+ * Thread tid owns state/output row dv = tid: its SIn row is staged once, the
+ * W rows are broadcast device reads. */
+kernel void kernel_qwen4_gdn_ck3(
+        constant ds4_metal_args_qwen4_gdn_chunk & args,
+        device const float *qkv,
+        device const float *ga,
+        device const float *scratchSIn,
+        device const float *scratchG,
+        device const float *scratchO0,
+        device float       *out,
+        uint3 tgpig [[threadgroup_position_in_grid]],
+        ushort tid [[thread_index_in_threadgroup]]) {
+    const uint c = tgpig.x, h = tgpig.y;
+    if (c >= args.n_chunks || h >= args.n_v_head) return;
+    const uint D = args.head_dim, Cn = args.n_chunks, Hv = args.n_v_head;
+    const uint c0 = c * GQ4_C, n = min((uint)GQ4_C, args.n_tokens - c0);
+    const uint kh = h % args.n_k_head;
+    const uint cd = 2u * args.n_k_head * D + Hv * D;
+
+    threadgroup float gchi[GQ4_C], gclo[GQ4_C];     /* same Kahan pair as ck1/ck2 */
+    if (tid == 0u) {
+        device const float *g0 = ga + (uint64_t)c0 * Hv + h;
+        float sum = 0.0f, comp = 0.0f;
+        for (uint t = 0u; t < n; t++) {
+            const float y = log(g0[(uint64_t)t * Hv]) - comp;
+            const float nn = sum + y;
+            comp = (nn - sum) - y;
+            sum = nn;
+            gchi[t] = sum;
+            gclo[t] = -comp;
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    device const float4 *S4 = (device const float4 *)(scratchSIn + (((uint64_t)h * Cn + c) * D + tid) * D);
+    device const float4 *G4 = (device const float4 *)(scratchG + ((uint64_t)c0 * Hv + h) * D);
+    device const float *O0 = scratchO0 + ((uint64_t)c0 * Hv + h) * D;
+    device const float *qbase = qkv + (uint64_t)c0 * cd + kh * D;
+    device float *o0 = out + ((uint64_t)c0 * Hv + h) * D;
+
+    float4 ss[GQ4_D / 4u];                          /* head_dim is fixed at 128 here, as in ck2 */
+    for (uint j = 0u; j < D / 4u; j++) ss[j] = S4[j];
+    for (uint t = 0u; t < n; t++) {
+        const float eg = qwen4_gdn_pexp(gchi[t], gclo[t]);
+        device const float4 *qt = (device const float4 *)(qbase + (uint64_t)t * cd);
+        device const float4 *gt = G4 + t * (Hv * D / 4u);
+        float acc = O0[t * Hv * D + tid];
+        for (uint j = 0u; j < D / 4u; j++) {
+            const float4 qv = qt[j], gv = gt[j];
+            acc += dot(ss[j], float4(eg * qv.x - gv.x, eg * qv.y - gv.y, eg * qv.z - gv.z, eg * qv.w - gv.w));
+        }
+        o0[t * Hv * D + tid] = acc;
+    }
+}
+
 struct ds4_metal_args_qwen4_gdn_out {
     uint32_t n_tokens;
     uint32_t n_head;

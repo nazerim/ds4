@@ -48406,6 +48406,9 @@ enum {
     QWEN4_K_VIS_ATTENTION,
     QWEN4_K_VIS_BIAS_RESIDUAL,
     QWEN4_K_VIS_BIAS_ACT,
+    QWEN4_K_GDN_CK1,
+    QWEN4_K_GDN_CK2,
+    QWEN4_K_GDN_CK3,
     QWEN4_K_COUNT,
 };
 
@@ -48512,6 +48515,9 @@ static const char *const qwen4_kernel_names[QWEN4_K_COUNT] = {
     "kernel_qwen4_vis_attention",
     "kernel_qwen4_vis_bias_residual",
     "kernel_qwen4_vis_bias_act",
+    "kernel_qwen4_gdn_ck1",
+    "kernel_qwen4_gdn_ck2",
+    "kernel_qwen4_gdn_ck3",
 };
 
 typedef struct {
@@ -49021,6 +49027,59 @@ int ds4_gpu_qwen4_gdn_scan_tensor(
     }
     return qwen4_dispatch(QWEN4_K_GDN_SCAN, &args, sizeof(args), bd, 7,
                           MTLSizeMake(head_dim, n_v_head, 1), MTLSizeMake(32, 1, 1), 0);
+}
+
+/* Chunked (linearized UT) prefill scan; PLAN-GATED-SCAN P1b.  Three
+ * back-to-back dispatches -- CK1 per-chunk S-free solves and tiles, CK2 the
+ * sequential state pass, CK3 the parallel outputs -- replacing the serial r4
+ * scan for large prefill row counts.  Harness-only for now (the production
+ * gate is P1c); head_dim is 128 as in kernel_qwen4_gdn_scan_r4 and Tm/KQ are
+ * staged in threadgroup memory, so scratchT must be NULL.  Cn = ceil(T/64):
+ * scratchA/scratchB/scratchSIn are [Hv][Cn][D][D], scratchO0/scratchG are
+ * [T][Hv*D].  DS4_QWEN4_GDN_STAGES (default 7 = CK1|CK2|CK3) masks the
+ * individual stages so the harness can price them separately. */
+int ds4_gpu_qwen4_gdn_scan_chunked_tensor(
+        ds4_gpu_tensor *out, ds4_gpu_tensor *state, const ds4_gpu_tensor *qkv,
+        const ds4_gpu_tensor *ga, const ds4_gpu_tensor *gb,
+        uint32_t n_tokens, uint32_t n_k_head, uint32_t n_v_head, uint32_t head_dim,
+        ds4_gpu_tensor *scratchA, ds4_gpu_tensor *scratchB, ds4_gpu_tensor *scratchSIn,
+        ds4_gpu_tensor *scratchO0, ds4_gpu_tensor *scratchG, ds4_gpu_tensor *scratchT) {
+    const uint32_t stages = (uint32_t)ds4_gpu_env_u64("DS4_QWEN4_GDN_STAGES", 7u, 1u, 7u);
+    if (n_tokens == 0 || n_k_head == 0 || n_v_head == 0 || head_dim != 128u || scratchT) return 0;
+    const uint64_t conv_dim = (uint64_t)(2u * n_k_head + n_v_head) * head_dim;
+    const uint32_t cn = (n_tokens + 63u) / 64u;
+    struct { uint32_t n_tokens, n_k_head, n_v_head, head_dim, n_chunks, stages, pad1, pad2; } args =
+        { n_tokens, n_k_head, n_v_head, head_dim, cn, stages, 0, 0 };
+    const uint64_t tile_bytes = (uint64_t)n_v_head * cn * head_dim * head_dim * sizeof(float);
+    const uint64_t state_bytes = (uint64_t)n_v_head * head_dim * head_dim * sizeof(float);
+    const uint64_t row_bytes = (uint64_t)n_tokens * n_v_head * head_dim * sizeof(float);
+    qwen4_bind bd[10];
+    if (!qwen4_bind_tensor(&bd[0], qkv, n_tokens * conv_dim * sizeof(float), "gdn chunked qkv") ||
+        !qwen4_bind_tensor(&bd[1], ga, (uint64_t)n_tokens * n_v_head * sizeof(float), "gdn chunked g") ||
+        !qwen4_bind_tensor(&bd[2], gb, (uint64_t)n_tokens * n_v_head * sizeof(float), "gdn chunked beta") ||
+        !qwen4_bind_tensor(&bd[3], state, state_bytes, "gdn chunked state") ||
+        !qwen4_bind_tensor(&bd[4], out, row_bytes, "gdn chunked output") ||
+        !qwen4_bind_tensor(&bd[5], scratchA, tile_bytes, "gdn chunked scratchA") ||
+        !qwen4_bind_tensor(&bd[6], scratchB, tile_bytes, "gdn chunked scratchB") ||
+        !qwen4_bind_tensor(&bd[7], scratchSIn, tile_bytes, "gdn chunked scratchSIn") ||
+        !qwen4_bind_tensor(&bd[8], scratchO0, row_bytes, "gdn chunked scratchO0") ||
+        !qwen4_bind_tensor(&bd[9], scratchG, row_bytes, "gdn chunked scratchG")) {
+        return 0;
+    }
+    /* One command buffer per stage, mirroring the conv halo/blocked two-stage
+     * path; the stages share the argument struct but not the bind order.  A
+     * stages-masked run is a partial (deliberately wrong) scan the harness
+     * only uses to price the individual dispatches. */
+    const qwen4_bind b1[7] = { bd[0], bd[1], bd[2], bd[5], bd[6], bd[8], bd[9] };
+    const qwen4_bind b2[5] = { bd[1], bd[3], bd[5], bd[6], bd[7] };
+    const qwen4_bind b3[6] = { bd[0], bd[1], bd[7], bd[9], bd[8], bd[4] };
+    if ((stages & 1u) && !qwen4_dispatch(QWEN4_K_GDN_CK1, &args, sizeof(args), b1, 7,
+            MTLSizeMake(cn, n_v_head, 2), MTLSizeMake(256, 1, 1), 0)) return 0;
+    if ((stages & 2u) && !qwen4_dispatch(QWEN4_K_GDN_CK2, &args, sizeof(args), b2, 5,
+            MTLSizeMake(n_v_head, 4, 1), MTLSizeMake(128, 1, 1), 0)) return 0;
+    if ((stages & 4u) && !qwen4_dispatch(QWEN4_K_GDN_CK3, &args, sizeof(args), b3, 6,
+            MTLSizeMake(cn, n_v_head, 1), MTLSizeMake(128, 1, 1), 0)) return 0;
+    return 1;
 }
 
 static ds4_gpu_tensor *g_qwen4_gdn_slots;

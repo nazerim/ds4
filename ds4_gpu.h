@@ -3395,6 +3395,16 @@ int ds4_gpu_qwen4_gdn_scan_tensor(
         uint32_t n_tokens, uint32_t n_k_head, uint32_t n_v_head, uint32_t head_dim,
         ds4_gpu_tensor *snap_state, uint32_t snap_tok,
         ds4_gpu_tensor *snap2_state, uint32_t snap2_tok);
+/* chunked (linearized UT) prefill scan, PLAN-GATED-SCAN P1b; harness-only
+ * until the P1c production gate.  Cn = ceil(n_tokens/64): scratchA/B/SIn are
+ * [Hv][Cn][D][D], scratchO0/G are [T][Hv*D]; scratchT is unused (Tm/KQ are
+ * staged in threadgroup memory) and must be NULL.  Metal backend only. */
+int ds4_gpu_qwen4_gdn_scan_chunked_tensor(
+        ds4_gpu_tensor *out, ds4_gpu_tensor *state, const ds4_gpu_tensor *qkv,
+        const ds4_gpu_tensor *ga, const ds4_gpu_tensor *gb,
+        uint32_t n_tokens, uint32_t n_k_head, uint32_t n_v_head, uint32_t head_dim,
+        ds4_gpu_tensor *scratchA, ds4_gpu_tensor *scratchB, ds4_gpu_tensor *scratchSIn,
+        ds4_gpu_tensor *scratchO0, ds4_gpu_tensor *scratchG, ds4_gpu_tensor *scratchT);
 int ds4_gpu_qwen4_gdn_out_tensor(
         ds4_gpu_tensor *o, const ds4_gpu_tensor *z,
         const void *model_map, uint64_t model_size, uint64_t weight_offset,

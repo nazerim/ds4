@@ -1816,6 +1816,19 @@ extern "C" int ds4_gpu_qwen4_gdn_scan_tensor(ds4_gpu_tensor *out, ds4_gpu_tensor
     return launched();
 }
 
+/* Chunked GDN prefill scan (PLAN-GATED-SCAN P1b) is Metal-only for now; the
+ * CUDA backend keeps the serial scan. */
+extern "C" int ds4_gpu_qwen4_gdn_scan_chunked_tensor(ds4_gpu_tensor *out, ds4_gpu_tensor *state,
+        const ds4_gpu_tensor *qkv, const ds4_gpu_tensor *ga, const ds4_gpu_tensor *gb,
+        uint32_t n_tokens, uint32_t n_k_head, uint32_t n_v_head, uint32_t head_dim,
+        ds4_gpu_tensor *scratchA, ds4_gpu_tensor *scratchB, ds4_gpu_tensor *scratchSIn,
+        ds4_gpu_tensor *scratchO0, ds4_gpu_tensor *scratchG, ds4_gpu_tensor *scratchT) {
+    (void)out; (void)state; (void)qkv; (void)ga; (void)gb;
+    (void)n_tokens; (void)n_k_head; (void)n_v_head; (void)head_dim;
+    (void)scratchA; (void)scratchB; (void)scratchSIn; (void)scratchO0; (void)scratchG; (void)scratchT;
+    return 0;
+}
+
 extern "C" int ds4_gpu_qwen4_gdn_out_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *z,
         const void *map, uint64_t size, uint64_t off, uint32_t T, uint32_t H, uint32_t D, float eps) {
     using namespace qwen4_cuda;

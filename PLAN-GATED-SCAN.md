@@ -41,19 +41,51 @@ D4). Est. 4-7 windows total (Phases 1-3).
   evaluates both branches (exp overflow warning) — masked away, kernel
   materializes lower triangle only.
   (Fixed boot bugs: probe __main__ guarded; stray cast/dead line removed.)
-- P1b (1-2 windows, Metal): kernel design, three dispatches per layer:
-  K1 chunk-local UT (grid heads x chunks): build KK/KQ/R (64x64 from
-  128-dot rows), forward-substitution solve U, intra-chunk output part,
-  write per-chunk (S_in contribution excluded) o_partial + the chunk feed
-  matrix F = (U * exp(gc_C-gc))^T K (128x128).
-  K2 state pass (grid heads, sequential over T/C chunks, reads F_c):
-  S_c = exp(gc_C) S_{c-1} + F_c; stash S_{c-1} per chunk for K3.
-  K3 output combine (grid heads x chunks): o += exp(gc_t) (S_{c-1} q_t);
-  final state store at g->spos semantics (see current scan kernel for the
-  recurrent-state in/out layout + spos rotation).
-  Sizes: chunk C=64 first; threadgroup memory per head-chunk ~64KB
-  (K,Q,U,R tiles) exceeds 32 KB on M5-class => tile the solve (process q/
-  v rows in 2 halves) or C=32. Decide by bench, not by argument.
+- P1b DESIGN LOCKED 2026-10-05 (linearized UT — U is AFFINE in S_prev so the
+  per-chunk solve splits into two S-free parts):
+  per head j (kh=j%Hk), per chunk C=64, S=[dv][dk] state in:
+    gc_t = fp64 cumsum of log g (g from ga[]); EG_t = exp(gc_t);
+    R[t,s] = exp(gc_t - gc_s) — ALWAYS a single exp of the difference,
+      never exp(a)*exp(-b) (k/gamma overflow trap; fp32 cumsum would put
+      1e-4 exponent error on deep-decay chunks — fp64 gc is mandatory);
+    Tm = tril_strict(R o (K K^T) o beta-row);  KQ = tril_incl(R o (Q K^T));
+    solve (I+Tm) U0 = beta*V            [C][dv]   (forward sub, 64 steps)
+    solve (I+Tm) L   = diag(beta*EG) K  [C][dk]
+    A_c = (diag(last) U0)^T K   [dv][dk]   last_s = exp(gc_C - gc_s)
+    B_c = (diag(last) L  )^T K  [dk][dk]
+    O0_c = KQ U0  [C][dv];  G_c = KQ L  [C][dk]
+  K2 state pass (sequential over chunks, per head):
+    S_c = EG_C * S_{c-1} + A_c - S_{c-1} B_c;  stash S_{c-1} for K3;
+    final S -> state[] with the same layout/spos semantics as r4.
+  K3 output (parallel): o[t] = O0_c[t] + (EG_t * q_t - G_c[t]) @ S_{c-1}^T.
+  Dispatch: K1 grid (Cn, Hv) [dv-slabs: z dim 0/1 halves columns if the
+  32KB threadgroup budget needs it — Tm 16KB + U0/L tiles overflow at full
+  width], K2 grid (Hv, 4) [32 dv rows each, B/A streamed per step], K3 grid
+  (Cn, Hv). Scratch at T=2048 live chunk: A(=SIn reflow)+B ~200MB at
+  T=8192 bench scale, ~50MB each per live chunk + O0/G ~25MB — fine.
+  Numerics: everything else fp32 (matches ut_f32 1e-7 class); K2's S@B is
+  plain 128-dot SIMD work (no simdgroup matmul required for v1).
+  P1b SCOPE: kernels + name-table entries + ds4_gpu_qwen4_gdn_scan_chunked_
+  tensor host fn taking explicit scratch tensors + harness correctness test
+  (vs serial scan, target max|do| <= 5e-7) + bench arms. NO production
+  dispatch wiring (that is P1c behind the knob; D4 keeps T<=8 serial).
+- P1b DONE 2026-10-05 (v1, naive ALU): CORRECT, NOT FAST. Drift vs serial
+  r4 identical-state: max|do| 1.86e-9 / max|dState| 2.56e-9 (at the fp32
+  floor; masked-tail T=2000 also clean). But 71.7 ms vs serial 9.7-9.9 ms
+  at T=8192 (CK1 37 + CK2 11 + CK3 22; scalar-dot L1 traffic; log
+  results/20261005_p1b_bench.log). Roofline: chunked form costs ~50-70 GF
+  per layer-chunk vs serial ~38 GF — serial ALU-class v1 can NEVER beat
+  serial (12-17 ms at full M5 fp32 ALU); the project only lives via
+  TENSOR-UNIT staging (NAX/simdgroup f16, 20-40 TF/s => 2-4 ms feasible).
+  F16 MAGNITUDE AUDIT PASSED (8 heads x T=2048, max|.|: U0 3.95, A 0.95,
+  L 0.10, Tm 0.12, G 8.5e-4, B ~0) — no f16 overflow risk; expected drift
+  moves to the chunked_f16 ~1e-6 class (Phase-0 probe), still ST-decision
+  class but a bigger golden commitment than 1e-7.
+- P1b.5 DECISION (open, operator): invest 1-2 windows tensorizing CK1
+  (KK/KQ/solve-as-matmul tiles) + CK2 (S@B via simdgroup_matrix f16) + CK3
+  (W@SIn tiles), re-measure vs the <=5 ms gate; or bank negative and close
+  GATED-SCAN. K2's sequential-over-chunks chain (128 steps at T=8192) is
+  the residual risk even after tensorizing.
 - P1c (0.5-1 window, model-free): host wiring behind env knob
   DS4_QWEN4_GDN_CHUNK (default OFF; =rows threshold later), new bench arms
   beside the existing three; VERDICT GATE: chunked scan <= ~5 ms/layer-chunk

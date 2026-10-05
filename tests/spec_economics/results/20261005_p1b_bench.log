@@ -1,0 +1,66 @@
+ds4: Metal device Apple M5 Max, 128.00 GiB RAM
+ds4: Metal 4 tensor API enabled for Tensor kernels
+ds4: drift-patch flags hc_stable=on norm_unify=on kv_raw_f32=off rope_exp2_log2=off math_safe=off tensor_matmul=on
+ds4: Metal model views created in 0.173 ms, residency requested in 56.722 ms, warmup 2.874 ms (mapped 3072.00 MiB from offset 0.00 MiB)
+ds4: Metal mapped mmaped model as 1 overlapping shared buffers
+  hc_combine (tiny)                                20.8 us
+  q8 gemv 48x2560                                  15.3 us
+  q8 gemv 6144x2560 T=1                            33.0 us
+  q8 gemv 6144x2560 T=2                            29.2 us
+  hc_norm (+inject partials)                        9.2 us
+  hc down gemv f16 320x10240                        9.6 us
+  hc_gate_mix f16                                   8.8 us
+  hc_gate_mix f16 T=2                               7.2 us
+  attn_decode pos=110 no split                     59.0 us
+  attn_decode pos=110 split                        14.1 us
+  attn_decode pos=2000 no split                   979.4 us
+  attn_decode pos=2000 split                       49.3 us
+  gdn_front (fused)                                 7.6 us
+  gdn gemv a/b + conv + prep (prefill path)        13.2 us
+  gdn_scan                                          6.3 us
+  gdn_scan T=2                                      6.4 us
+  --- prefill T=256 ---
+  router f32 512x2560 T=256 (DS4)                 730.2 us
+  router f32 512x2560 T=256 (dense mm)            139.6 us
+  router_topk T=256                                25.0 us
+  hc_norm T=256                                    80.2 us
+  hc down f16 320x10240 T=256 (DS4)               402.5 us
+  hc down f16 320x10240 T=256 (dense mm)          273.8 us
+  hc up f16 10240x320 T=256 (DS4)                  68.3 us
+  hc up f16 10240x320 T=256 (dense mm)            205.0 us
+  hc_mix_rows T=256                                28.4 us
+  q8 gemm 6144x2560 T=256 (DS4)                   260.7 us
+  q8 gemm 6144x2560 T=256 (dense mm)              793.5 us
+  moe mm lists+mid+down 16 experts T=256 (all 2560 pairs)   2144.5 us
+  moe mm q4k/mxfp4 32 experts T=2048 x10 slots   6609.4 us
+  moe mm q4k/mxfp4 32 experts T=8192 x10 slots  26321.7 us
+  moe mm q4k/mxfp4 512 experts T=8192 x10 slots  30750.8 us
+  moe mm q4k/mxfp4 512 experts T=2048 x10 slots (live chunk)  10067.0 us
+  moe mm iq2xxs/q2k 32 experts T=2048 x10 slots   7150.5 us
+  moe mm q4k/mxfp4 lo 256 experts T=2048 x10 slots   8138.4 us
+  gdn scan r4 T=1024                             1144.4 us
+  gdn prefill T=8192: qkv proj (q8 NAX)          9242.4 us
+  gdn prefill T=8192: ab-gemv+conv+prep          4247.6 us
+  gdn prefill T=8192: scan r4                    9725.0 us
+  gdn prefill T=8192: scan chunked CK1+CK2+CK3  70128.6 us
+  gdn prefill T=8192: scan chunked CK1          37326.0 us
+  gdn prefill T=8192: scan chunked CK2          10831.2 us
+  gdn prefill T=8192: scan chunked CK3          22265.4 us
+  idx score n=65536 T=32                          207.1 us
+  idx argsort top-512 n=65536 T=32                915.6 us
+  idx select top-512 n=65536 T=32                 210.0 us
+  q8 gemm 6144x2560 T=2048 (DS4)                 1444.4 us
+  hc down f16 320x10240 T=2048 (DS4)              565.0 us
+  idx score n=65536 T=1024                       5703.8 us
+  idx select top-512 n=65536 T=1024              1714.8 us
+  attn sparse T=1024 ctx=256k random (per-token kernel)  22017.8 us
+  attn sparse T=1024 ctx=256k random blocks      7986.8 us
+  attn sparse T=1024 ctx=256k blocks in last 8k   7515.4 us
+  router gemv f32 512x2560                          7.1 us
+  router_topk (+gate logit)                         6.8 us
+  router_topk no gate                               5.7 us
+  router_topk no gate k=1                           4.1 us
+  moe_mid q8 10+1 slots (37 MB)                    57.9 us
+  moe_down q8 10+1 slots (19 MB)                   30.3 us
+  moe_mid q4_K 10+1 slots T=1                      46.3 us
+  moe_mid q4_K 10+1 slots T=2                      81.8 us
