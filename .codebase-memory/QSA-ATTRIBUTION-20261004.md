@@ -218,6 +218,23 @@ ab-gemv+conv+prep / scan r4).
   (~26% of gdn = ~6% wall) is the one non-matmul candidate; everything else
   needs the tensor-unit/MPP rewrite (oMLX #4020 / #1149-class), a project,
   not a queue item.
+## GATED-SCAN PHASE 0 2026-10-05: PASS (`gdn_chunk_scan_probe.py`, log banked
+`results/20261005_gdn_chunkprobe.log`). Chunked gated-delta-rule scan
+(S_t = S_{t-1} M_t + p_t with M = g(I - beta kk^T), running chunk prefixes
+P_t/b_t, S_t = S_prev P_t + b_t) measured against the serial fp64 anchor at
+realistic per-head params (D=128, T=2048, chunk=64, a in (-8,-.1), dt in
+(.2,1.5), unit k, beta=sigmoid):
+- pure re-association is EXACT (fp64: 1.4e-17) — no conditioning cliff;
+- fp32 chunked drift = fp32 serial drift (7-12e-9 outputs, 2-6e-8 state):
+  a chunked GPU kernel lands in the SAME 1-ULP golden-decision class as the
+  ST flip — not a new numerical semantics;
+- per-token f16-staged propagation (tensor-unit worst case) ~1-4e-6 — still
+  decision-able; a fla-style kernel (one propagation per chunk + triangular
+  intra-chunk solve) stages less and should sit closer to the f32 class.
+Math risk CLOSED; remaining work is kernel engineering (Phase 1 intra-chunk
+matmul form, Phase 2 per-row state snapshots for checkpoint/MTP exactness,
+Phase 3 golden protocol + battery). Est. 4-7 windows for +3-6% prefill wall.
+
 - **Tail tallies done too:** Scenario L field = **0 `frontier-superseded`
   events** through the Oct-5 real-session day (17 evict + 109 continued + 10
   cold + 34 token-mismatch deletes; sweep runs on every evict pass,
