@@ -609,6 +609,56 @@ static void test_hc(arena_t *a, uint32_t E, uint32_t rank, uint32_t T, uint32_t 
     free(g_gamma); free(g_down); free(g_up); free(g_inj);
 }
 
+/* Prefill arm audit (HANDOVER-20261004 step 1): the live prefill path never
+ * takes the dense-mm arms for F16 weights (the n_tok <= 64 cap in
+ * qwen4_gemv_rows), so every F16 projection runs ds4_gpu_matmul_f16_tensor.
+ * The only F16 tensors this model keeps are the HC down/up pair. Measure
+ * whether routing those to ds4_gpu_qwen4_dense_mm_tensor at prefill shapes
+ * is byte-identical (free perf path) or ~1-ULP drift (golden decision).
+ * Informational: reports the diff, never fails the suite. */
+static void test_f16_arm_bitexact(arena_t *a) {
+#ifdef __APPLE__
+    struct { uint32_t in_dim, out_dim; const char *what; } shapes[] = {
+        { 10240u, 320u, "hc down" }, { 320u, 10240u, "hc up" },
+    };
+    static const uint32_t ts[] = { 256u, 2048u, 8192u };
+    for (size_t s = 0; s < sizeof(shapes) / sizeof(shapes[0]); s++) {
+        const uint32_t in_dim = shapes[s].in_dim, out_dim = shapes[s].out_dim;
+        double *sh;
+        const uint64_t woff = arena_f16(a, (uint64_t)in_dim * out_dim, &sh, 0.05f);
+        free(sh);
+        for (size_t ti = 0; ti < sizeof(ts) / sizeof(ts[0]); ti++) {
+            const uint32_t T = ts[ti];
+            float *x = rand_vec((uint64_t)T * in_dim, 0.05f);
+            ds4_gpu_tensor *gx = upload(x, (uint64_t)T * in_dim);
+            ds4_gpu_tensor *o1 = upload(NULL, (uint64_t)T * out_dim);
+            ds4_gpu_tensor *o2 = upload(NULL, (uint64_t)T * out_dim);
+            require_ok(ds4_gpu_matmul_f16_tensor(o1, a->base, a->size, woff, in_dim, out_dim, gx, T),
+                       "f16 custom arm");
+            require_ok(ds4_gpu_qwen4_dense_mm_tensor(o2, gx, a->base, a->size, woff, 1u, T, in_dim, out_dim),
+                       "f16 dense-mm arm");
+            float *r1 = download(o1, (uint64_t)T * out_dim);
+            float *r2 = download(o2, (uint64_t)T * out_dim);
+            uint64_t ndiff = 0;
+            double maxabs = 0.0;
+            for (uint64_t i = 0; i < (uint64_t)T * out_dim; i++) {
+                if (memcmp(&r1[i], &r2[i], sizeof(float)) != 0) ndiff++;
+                const double d = fabs((double)r1[i] - (double)r2[i]);
+                if (d > maxabs) maxabs = d;
+            }
+            printf("  %-34s T=%6u  byte-diff %8llu/%llu  max|d|=%.3e  %s\n",
+                   shapes[s].what, T, (unsigned long long)ndiff,
+                   (unsigned long long)((uint64_t)T * out_dim), maxabs,
+                   ndiff == 0 ? "BIT-EXACT" : "DRIFTS");
+            free(r1); free(r2); free(x);
+            ds4_gpu_tensor_free(o2); ds4_gpu_tensor_free(o1); ds4_gpu_tensor_free(gx);
+        }
+    }
+#else
+    (void)a;
+#endif
+}
+
 /* ---- gated delta net ---- */
 
 static void gdn_reference(uint32_t Hk, uint32_t Hv, uint32_t D, uint32_t K, uint32_t T,
@@ -3208,6 +3258,44 @@ static int bench_p_attn_sparse(void *ud) {
                                             1024, 24, 2, 256, 262144 - 1024, true, 2052, 0.0625f);
 }
 static int bench_p_gdn_r4(void *ud) { bench_ctx *c = ud; return ds4_gpu_qwen4_gdn_scan_tensor(c->t[15], c->t[1], c->t[11], c->t[13], c->t[14], 1024, 16, 48, 128, NULL, 0u, NULL, 0u); }
+/* GDN bucket decomposition at the live prefill chunk (QSA-ATTRIBUTION SEED
+ * item 2): qkv/z projections (q8, NAX tensor arm), conv+prep (gemv a/b, conv
+ * stream, prep) and the r4 scan, each priced separately at T=8192. */
+static int bench_gdn_p_qkv(void *ud) {
+    static ds4_gpu_tensor *x, *o; static uint64_t woff;
+    bench_ctx *c = ud;
+    if (!x) {
+        double *sh; woff = arena_q8_0(c->a, 10240, 2560, &sh, 0.05f); free(sh);
+        x = upload(NULL, 8192ull * 2560); o = upload(NULL, 8192ull * 10240);
+        require_ok(x && o, "gdn prefill proj buffers");
+    }
+    return ds4_gpu_matmul_q8_0_tensor(o, c->a->base, c->a->size, woff, 2560, 10240, x, 8192);
+}
+static int bench_gdn_p_convprep(void *ud) {
+    static ds4_gpu_tensor *qkv, *a8, *b8, *cs, *x8; static int once;
+    bench_ctx *c = ud;
+    if (!once++) {
+        qkv = upload(NULL, 8192ull * 10240); a8 = upload(NULL, 8192ull * 48);
+        b8 = upload(NULL, 8192ull * 48); cs = upload(NULL, 122880ull);
+        x8 = upload(NULL, 8192ull * 2560);
+        require_ok(qkv && a8 && b8 && cs && x8, "gdn prefill conv/prep buffers");
+    }
+    return ds4_gpu_matmul_q8_0_tensor(a8, c->a->base, c->a->size, c->off[0], 2560, 48, x8, 8192) &&
+           ds4_gpu_matmul_q8_0_tensor(b8, c->a->base, c->a->size, c->off[0], 2560, 48, x8, 8192) &&
+           ds4_gpu_qwen4_conv_stream_tensor(qkv, cs, c->a->base, c->a->size, c->off[6], 8192, 10240, 4, true) &&
+           ds4_gpu_qwen4_gdn_prep_tensor(qkv, a8, b8, c->a->base, c->a->size, c->off[7], c->off[7], 8192, 16, 48, 128);
+}
+static int bench_gdn_p_scan(void *ud) {
+    static ds4_gpu_tensor *qkv, *a8, *b8, *out, *stt; static int once;
+    (void)ud;
+    if (!once++) {
+        qkv = upload(NULL, 8192ull * 10240); a8 = upload(NULL, 8192ull * 48);
+        b8 = upload(NULL, 8192ull * 48); out = upload(NULL, 8192ull * 48 * 128);
+        stt = upload(NULL, 256ull * 10240);
+        require_ok(qkv && a8 && b8 && out && stt, "gdn prefill scan buffers");
+    }
+    return ds4_gpu_qwen4_gdn_scan_tensor(out, stt, qkv, a8, b8, 8192, 16, 48, 128, NULL, 0u, NULL, 0u);
+}
 static int bench_p_moe_mm(void *ud) {
     bench_ctx *c = ud;
     return ds4_gpu_qwen4_moe_build_lists_tensor(c->t[20], c->t[21], c->t[16], 256, 10, 16, 256) &&
@@ -3217,13 +3305,15 @@ static int bench_p_moe_mm(void *ud) {
 /* Production-shaped routed tiles: Q4_K gate/up + MXFP4 down, 10 slots per
  * token.  One dense case (32 experts, ~640 pairs each) and one at the
  * density of an 8192-token chunk (256 experts, ~80 pairs each). */
-static int bench_p_moe_mm_q4k_case(bench_ctx *c, uint32_t NE, uint32_t seed0, ds4_gpu_tensor **st, uint64_t *offs) {
-    const uint32_t T = 2048, slots = 10, E = 2560, F = 640, cap = NE >= 256 ? 512 : T;
+static int bench_p_moe_mm_q4k_case(bench_ctx *c, uint32_t NE, uint32_t seed0, ds4_gpu_tensor **st, uint64_t *offs, uint32_t T) {
+    const uint32_t slots = 10, E = 2560, F = 640, cap = NE >= 256 ? 512 : T;
     if (!st[0]) {
         double *sh;
-        offs[0] = arena_q4_K(c->a, (uint64_t)NE * F, E, &sh, 0.05f); free(sh);
-        offs[1] = arena_q4_K(c->a, (uint64_t)NE * F, E, &sh, 0.05f); free(sh);
-        offs[2] = arena_tier(c->a, 39u, (uint64_t)NE * E, F, &sh); free(sh);
+        if (!offs[0]) {
+            offs[0] = arena_q4_K(c->a, (uint64_t)NE * F, E, &sh, 0.05f); free(sh);
+            offs[1] = arena_q4_K(c->a, (uint64_t)NE * F, E, &sh, 0.05f); free(sh);
+            offs[2] = arena_tier(c->a, 39u, (uint64_t)NE * E, F, &sh); free(sh);
+        }
         int32_t *s = malloc((uint64_t)T * slots * sizeof(int32_t));
         uint32_t seed = seed0;
         for (uint64_t i = 0; i < (uint64_t)T * slots; i++) { seed = seed * 1664525u + 1013904223u; s[i] = (int32_t)((seed >> 8) % NE); }
@@ -3271,8 +3361,16 @@ static int bench_p_moe_mm_iq2_case(bench_ctx *c, uint32_t NE, uint32_t seed0, ds
 }
 static int bench_p_moe_mm_iq2(void *ud) { static ds4_gpu_tensor *st[6]; static uint64_t offs[3]; return bench_p_moe_mm_iq2_case(ud, 32, 4242u, st, offs); }
 
-static int bench_p_moe_mm_q4k(void *ud) { static ds4_gpu_tensor *st[6]; static uint64_t offs[3]; return bench_p_moe_mm_q4k_case(ud, 32, 12345u, st, offs); }
-static int bench_p_moe_mm_q4k_lo(void *ud) { static ds4_gpu_tensor *st[6]; static uint64_t offs[3]; return bench_p_moe_mm_q4k_case(ud, 256, 777u, st, offs); }
+static int bench_p_moe_mm_q4k(void *ud) { static ds4_gpu_tensor *st[6]; static uint64_t offs[3]; return bench_p_moe_mm_q4k_case(ud, 32, 12345u, st, offs, 2048u); }
+static int bench_p_moe_mm_q4k_lo(void *ud) { static ds4_gpu_tensor *st[6]; static uint64_t offs[3]; return bench_p_moe_mm_q4k_case(ud, 256, 777u, st, offs, 2048u); }
+/* True live prefill size: 8192-row chunk (the nt default flips to 8 for
+ * q4k/mxfp4 at >=4096 rows on M5 — this prices that choice). */
+static int bench_p_moe_mm_q4k_p(void *ud) { static ds4_gpu_tensor *st[6]; static uint64_t offs[3]; return bench_p_moe_mm_q4k_case(ud, 32, 12345u, st, offs, 8192u); }
+/* Live expert count: 512 experts, top-10 slots, prefill chunk rows.
+ * The two sizes share the weight arena (the 512-expert pack is ~1 GB). */
+static uint64_t g_e512_offs[3];
+static int bench_p_moe_mm_q4k_e512(void *ud) { static ds4_gpu_tensor *st[6]; return bench_p_moe_mm_q4k_case(ud, 512, 4242u, st, g_e512_offs, 8192u); }
+static int bench_p_moe_mm_q4k_e512_2k(void *ud) { static ds4_gpu_tensor *st[6]; return bench_p_moe_mm_q4k_case(ud, 512, 4242u, st, g_e512_offs, 2048u); }
 static int bench_gdn_scan(void *ud) { bench_ctx *c = ud; return ds4_gpu_qwen4_gdn_scan_tensor(c->t[15], c->t[1], c->t[11], c->t[13], c->t[14], 1, 16, 48, 128, NULL, 0u, NULL, 0u); }
 static int bench_gdn_scan2(void *ud) { bench_ctx *c = ud; return ds4_gpu_qwen4_gdn_scan_tensor(c->t[15], c->t[1], c->t[11], c->t[13], c->t[14], 2, 16, 48, 128, NULL, 0u, NULL, 0u); }
 
@@ -3427,6 +3525,9 @@ static void bench_dispatch(arena_t *a) {
     bench_run("q8 gemm 6144x2560 T=256 (dense mm)", bench_p_q8_mm, &c, 20);
     bench_run("moe mm lists+mid+down 16 experts T=256 (all 2560 pairs)", bench_p_moe_mm, &c, 10);
     bench_run("moe mm q4k/mxfp4 32 experts T=2048 x10 slots", bench_p_moe_mm_q4k, &c, 10);
+    bench_run("moe mm q4k/mxfp4 32 experts T=8192 x10 slots", bench_p_moe_mm_q4k_p, &c, 10);
+    bench_run("moe mm q4k/mxfp4 512 experts T=8192 x10 slots", bench_p_moe_mm_q4k_e512, &c, 5);
+    bench_run("moe mm q4k/mxfp4 512 experts T=2048 x10 slots (live chunk)", bench_p_moe_mm_q4k_e512_2k, &c, 5);
     bench_run("moe mm iq2xxs/q2k 32 experts T=2048 x10 slots", bench_p_moe_mm_iq2, &c, 10);
     bench_run("moe mm q4k/mxfp4 lo 256 experts T=2048 x10 slots", bench_p_moe_mm_q4k_lo, &c, 10);
     {   /* decays in (0,1], betas in (0,1) for the scan benches */
@@ -3437,6 +3538,9 @@ static void bench_dispatch(arena_t *a) {
         free(g); free(b);
     }
     bench_run("gdn scan r4 T=1024", bench_p_gdn_r4, &c, 5);
+    bench_run("gdn prefill T=8192: qkv proj (q8 NAX)", bench_gdn_p_qkv, &c, 5);
+    bench_run("gdn prefill T=8192: ab-gemv+conv+prep", bench_gdn_p_convprep, &c, 5);
+    bench_run("gdn prefill T=8192: scan r4", bench_gdn_p_scan, &c, 5);
     bench_run("idx score n=65536 T=32", bench_p_idx_score, &c, 10);
     bench_run("idx argsort top-512 n=65536 T=32", bench_p_idx_argsort, &c, 5);
     bench_run("idx select top-512 n=65536 T=32", bench_p_idx_select, &c, 10);
@@ -3668,7 +3772,10 @@ static void test_dense_mm_large(arena_t *a, uint32_t wtype) {
 
 int main(void) {
     arena_t arena;
-    arena.size = (uint64_t)1536 << 20;
+    arena.size = (uint64_t)3072 << 20;   /* the 512-expert live-pack bench arm
+                                          * pushes the cumulative weight arena
+                                          * past 1.5 GiB (anonymous mmap,
+                                          * touched pages only) */
     arena.base = mmap(NULL, arena.size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     arena.used = 0;
     if (arena.base == MAP_FAILED) { perror("mmap"); return 1; }
@@ -3753,6 +3860,7 @@ int main(void) {
     test_hc(&arena, 64, 8, 2, 0u);
     test_hc(&arena, 64, 8, 1, 8u);
     test_hc(&arena, 64, 8, 3, 8u);
+    test_f16_arm_bitexact(&arena);
     printf("gated delta net\n");
     test_gdn(&arena, 16, 48, 128, 5);
     test_gdn(&arena, 16, 48, 128, 40);

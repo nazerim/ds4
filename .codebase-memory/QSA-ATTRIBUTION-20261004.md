@@ -133,4 +133,96 @@ model-free, M5). The last queue item's starting data:
   conv + prep + scan + out; attribute per-kernel inside the live path with
   TIMING=2 sub-buckets or a DS4_METAL_* stage profile before touching.
 - Ceiling check: dense mm reference 21.8 TF/s; at 8192-row chunks Q4
-  experts should approach it if occupancy holds.
+   experts should approach it if occupancy holds.
+
+## STEP 1+2 LANDED 2026-10-05 (engine-quiet window, zero engine cycles; harness rc=0)
+
+**Step 1 — arm census (tool: `tests/spec_economics/gguf_arm_census.py`, reads
+GGUF tensor-info straight from the header; tensor dtypes are GGML enum ids —
+the DS4 table at ds4.c:2356).** The HANDOVER-20261004 lead is **disproven for
+this model**: `Qwen3.8-Flash-Next-Q4.gguf` carries **no F16 projections at
+all** except the HC pair — the census groups: dense projections (attn q/k/v/o,
+qkv, gate, indexer q/k, ple key/value, ssm_out, shared experts, nextn eh_proj,
+head) all **Q8_0**; router ffn_gate_inp **F32**; hc_ffn_down/up **F16**
+(in 10240/out 320 and reversed); routed experts **Q4_K** gate/up + **MXFP4**
+down (dtype 39); norms/conv/alpha/beta F32. At chunk=8192 on M5:
+- Q8_0: `qwen4_gemv_rows` mm windows (f16<=64, q8-bmm<=32) are closed, BUT the
+  custom q8 path itself prefers the **tensor-unit NAX mm kernels** at aligned
+  >=32 rows (ds4_metal.m:19600 `kernel_mul_mm_q8_0_f32_nax_direct_rhs*`, with
+  `prefill_unpack` f16-dequant fallback at >=32 generic rows) — so Q8 prefill
+  is ALREADY on the fast arm family. No action.
+- Router F32: takes dense-mm already (n_tok>8 clause). No action.
+- **The only custom-vs-mm arm decision left in prefill is the HC F16 pair.**
+
+**Step 1b — bit-exactness of that swap (`test_f16_arm_bitexact`, now permanent
+in tests/test_qwen4_kernels.c, informational print, both arms x T={256,2048,
+8192}, real HC dims):** verdict **DRIFTS everywhere** — hc down: byte-diff
+99.997% of elements, max|d| 1.59e-4/1.74e-4/1.75e-4; hc up: 3.3e-5..3.6e-5.
+So routing HC down to dense-mm (bench: 417→272 us at T=256, ~1.5x) is NOT a
+free win: it moves the committed prefill stream (first token onward) =>
+**operator golden decision, same class as the ST flip. NOT taken** — HC is
+~13% of prefill and only the down-half of that arm benefits (up stays custom:
+mm is 3x SLOWER there), realistic payoff a low-single-digit % of prefill wall
+against a golden re-capture + a 3rd tree to maintain. Decision package
+(battery-divergence sample under `DS4_QWEN4_PREFILL_F16_MM` knob) stays
+constructible-on-demand; upstream #1179 independently confirms the direction
+of travel (they force `legacy = exact` — matvec trees — in verify mode, never
+mm).
+
+**Step 2 — k32 MoE-mm port + bench (implemented, MEASURED FLAT, reverted):**
+template `<uint NT, uint KS>` on `kernel_qwen4_moe_mm_mid/down` + `nt8_k32`
+instantiations + `DS4_QWEN4_MOE_MM_KS` gate (same K order — accumulates the
+same 8-wide sub-blocks ascending, so identity was expected). Our tree already
+has `qwen4_mm_stage8`. M5 Max, Q4_K/MXFP4 bench (32 experts T=2048 x10 slots,
+nt pinned 8 both sides): KS64 **10360.5/15380.5** vs KS32 **10382.5/15453.4**
+us (32-expert/256-expert rows) — flat-to-slightly-worse: the occupancy
+motivation is M3-Ultra-specific (matches #1179 gating it to that device +
+Q8_0). Negative banked; tree restored (metal + host reverted), engine never
+touched.
+
+**Consequence for the queue:** the "arm selection" hope is mostly spent — the
+live prefill path was already on the right arms for this quantization; the
+remaining MoE/GDN potential (§4 item 1: 1.2-1.3x on moe 39% + gdn 28%) now
+points at the *kernels themselves* (grouped-expert rates at 8192 rows vs the
+mm tile path; GDN bucket decomposition per QSA-ATTRIBUTION SEED item 2),
+not at the dispatch gates. Next cheap engine-free step: extend the bench to
+true 8192-row moe-mm shapes (x nt variants) to price nt8-vs-alternates at the
+live chunk size; then GDN per-kernel attribution before touching anything.
+
+## BENCH EXTENSION + LIVE CONFIRM 2026-10-05 evening (engine stopped only for
+## the TIMING=2 measurement, production restored PID 849, 0 WARN)
+
+New durable bench arms (tests/test_qwen4_kernels.c): moe-mm at **T=8192**
+(32-expert dense) and **512-expert live pack at T=8192 and T=2048** (shared
+~1 GB weight arena); GDN prefill decomposition at T=8192 (qkv-proj q8 NAX /
+ab-gemv+conv+prep / scan r4).
+
+- **MoE geometry is NOT a lever.** q4k/mxfp4 32e T=8192: nt8(default) 26665 /
+  nt4 26609 / nt2 26678 / nt1 26569 us — flat ±0.4%. 512e live chunk (T=2048,
+  nt4 default): 10211.8 us; nt1 10147-10207, nt2 ~same — flat. Sparse 512e at
+  T=8192 costs +16% vs the 32e dense proxy (31055 vs 26665 — tile
+  fragmentation at ~160 pairs/expert); 512e T=2048 x 49 layers ≈ 500 ms ≈
+  the live 582 ms bucket ✓ proxy validated.
+- **GDN bucket decomposed** (per layer-chunk at T=8192): qkv proj (q8 NAX)
+  **9.09 ms** | ab-gemv+conv+prep **4.23 ms** | scan r4 **9.73 ms**; with z
+  (same shape as qkv) + lin-out (~5.5 ms scaled) the live 36-layer set sums
+  ~37 ms/layer-chunk ≈ 1.34 s ≈ the 1.5 s bucket ✓. Split: **~60% projections
+  (already tensor-unit), ~26% scan, ~12% conv+prep.**
+- **Live TIMING=2 ratio confirmation** (production batched config, chunks run
+  at T=2048 not 8192 — noted; pos>=40k samples): moe 582 / attn 395 / gdn 386
+  / hc 242 / ple 18.6 ms per 2048-chunk => **36/24/24/15/1%** — consistent
+  with the §1 shares.
+- **Verdict: the MoE/GDN "arm selection" era is CLOSED.** Every dispatch
+  window (f16 cap, q8 windows, nt tiles, k32, router mm) is either already
+  taken or flat. Remaining levers are kernel-datapath class only: the scan
+  (~26% of gdn = ~6% wall) is the one non-matmul candidate; everything else
+  needs the tensor-unit/MPP rewrite (oMLX #4020 / #1149-class), a project,
+  not a queue item.
+- **Tail tallies done too:** Scenario L field = **0 `frontier-superseded`
+  events** through the Oct-5 real-session day (17 evict + 109 continued + 10
+  cold + 34 token-mismatch deletes; sweep runs on every evict pass,
+  ds4_kvstore.c:1710 — armed, no traffic matched its condition; reclaim 0
+  MiB). R2b field measurement is **not constructible from current logs** —
+  the `kv cache hit ... load=NNN ms` line carries no chain depth (samples
+  today: 121.6 ms @4096, 1609.4 @175252, 2691.1 @163840, 2777.5 max); a one-
+  line enrich (depth= in the hit line) would make it measurable.
