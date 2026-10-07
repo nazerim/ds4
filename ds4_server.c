@@ -10787,6 +10787,7 @@ struct job {
     bool cancelled;
     pthread_mutex_t mu;
     pthread_cond_t cv;
+    uint64_t trace_id;
     job *next;
 };
 
@@ -13346,11 +13347,14 @@ static bool live_text_can_append(const int *ids, int ids_len,
  * only the new rows and splicing is byte-identical to a full re-render.
  * That used to be O(session_len) malloc churn per turn (fix #2,
  * .codebase-memory/TOKENIZER-AUDIT-20261003.md). */
-static void slot_refresh_live_text(server *s, server_slot *slot) {
+static void trace_event(server *s, uint64_t id, const char *fmt, ...);
+static void slot_refresh_live_text(server *s, server_slot *slot, uint64_t trace_id) {
     if (!slot) return;
+    const double t0 = (s && s->trace) ? now_sec() : 0.0;
     const bool valid = s && slot->session &&
                        ds4_session_checkpoint_valid(slot->session);
     const ds4_tokens *live = valid ? ds4_session_tokens(slot->session) : NULL;
+    const int session_len = (valid && live) ? live->len : 0;
     if (valid && live && live->len > 0 &&
         live_text_can_append(slot->live_text_ids, slot->live_text_pos, live))
     {
@@ -13374,6 +13378,9 @@ static void slot_refresh_live_text(server *s, server_slot *slot) {
             slot->live_text_ids = ids;
             slot->live_text_pos = live->len;
             free(t);
+            trace_event(s, trace_id,
+                        "live_text refresh: session=%d path=append wall_ms=%.3f",
+                        session_len, (now_sec() - t0) * 1000.0);
             return;
         }
         /* Append render failed: fall through to the full path, which
@@ -13385,13 +13392,21 @@ static void slot_refresh_live_text(server *s, server_slot *slot) {
     slot->live_text_ids = NULL;
     slot->live_text_len = 0;
     slot->live_text_pos = 0;
-    if (!valid || !live || live->len <= 0) return;
+    if (!valid || !live || live->len <= 0) {
+        trace_event(s, trace_id,
+                    "live_text refresh: session=%d path=none wall_ms=%.3f",
+                    session_len, (now_sec() - t0) * 1000.0);
+        return;
+    }
     slot->live_text = render_tokens_text(s->engine, live, &slot->live_text_len);
     if (slot->live_text) {
         slot->live_text_ids = xmalloc((size_t)live->len * sizeof(int));
         memcpy(slot->live_text_ids, live->v, (size_t)live->len * sizeof(int));
         slot->live_text_pos = live->len;
     }
+    trace_event(s, trace_id,
+                "live_text refresh: session=%d path=full wall_ms=%.3f",
+                session_len, (now_sec() - t0) * 1000.0);
 }
 
 /* =========================================================================
@@ -15392,6 +15407,7 @@ static void generate_job_inner(server *s, server_slot *slot, job *j) {
     const double t0 = now_sec();
     uint64_t trace_id = trace_begin(s, j, cached, prompt_tokens, &cache_diag,
                                     cache_source, disk_cached, disk_cache_path);
+    j->trace_id = trace_id;
     char ctx_span[48];
     request_ctx_span(ctx_span, sizeof(ctx_span), cached, prompt_tokens);
     server_prefill_progress progress = {
@@ -16816,7 +16832,7 @@ static void *worker_main(void *arg) {
         /* Mirror slot_worker_main: the checkpoint may have changed in any way
          * during the job, and the memory-text probe tier plus the staleness
          * tiers read the slot's rendered-text cache and activity stamp. */
-        slot_refresh_live_text(s, &s->slots[0]);
+        slot_refresh_live_text(s, &s->slots[0], j->trace_id);
         s->slots[0].last_used = time(NULL);
     }
     return NULL;
@@ -16845,7 +16861,7 @@ static void *slot_worker_main(void *arg) {
          * cache the memory-text probe relies on before the slot becomes
          * visible to the router as free again.  Also stamp the activity
          * time the router's staleness tiers rely on. */
-        slot_refresh_live_text(s, slot);
+        slot_refresh_live_text(s, slot, j->trace_id);
         slot->last_used = time(NULL);
 
         pthread_mutex_lock(&s->mu);
