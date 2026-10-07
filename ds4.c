@@ -42205,6 +42205,14 @@ struct ds4_vocab {
     int endoftext_id;
     str_i32_table token_to_id;
     str_i32_table merge_rank;
+    /* Precomputed detokenization table, built once by vocab_load:
+     * text_arena holds every entry's decoded bytes including its NUL
+     * terminator, text_off has n_vocab + 1 offsets into the arena, and
+     * text_lit flags literal-special entries (informational; the arena
+     * already holds the right bytes either way). */
+    char *text_arena;
+    uint32_t *text_off;
+    uint8_t *text_lit;
 };
 
 /* Engine-side tensor-parallel state.  The transport context is owned by the
@@ -43323,6 +43331,8 @@ static int vocab_lookup_optional(const ds4_vocab *vocab, const char *text) {
 
 /* Load token strings, special token ids, and merge ranks from GGUF metadata. */
 
+static void vocab_build_text_table(ds4_vocab *vocab);
+
 static void vocab_load(ds4_vocab *vocab, const ds4_model *model) {
     memset(vocab, 0, sizeof(*vocab));
 
@@ -43355,6 +43365,14 @@ static void vocab_load(ds4_vocab *vocab, const ds4_model *model) {
         if (!cursor_string(&c, &merge)) ds4_die(c.error);
         table_put(&vocab->merge_rank, merge, (int)i);
     }
+
+    /* The token array and both tables are loaded: precompute the
+     * detokenization table once so ds4_token_text never mallocs, scans for
+     * U+FF5C, or UTF-8-decodes per call.  This sits before the family-specific
+     * special-id lookups (which never touch token strings) so every return
+     * path below is covered by a single call. */
+    vocab_build_text_table(vocab);
+
     vocab->im_start_id = -1;
     vocab->im_end_id = -1;
     vocab->endoftext_id = -1;
@@ -43435,6 +43453,9 @@ static void vocab_load(ds4_vocab *vocab, const ds4_model *model) {
 
 static void vocab_free(ds4_vocab *vocab) {
     free(vocab->token);
+    free(vocab->text_arena);
+    free(vocab->text_off);
+    free(vocab->text_lit);
     table_free(&vocab->token_to_id);
     table_free(&vocab->merge_rank);
     memset(vocab, 0, sizeof(*vocab));
@@ -43895,7 +43916,11 @@ static bool vocab_token_is_literal_special(ds4_str s) {
     return false;
 }
 
-char *ds4_token_text(ds4_engine *e, int token, size_t *len) {
+/* Reference slow-path detokenization: mallocs a NUL-terminated string per
+ * call, scans for the literal-special U+FF5C marker, and UTF-8-decodes every
+ * codepoint.  Kept verbatim as the reference for the precomputed table
+ * builder and the ds4_test cross-check.  The caller frees the result. */
+static char *token_text_slow(ds4_engine *e, int token, size_t *len) {
     ds4_vocab *vocab = &e->vocab;
     if (token < 0 || token >= vocab->n_vocab) {
         if (len) *len = 0;
@@ -43924,6 +43949,72 @@ char *ds4_token_text(ds4_engine *e, int token, size_t *len) {
     if (len) *len = n;
     return out;
 }
+
+/* Precomputed per-vocab-entry detokenization table (audit fix #3,
+ * TOKENIZER-AUDIT-20261003.md): one arena with every entry's decoded bytes
+ * including the NUL terminator, n_vocab + 1 offsets into it, and a
+ * literal-special flag per entry.  Two passes over the reference slow path;
+ * the one-time 2x152k mallocs at load are fine. */
+static void vocab_build_text_table(ds4_vocab *vocab) {
+    /* token_text_slow reads only e->vocab.  vocab_load also serves stack
+     * vocabs (the tokenizer dump utilities) that are not embedded in an
+     * engine, so decode through a throwaway engine aliasing the vocab - the
+     * same shallow-copy pattern test_deepseek41_graph.c uses to call
+     * ds4_token_text on a stack vocab. */
+    ds4_engine *shim = xcalloc(1, sizeof(*shim));
+    shim->vocab = *vocab;
+
+    uint64_t total = 0;
+    for (int i = 0; i < vocab->n_vocab; i++) {
+        size_t len = 0;
+        char *tmp = token_text_slow(shim, i, &len);
+        total += (uint64_t)len + 1; /* decoded bytes + NUL */
+        free(tmp);
+    }
+    if (total > UINT32_MAX) ds4_die("token text table is too large");
+
+    vocab->text_arena = xmalloc(total ? (size_t)total : 1);
+    vocab->text_off = xmalloc(((size_t)vocab->n_vocab + 1) * sizeof(uint32_t));
+    vocab->text_lit = xcalloc((size_t)vocab->n_vocab, 1);
+
+    uint32_t pos = 0;
+    for (int i = 0; i < vocab->n_vocab; i++) {
+        size_t len = 0;
+        char *tmp = token_text_slow(shim, i, &len);
+        memcpy(vocab->text_arena + pos, tmp, len + 1); /* copies the NUL */
+        vocab->text_off[i] = pos;
+        vocab->text_lit[i] =
+            vocab_token_is_literal_special(vocab->token[i]) ? 1 : 0;
+        pos += (uint32_t)len + 1;
+        free(tmp);
+    }
+    vocab->text_off[vocab->n_vocab] = pos;
+    free(shim);
+}
+
+/* Detokenize one token.  Returns a pointer into the vocab's precomputed
+ * text arena - engine-owned storage the caller must NOT free - plus the
+ * byte length excluding the NUL terminator.  Out-of-range ids (and vocabs
+ * without a table) yield an empty string with length 0. */
+const char *ds4_token_text(ds4_engine *e, int token, size_t *len) {
+    const ds4_vocab *vocab = &e->vocab;
+    if (token < 0 || token >= vocab->n_vocab || !vocab->text_arena) {
+        if (len) *len = 0;
+        return "";
+    }
+    const uint32_t start = vocab->text_off[token];
+    if (len) *len = (size_t)(vocab->text_off[token + 1] - start - 1);
+    return vocab->text_arena + start;
+}
+
+#ifdef DS4_SERVER_TEST
+/* Test hook: the reference slow path (malloc'd NUL-terminated result, the
+ * caller frees) so ds4_test can cross-check the precomputed table against
+ * it for every vocab entry.  Compiled only into ds4_test_core.o. */
+char *ds4_test_token_text_slow(ds4_engine *e, int token, size_t *len) {
+    return token_text_slow(e, token, len);
+}
+#endif
 
 static bool vocab_token_is_generation_stop(const ds4_vocab *vocab, int token) {
     if (!vocab || token < 0) return false;
@@ -74913,8 +75004,8 @@ static int ds4_session_glm_spec_cycle_impl(
     }
     if (timing) {
         const double t2 = now_sec();
-        char *dt = ds4_token_text(e, d, NULL);
-        char *nt = ds4_token_text(e, n1, NULL);
+        const char *dt = ds4_token_text(e, d, NULL);
+        const char *nt = ds4_token_text(e, n1, NULL);
         fprintf(stderr,
                 "ds4: glm mtp cycle: verify2 %.1f ms, head+draft %.1f ms, %s "
                 "(draft %d '%s' vs true %d '%s')\n",
@@ -74922,8 +75013,6 @@ static int ds4_session_glm_spec_cycle_impl(
                 accept ? (exact_sampling ? "EXACT_ACCEPT" : "ACCEPT") :
                          (exact_sampling ? "exact_reject" : "reject"),
                 d, dt ? dt : "?", n1, nt ? nt : "?");
-        free(dt);
-        free(nt);
     }
     if (g->glm53 && state_saved && n_committed == 2) {
         s->glm_mtp_rollback_pos = pos;

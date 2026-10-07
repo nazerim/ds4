@@ -10,15 +10,12 @@
 static int sync_calls, sync_lengths[2], sync_fail;
 static const int *sync_tokens;
 
-char *quality_test_token_text(ds4_engine *engine, int token, size_t *len) {
+const char *quality_test_token_text(ds4_engine *engine, int token, size_t *len) {
     (void)engine;
-    const char *text[] = {"A", "B", "AB", "", "\xf0\x9f"};
+    static const char *const text[] = {"A", "B", "AB", "", "\xf0\x9f"};
     assert(token >= 0 && token < 5);
     *len = strlen(text[token]);
-    char *copy = malloc(*len + 1);
-    assert(copy);
-    memcpy(copy, text[token], *len + 1);
-    return copy;
+    return text[token];
 }
 
 static void check_token_alignment(void) {

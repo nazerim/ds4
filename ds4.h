@@ -386,7 +386,10 @@ void ds4_chat_append_think_prefix(ds4_engine *e, ds4_tokens *tokens, ds4_think_m
 void ds4_chat_append_message(ds4_engine *e, ds4_tokens *tokens, const char *role, const char *content);
 void ds4_chat_append_assistant_prefix(ds4_engine *e, ds4_tokens *tokens, ds4_think_mode think_mode);
 
-char *ds4_token_text(ds4_engine *e, int token, size_t *len);
+/* Detokenized bytes for one token: a pointer into engine-owned storage
+ * (NUL-terminated; the caller must NOT free it), with *len excluding the
+ * NUL.  Out-of-range ids return an empty string with *len = 0. */
+const char *ds4_token_text(ds4_engine *e, int token, size_t *len);
 int ds4_token_eos(ds4_engine *e);
 int ds4_engine_dsml_id(ds4_engine *e);
 bool ds4_token_is_stop(ds4_engine *e, int token);

@@ -1772,9 +1772,8 @@ static void agent_trace_tokens(agent_worker *w, const char *label,
                 start, tokens->len);
     for (int i = start; i < tokens->len; i++) {
         size_t text_len = 0;
-        char *text = ds4_token_text(w->engine, tokens->v[i], &text_len);
+        const char *text = ds4_token_text(w->engine, tokens->v[i], &text_len);
         agent_trace_token(w, tokens->v[i], text, text_len, i);
-        free(text);
     }
 }
 
@@ -9973,10 +9972,9 @@ static bool agent_worker_compact_transcript(agent_worker *w, const char *reason,
         }
 
         size_t text_len = 0;
-        char *text = ds4_token_text(w->engine, token, &text_len);
+        const char *text = ds4_token_text(w->engine, token, &text_len);
         agent_buf_append(&summary, text, text_len);
         agent_publish(w, text, text_len);
-        free(text);
 
         double dt = now_sec() - t0;
         pthread_mutex_lock(&w->mu);
@@ -10189,10 +10187,9 @@ static int worker_finish_generated_token(agent_worker *w,
     ds4_tokens_push(&w->transcript, token);
 
     size_t text_len = 0;
-    char *text = ds4_token_text(w->engine, token, &text_len);
+    const char *text = ds4_token_text(w->engine, token, &text_len);
     agent_trace_token(w, token, text, text_len, *generated + 1);
     agent_stream_text(stream, text, text_len, false);
-    free(text);
     (*generated)++;
 
     if (evaluate &&
@@ -10562,7 +10559,7 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
                 }
 
                 size_t text_len = 0;
-                char *text = ds4_token_text(w->engine, token, &text_len);
+                const char *text = ds4_token_text(w->engine, token, &text_len);
                 if (cfg->edit_upto &&
                     agent_edit_upto_forcer_should_replace(&upto_forcer,
                                                            &dsml,
@@ -10574,7 +10571,6 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
                                 token,
                                 (int)(text_len > 80 ? 80 : text_len),
                                 text);
-                    free(text);
                     if (agent_worker_rewind(w, block_start + ti,
                                              err, sizeof(err)) != 0 ||
                         worker_force_generated_text(w, "[upto]\n", max_tokens,
@@ -10587,7 +10583,6 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
                     restart_sampling = true;
                     break;
                 }
-                free(text);
                 if (worker_finish_generated_token(w, token, &generated, t0,
                                                   &stream, false,
                                                   err, sizeof(err)) != 0) {
@@ -10955,11 +10950,10 @@ static int worker_run_raw_prompt(agent_worker *w, const char *user_text) {
                 break;
             }
             size_t text_len = 0;
-            char *text = ds4_token_text(w->engine, token, &text_len);
+            const char *text = ds4_token_text(w->engine, token, &text_len);
             agent_trace_token(w, token, text, text_len, generated + 1);
             ds4_tokens_push(&w->transcript, token);
             agent_publish(w, text, text_len);
-            free(text);
             generated++;
         }
 

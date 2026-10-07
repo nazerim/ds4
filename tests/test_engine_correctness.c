@@ -67,18 +67,17 @@ static char *decode_tokens(ds4_engine *e, const int *tokens, int n) {
     buf[0] = '\0';
     for (int i = 0; i < n; i++) {
         size_t tlen = 0;
-        char *txt = ds4_token_text(e, tokens[i], &tlen);
+        const char *txt = ds4_token_text(e, tokens[i], &tlen);
         if (!txt) continue;
         if (len + tlen + 1 > cap) {
             cap = (len + tlen + 1) * 2;
             char *nbuf = (char *)realloc(buf, cap);
-            if (!nbuf) { free(buf); free(txt); return NULL; }
+            if (!nbuf) { free(buf); return NULL; }
             buf = nbuf;
         }
         memcpy(buf + len, txt, tlen);
         len += tlen;
         buf[len] = '\0';
-        free(txt);
     }
     return buf;
 }

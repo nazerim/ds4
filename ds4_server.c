@@ -13520,10 +13520,9 @@ static void trace_write_token(FILE *fp, ds4_engine *engine, int token) {
         return;
     }
     size_t len = 0;
-    char *piece = ds4_token_text(engine, token, &len);
+    const char *piece = ds4_token_text(engine, token, &len);
     fprintf(fp, "%d ", token);
     trace_write_escaped_bytes(fp, piece, len);
-    free(piece);
 }
 
 static void trace_write_cache_diag(
@@ -15845,7 +15844,7 @@ decode_again:
             }
 
             size_t piece_len = 0;
-            char *piece = ds4_token_text(s->engine, token, &piece_len);
+            const char *piece = ds4_token_text(s->engine, token, &piece_len);
             completion++;
             kept++;
 
@@ -15899,7 +15898,6 @@ decode_again:
                     job_mark_cancelled(j);
                     finish = "error";
                     snprintf(err, sizeof(err), "client stream write failed");
-                    free(piece);
                     stop_decode = true;
                     break;
                 }
@@ -15907,12 +15905,11 @@ decode_again:
             }
             if (j->req.stream && j->req.api == API_ANTHROPIC &&
                 !anthropic_sse_stream_update(j->fd, s, &j->req, id,
-                                             &anthropic_live, text.ptr, stream_len,
-                                             false)) {
+                                              &anthropic_live, text.ptr, stream_len,
+                                              false)) {
                 job_mark_cancelled(j);
                 finish = "error";
                 snprintf(err, sizeof(err), "client stream write failed");
-                free(piece);
                 stop_decode = true;
                 break;
             }
@@ -15923,22 +15920,19 @@ decode_again:
                 job_mark_cancelled(j);
                 finish = "error";
                 snprintf(err, sizeof(err), "client stream write failed");
-                free(piece);
                 stop_decode = true;
                 break;
             }
             if (responses_live_chat &&
                 !responses_sse_stream_update(j->fd, &j->req,
-                                             &responses_live, text.ptr, stream_len,
-                                             false)) {
+                                              &responses_live, text.ptr, stream_len,
+                                              false)) {
                 job_mark_cancelled(j);
                 finish = "error";
                 snprintf(err, sizeof(err), "client stream write failed");
-                free(piece);
                 stop_decode = true;
                 break;
             }
-            free(piece);
 
             if (j->req.kind == REQ_CHAT && j->req.has_tools) {
                 if (thinking_gates_tool_markers && thinking.inside) {

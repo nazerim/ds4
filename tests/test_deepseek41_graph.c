@@ -2060,11 +2060,10 @@ int main(int argc, char **argv) {
         for (int i = 0; i < generate; i++) {
             const int token = sample_argmax(logits, DS4_N_VOCAB);
             size_t len = 0;
-            char *piece = ds4_token_text(&output, token, &len);
+            const char *piece = ds4_token_text(&output, token, &len);
             REQUIRE(piece);
             fwrite(piece, 1, len, stdout);
             fflush(stdout);
-            free(piece);
             if (vocab_token_is_generation_stop(&vocab, token)) break;
             REQUIRE(ds41_graph_step(&graph, &model, &weights, token, logits));
             for (uint32_t j = 0; j < DS4_N_VOCAB; j++) REQUIRE(isfinite(logits[j]));

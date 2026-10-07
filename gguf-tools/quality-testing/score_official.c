@@ -499,10 +499,9 @@ static bool api_ref_matches_target(ds4_engine *engine, const api_ref *ref,
         const api_pos *pos = &ref->pos[i];
         if (!pos->bytes || pos->len <= 0) return false;
         size_t len = 0;
-        char *text = ds4_token_text(engine, target->v[i], &len);
+        const char *text = ds4_token_text(engine, target->v[i], &len);
         bool same = text && len == (size_t)pos->len &&
                     !memcmp(text, pos->bytes, len);
-        free(text);
         if (!same) return false;
     }
     return true;
@@ -527,11 +526,10 @@ static int api_alt_token_id(ds4_engine *engine, const api_alt *alt) {
     int id = tv.len == 1 ? tv.v[0] : -1;
     if (id >= 0) {
         size_t got_len = 0;
-        char *got = ds4_token_text(engine, id, &got_len);
+        const char *got = ds4_token_text(engine, id, &got_len);
         if (got_len != (size_t)alt->len || memcmp(got, alt->bytes, (size_t)alt->len) != 0) {
             id = -1;
         }
-        free(got);
     }
     ds4_tokens_free(&tv);
     free(text);

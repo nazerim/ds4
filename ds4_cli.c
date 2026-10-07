@@ -494,10 +494,9 @@ static void token_printer_write_text(token_printer *p, const char *text, size_t 
 static void print_generated_token(void *ud, int token) {
     token_printer *p = ud;
     size_t len = 0;
-    char *text = ds4_token_text(p->engine, token, &len);
+    const char *text = ds4_token_text(p->engine, token, &len);
     token_printer_write_text(p, text, len);
     fflush(p->fp);
-    free(text);
 }
 
 static void build_chat_prompt(ds4_engine *engine,
@@ -632,10 +631,9 @@ static int run_sampled_generation(ds4_engine *engine, const cli_config *cfg, con
             }
         } else {
             size_t piece_len = 0;
-            char *piece = ds4_token_text(engine, token, &piece_len);
+            const char *piece = ds4_token_text(engine, token, &piece_len);
             token_printer_write_text(&printer, piece, piece_len);
             fflush(stdout);
-            free(piece);
             generated++;
             if (generated >= max_tokens || cli_interrupt_requested()) {
                 continue;
@@ -659,10 +657,9 @@ static int run_sampled_generation(ds4_engine *engine, const cli_config *cfg, con
                 break;
             }
             size_t piece_len = 0;
-            char *piece = ds4_token_text(engine, toks[j], &piece_len);
+            const char *piece = ds4_token_text(engine, toks[j], &piece_len);
             token_printer_write_text(&printer, piece, piece_len);
             fflush(stdout);
-            free(piece);
             generated++;
             if (generated >= max_tokens) break;
         }
@@ -738,7 +735,7 @@ static void json_write_string(FILE *fp, const char *s, size_t n) {
 
 static void json_write_token(FILE *fp, ds4_engine *engine, int token) {
     size_t n = 0;
-    char *text = ds4_token_text(engine, token, &n);
+    const char *text = ds4_token_text(engine, token, &n);
     fprintf(fp, "{\"id\":%d,\"text\":", token);
     json_write_string(fp, text, n);
     fputs(",\"bytes\":[", fp);
@@ -748,7 +745,6 @@ static void json_write_token(FILE *fp, ds4_engine *engine, int token) {
     }
     fputc(']', fp);
     fputc('}', fp);
-    free(text);
 }
 
 static int run_logits_dump(ds4_engine *engine, const cli_config *cfg, const ds4_tokens *prompt) {
@@ -1637,11 +1633,10 @@ static int run_chat_turn(ds4_engine *engine, cli_config *cfg, repl_chat *chat,
             }
         } else {
             size_t piece_len = 0;
-            char *piece = ds4_token_text(engine, token, &piece_len);
+            const char *piece = ds4_token_text(engine, token, &piece_len);
             ds4_tokens_push(&chat->transcript, token);
             token_printer_write_text(&printer, piece, piece_len);
             fflush(stdout);
-            free(piece);
             generated++;
 
             cli_dist_busy_set(cfg, true);
@@ -1663,11 +1658,10 @@ static int run_chat_turn(ds4_engine *engine, cli_config *cfg, repl_chat *chat,
                 break;
             }
             size_t piece_len = 0;
-            char *piece = ds4_token_text(engine, toks[j], &piece_len);
+            const char *piece = ds4_token_text(engine, toks[j], &piece_len);
             ds4_tokens_push(&chat->transcript, toks[j]);
             token_printer_write_text(&printer, piece, piece_len);
             fflush(stdout);
-            free(piece);
             generated++;
             if (generated >= max_tokens) break;
         }

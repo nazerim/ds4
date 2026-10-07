@@ -285,7 +285,7 @@ int main(int argc, char **argv) {
         }
         if (ds4_token_is_stop(engine, token)) break;
         size_t len = 0;
-        char *text = ds4_token_text(engine, token, &len);
+        const char *text = ds4_token_text(engine, token, &len);
         if (text && len) fwrite(text, 1, len, stdout);
         if (ds4_session_eval(session, token, error, sizeof(error)) != 0) goto done;
     }

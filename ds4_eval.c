@@ -4364,7 +4364,7 @@ static eval_run_result run_one_case(ds4_engine *engine, ds4_session *session,
         }
 
         size_t len = 0;
-        char *text = ds4_token_text(engine, token, &len);
+        const char *text = ds4_token_text(engine, token, &len);
         buf_append(&raw, text, len);
         ui->generated++;
         ui->generated_tokens[idx] = ui->generated;
@@ -4392,7 +4392,6 @@ static eval_run_result run_one_case(ds4_engine *engine, ds4_session *session,
             fwrite(text, 1, len, stdout);
             fflush(stdout);
         }
-        free(text);
     }
     if (tty) {
         stream_append_token_text(ui, NULL, 0, true);

@@ -986,10 +986,9 @@ int main(int argc, char **argv) {
             fprintf(stderr, "ds4-bench: gen[ctx=%d] decoded text: \"", frontier);
             for (int i = 0; i < gen_token_count; i++) {
                 size_t tlen = 0;
-                char *txt = ds4_token_text(engine, gen_token_buf[i], &tlen);
+                const char *txt = ds4_token_text(engine, gen_token_buf[i], &tlen);
                 if (txt) {
                     fwrite(txt, 1, tlen, stderr);
-                    free(txt);
                 }
             }
             fprintf(stderr, "\"\n");

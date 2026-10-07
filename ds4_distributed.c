@@ -2847,7 +2847,7 @@ static void dist_json_write_string(FILE *fp, const char *s, size_t n) {
 
 static void dist_json_write_token(FILE *fp, ds4_engine *engine, int token) {
     size_t n = 0;
-    char *text = ds4_token_text(engine, token, &n);
+    const char *text = ds4_token_text(engine, token, &n);
     fprintf(fp, "{\"id\":%d,\"text\":", token);
     dist_json_write_string(fp, text ? text : "", text ? n : 0);
     fputs(",\"bytes\":[", fp);
@@ -2859,7 +2859,6 @@ static void dist_json_write_token(FILE *fp, ds4_engine *engine, int token) {
     }
     fputc(']', fp);
     fputc('}', fp);
-    free(text);
 }
 
 static int dist_write_logits_dump(
@@ -4041,10 +4040,9 @@ static int dist_run_coordinator_generation(
         if (token == eos) break;
 
         size_t len = 0;
-        char *text = ds4_token_text(state->engine, token, &len);
+        const char *text = ds4_token_text(state->engine, token, &len);
         if (len) fwrite(text, 1, len, stdout);
         fflush(stdout);
-        free(text);
 
         uint32_t token_pos = (uint32_t)prompt.len + (uint32_t)generated;
         generated++;

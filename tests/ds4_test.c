@@ -13,6 +13,7 @@
 
 bool ds4_test_dspark_cache_window_crop(void);
 bool ds4_test_dspark_prefix_capture(ds4_engine *engine, const ds4_tokens *prompt);
+char *ds4_test_token_text_slow(ds4_engine *e, int token, size_t *len);
 
 static ds4_engine *test_engine_fast;
 static ds4_engine *test_engine_quality;
@@ -5958,11 +5959,81 @@ static bool test_hex_to_bytes(const char *hex, unsigned char *out, int cap, int 
 static bool test_token_bytes_equal(ds4_engine *engine, int token,
                                    const unsigned char *want, int want_len) {
     size_t got_len = 0;
-    char *got = ds4_token_text(engine, token, &got_len);
+    const char *got = ds4_token_text(engine, token, &got_len);
     bool eq = got && got_len == (size_t)want_len &&
               memcmp(got, want, (size_t)want_len) == 0;
-    free(got);
     return eq;
+}
+
+/* Cross-check the precomputed per-vocab detokenization table (audit fix #3,
+ * TOKENIZER-AUDIT-20261003.md): for every vocab entry the table lookup must
+ * match the reference slow path byte-for-byte, content and length.  Also
+ * times both paths over the full vocab and reports the table's memory. */
+static void test_token_text_table(void) {
+    ds4_engine *engine = test_get_engine(false);
+    if (!engine) return;
+    const int n_vocab = ds4_engine_vocab_size(engine);
+    TEST_ASSERT(n_vocab > 0);
+
+    int mismatches = 0;
+    uint64_t arena_bytes = 0;
+    for (int i = 0; i < n_vocab; i++) {
+        size_t fast_len = 0;
+        const char *fast = ds4_token_text(engine, i, &fast_len);
+        size_t slow_len = 0;
+        char *slow = ds4_test_token_text_slow(engine, i, &slow_len);
+        if (!fast || !slow || fast_len != slow_len ||
+            memcmp(fast, slow, fast_len) != 0) {
+            if (mismatches < 10) {
+                fprintf(stderr,
+                        "ds4-test: token %d table/slow mismatch (len %zu vs %zu)\n",
+                        i, fast_len, slow_len);
+            }
+            mismatches++;
+        }
+        free(slow);
+        arena_bytes += (uint64_t)fast_len + 1; /* decoded bytes + NUL */
+    }
+    TEST_ASSERT(mismatches == 0);
+
+    /* Out-of-range ids keep the empty-string, zero-length contract. */
+    size_t oob_len = 1;
+    const char *oob = ds4_token_text(engine, -1, &oob_len);
+    TEST_ASSERT(oob && oob[0] == '\0' && oob_len == 0);
+    oob = ds4_token_text(engine, n_vocab, &oob_len);
+    TEST_ASSERT(oob && oob[0] == '\0' && oob_len == 0);
+
+    /* Time both paths over the full vocab to size the fix's win. */
+    volatile uint64_t sink = 0;
+    const double t0 = test_monotonic_seconds();
+    for (int i = 0; i < n_vocab; i++) {
+        size_t len = 0;
+        const char *text = ds4_token_text(engine, i, &len);
+        sink += (uint64_t)len + (uint64_t)(unsigned char)text[0];
+    }
+    const double t1 = test_monotonic_seconds();
+    for (int i = 0; i < n_vocab; i++) {
+        size_t len = 0;
+        char *text = ds4_test_token_text_slow(engine, i, &len);
+        sink += (uint64_t)len + (uint64_t)(unsigned char)text[0];
+        free(text);
+    }
+    const double t2 = test_monotonic_seconds();
+    const double fast_us = (t1 - t0) * 1e6;
+    const double slow_us = (t2 - t1) * 1e6;
+    const uint64_t off_bytes = (uint64_t)(n_vocab + 1) * sizeof(uint32_t);
+    const uint64_t lit_bytes = (uint64_t)n_vocab;
+    fprintf(stderr,
+            "ds4-test: token-text table: n_vocab=%d mismatches=%d "
+            "table=%llu B + off=%llu B + lit=%llu B = %llu B | "
+            "table %.3f us/tok, slow %.3f us/tok (%.1fx faster)\n",
+            n_vocab, mismatches,
+            (unsigned long long)arena_bytes,
+            (unsigned long long)off_bytes,
+            (unsigned long long)lit_bytes,
+            (unsigned long long)(arena_bytes + off_bytes + lit_bytes),
+            fast_us / n_vocab, slow_us / n_vocab,
+            fast_us > 0.0 ? slow_us / fast_us : 0.0);
 }
 
 static void test_long_prefill_progress(void *ud, const char *event, int current, int total) {
@@ -6019,9 +6090,8 @@ static void test_long_story_fact_recall(void) {
         if (token == ds4_token_eos(engine)) break;
 
         size_t piece_len = 0;
-        char *piece = ds4_token_text(engine, token, &piece_len);
+        const char *piece = ds4_token_text(engine, token, &piece_len);
         buf_append(&out, piece, piece_len);
-        free(piece);
 
         if (ds4_session_eval(session, token, err, sizeof(err)) != 0) {
             decode_ok = false;
@@ -7506,9 +7576,8 @@ static bool test_generate_chat_turn(ds4_engine *engine, ds4_session *session,
         }
 
         size_t piece_len = 0;
-        char *piece = ds4_token_text(engine, token, &piece_len);
+        const char *piece = ds4_token_text(engine, token, &piece_len);
         buf_append(&text, piece, piece_len);
-        free(piece);
         if (r->has_tools) {
             dsml_decode_tracker_update(&tracker, text.ptr, text.len);
             observe_tool_markers(&tracker, text.ptr ? text.ptr : "",
@@ -8270,6 +8339,7 @@ static const ds4_test_entry test_entries[] = {
     {"--mtp-verify-depth", "mtp-verify-depth", "MTP speculative verify commits autoregressive-identical tokens at draft depth > 2", test_mtp_verify_depth, false},
     {"--dspark-verify-depth", "dspark-verify-depth", "DSpark speculative verify commits autoregressive-identical tokens at draft depth > 2", test_dspark_verify_depth, false},
     {"--dsml-token-suppression", "dsml-token-suppression", "ds4_session_sample_excluding never returns the excluded DSML token id", test_dsml_token_suppression_excludes_id, false},
+    {"--token-text-table", "token-text-table", "precomputed detokenization table matches the slow reference for every vocab entry", test_token_text_table, false},
 #endif
     {"--server", "server", "server parser/rendering/cache unit tests", test_server_unit_group, false},
     {"--kv-head-divergence", "kv-head-divergence", "synthetic AGENTS.md head-divergence anchor-depth regression (see DS4FORK.md KVCACHE — Deep Divergence Investigation)", test_kv_cache_head_divergence_anchor_depth, false},
