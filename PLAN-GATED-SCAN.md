@@ -6,6 +6,15 @@ bucket: 9.73 ms/layer-chunk @T=8192, ~26% of gdn, ~5.4% of prefill wall.
 Target: 2-3x scan speed => +3-6% prefill wall. Decode/verify untouched (see
 D4). Est. 4-7 windows total (Phases 1-3).
 
+STATUS 2026-10-05: CLOSED — BANKED NEGATIVE at P1b.5 (operator decision).
+The f16-staging audit measured the only speed-viable path (tensor units) at
+~4e-5/1.5e-4 recurrent drift, ~400x over the f32 class the P1c gate
+requires, and the ~2.3x flop wall leaves no fp32-class route to a speed
+win. NOT a permanent kill — re-open conditions at the bottom. The v1
+kernels (kernel_qwen4_gdn_ck1/2/3 + host fn + harness test/bench arms), the
+UT reference, both probes and the f16 audit are RETAINED as the re-visit
+starting point (harness-only, no production wiring, D4 never engaged).
+
 ## Established facts (do not re-verify)
 - Phase 0 PROBE PASSED, banked: chunked form is algebraically exact (fp64 vs
   serial anchor: 1.4e-17); fp32 chunked drift == fp32 serial floor (7-12e-9
@@ -100,15 +109,8 @@ D4). Est. 4-7 windows total (Phases 1-3).
                                              caps fp32 ALU at ~serial)
     v2 f16-tensor      ~4-7 ms est. 4e-5     (drift fail: ~400x over the
                                              f32 class, recurrent)
-  RECOMMENDATION: BANK NEGATIVE. The chunked form carries ~90 GF vs
-  serial's 38.6 GF per layer-chunk at T=8192 — only f16 tensor beats
-  serial, and that costs a golden commitment far beyond the ST flip for a
-  ~3-5% prefill-wall win, plus the P2/P3 tax. OPERATOR CALL (open): (a)
-  bank negative (recommended); (b) accept the f16 class (~7e-4 relative,
-  recurrent — same order as the tree's existing per-token f16 moe/attn
-  staging but compounded) and build f16-tensor v2 next window (speed
-  unproven, <=5 ms gate at risk); (c) build fp32-ALU v2 anyway (clean
-  drift, likely no win — fallback data point only).
+  DECISION 2026-10-05 (operator): BANKED NEGATIVE — option (a), recorded
+  as a potential re-visit (see REVISIT CONDITIONS). P1c/P1d/P2/P3 mooted.
 - P1c (0.5-1 window, model-free): host wiring behind env knob
   DS4_QWEN4_GDN_CHUNK (default OFF; =rows threshold later), new bench arms
   beside the existing three; VERDICT GATE: chunked scan <= ~5 ms/layer-chunk
@@ -132,12 +134,43 @@ D4). Est. 4-7 windows total (Phases 1-3).
 - Keep workstream registration cheap: this file is the plan's home; add an
   AGENTS.md Workstreams line ONLY if one can be removed elsewhere.
 
-## Phase 2/3 (preview, re-plan after P1c verdict)
-- P2: per-row state snapshots for checkpoint/MTP across the chunked path
-  (prefill checkpoint cadence vs per-chunk states — the hard part; may
-  constrain the chunk size or require K3 to emit states at quantum rows).
-- P3: validation ladder (harness, battery, rcab unaffected by D4, prefill
-  probe, TIMING=2 bucket re-measure), golden protocol, default decision.
+## Phase 2/3 (mooted — tax estimated before banking, 2026-10-05)
+- P2 ~1-1.5 windows, low-medium risk. Grounded finding: snapshot positions
+  are always t=0/1 of the prefill scan call (snap_tok=0/snap2_tok=1,
+  ds4.c:58461) and conv-hist snapshots ride the shared conv kernel — no
+  arbitrary intra-chunk positions, no chunk-size constraint. Work: small
+  snapshot kernel (1-2 rank-1 steps from scratchSIn), snap flag wiring,
+  harness test. Plus a checkpoint/handoff ADR (2026-09-06) compatibility
+  review (state semantics shift under drift; cross-version resume).
+- P3 ~3-4 windows + 3-4 production engine cycles + 1 operator golden
+  review: v2 harness + full suite (0.5 win, 1 stop-cycle), battery
+  baseline vs post-change + divergence sample/delta table (1-1.5 win,
+  1-2 restart cycles), prefill_probe + TIMING=2 bucket re-measure
+  (0.5 win, 1-2 cycles), golden re-capture of the local-golden-vectors
+  in tests/ds4_test.c (0.5-1 win + review). rcab/identity/verify-exact
+  free by D4 construction. The f16 option's real tax: the battery WOULD
+  show token flips / changed accept traces — accepting observable
+  completion drift on production traffic is a product-level call.
+- Total project if pursued: ~6-8 windows + 3-4 production cycles for a
+  3-5% prefill-wall win whose speed was still an estimate.
+
+## REVISIT CONDITIONS (what would re-open this project)
+Banked negative, not killed. Re-open if any of these become true:
+- DRIFT: the operator accepts f16-class recurrent drift (~7e-4 relative)
+  as within the tree's existing tolerance envelope (production already
+  runs f16-staged moe/attn per token) — or a cheaper exactness scheme
+  appears (split-f16 on the critical path, fp32 tensor units).
+- FLOPS: a chunked formulation materially under ~90 GF per layer-chunk at
+  T=8192, or the scan's share of prefill wall grows (larger prefill
+  chunks, other buckets shrinking) — the win scales with the ~10% share.
+- EVIDENCE: a battery run under a knobbed f16 build shows zero visible
+  divergence (would downgrade the drift concern to theoretical).
+- UPSTREAM: #1179/#1167/#1168 merges change the scan kernel or bucket
+  economics — re-check after each merge (see Watch).
+Re-visit starting points, all committed and harness-only: v1 kernels +
+harness (correct, 1.9e-9 drift, 71.7 ms — the fp32 reference),
+gdn_chunk_ut_reference.py, gdn_chunk_scan_probe.py (Phase 0),
+gdn_chunk_f16_audit.py (P1b.5), logs results/20261005_*.
 
 ## Watch
 - Upstream #1154 (PLE overlap) / #1150 (HC writes) touch neighboring
