@@ -13355,7 +13355,11 @@ static void slot_refresh_live_text(server *s, server_slot *slot, uint64_t trace_
                        ds4_session_checkpoint_valid(slot->session);
     const ds4_tokens *live = valid ? ds4_session_tokens(slot->session) : NULL;
     const int session_len = (valid && live) ? live->len : 0;
-    if (valid && live && live->len > 0 &&
+    /* A/B knob (NO_HC_PAIR-style): force the full re-render path so the
+     * incremental fix is measurable against it on one binary.  Per-turn
+     * getenv, like the DS4_MTP_SPEC_DISABLE pattern. */
+    const bool force_full = getenv("DS4_LIVE_TEXT_FULL") != NULL;
+    if (!force_full && valid && live && live->len > 0 &&
         live_text_can_append(slot->live_text_ids, slot->live_text_pos, live))
     {
         ds4_tokens tail = {0};
