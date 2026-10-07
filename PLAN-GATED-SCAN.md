@@ -81,11 +81,34 @@ D4). Est. 4-7 windows total (Phases 1-3).
   L 0.10, Tm 0.12, G 8.5e-4, B ~0) — no f16 overflow risk; expected drift
   moves to the chunked_f16 ~1e-6 class (Phase-0 probe), still ST-decision
   class but a bigger golden commitment than 1e-7.
-- P1b.5 DECISION (open, operator): invest 1-2 windows tensorizing CK1
-  (KK/KQ/solve-as-matmul tiles) + CK2 (S@B via simdgroup_matrix f16) + CK3
-  (W@SIn tiles), re-measure vs the <=5 ms gate; or bank negative and close
-  GATED-SCAN. K2's sequential-over-chunks chain (128 steps at T=8192) is
-  the residual risk even after tensorizing.
+- P1b.5 DONE 2026-10-05: f16-STAGING AUDIT MEASURED (script
+  tests/spec_economics/gdn_chunk_f16_audit.py, log
+  results/20261005_f16_audit.log) — the tensor path is numerically
+  disqualified at this plan's drift gate, and the fp32 path cannot win on
+  speed. Verdict data (T=2048 vs fp64 serial anchor, |o| ~ 0.061):
+    f32bti baseline      1.5-2.8e-8 / 1.9-4.5e-8   (sanity: BTI form = ut_f32)
+    f16 raw-input stage  2.0-3.5e-5 / 0.6-2.2e-4   (K,Q,V staging ALONE
+                                                  dominates the error)
+    f16 full CK1 GEMMs   3.7-5.3e-5 / 0.8-2.6e-4   (intermediates ~free)
+    f16 full kernel      3.7-5.3e-5 / 0.8-2.6e-4   (CK2/CK3 staging ~free)
+  cancellation factors O0/A measured 1.0x (no amplification — the error is
+  plain f16 staging, ~7e-4 relative worst-case, compounded through the
+  recurrent state over the prefill). Tradeoff table:
+    serial r4 (current)   9.7 ms     —
+    v1 fp32 chunked      71.7 ms     1.9e-9   (speed fail, measured)
+    v2 fp32-ALU tiled  ~6.5-9 ms    ~1e-7    (est.; 2.3x flops vs serial
+                                             caps fp32 ALU at ~serial)
+    v2 f16-tensor      ~4-7 ms est. 4e-5     (drift fail: ~400x over the
+                                             f32 class, recurrent)
+  RECOMMENDATION: BANK NEGATIVE. The chunked form carries ~90 GF vs
+  serial's 38.6 GF per layer-chunk at T=8192 — only f16 tensor beats
+  serial, and that costs a golden commitment far beyond the ST flip for a
+  ~3-5% prefill-wall win, plus the P2/P3 tax. OPERATOR CALL (open): (a)
+  bank negative (recommended); (b) accept the f16 class (~7e-4 relative,
+  recurrent — same order as the tree's existing per-token f16 moe/attn
+  staging but compounded) and build f16-tensor v2 next window (speed
+  unproven, <=5 ms gate at risk); (c) build fp32-ALU v2 anyway (clean
+  drift, likely no win — fallback data point only).
 - P1c (0.5-1 window, model-free): host wiring behind env knob
   DS4_QWEN4_GDN_CHUNK (default OFF; =rows threshold later), new bench arms
   beside the existing three; VERDICT GATE: chunked scan <= ~5 ms/layer-chunk
