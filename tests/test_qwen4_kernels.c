@@ -3329,6 +3329,72 @@ static int bench_p_attn_sparse(void *ud) {
     return ds4_gpu_qwen4_attn_decode_tensor(c->t[37], c->t[33], c->t[34], c->t[31], c->t[32], c->n[2] ? c->t[36] : c->t[35], c->t[38], NULL,
                                             1024, 24, 2, 256, 262144 - 1024, true, 2052, 0.0625f);
 }
+/* PR1149 A/B: per-T lazy buffers against the shared 256k K/V caches.
+ * c->n[0] picks T (512/1024/2048/8192 prefill chunks), c->n[2] the selection
+ * variant (0 random blocks, 1 blocks in the last 8k).  The
+ * DS4_QWEN4_NO_ATTN_MM_NAX kill switch selects classic vs NAX at the call
+ * site. */
+typedef struct { ds4_gpu_tensor *q, *gate, *sel, *cnt, *out; } attn_ab_bufs;
+static const uint32_t attn_ab_T[4] = { 512, 1024, 2048, 8192 };
+static attn_ab_bufs g_attn_ab[4][2];
+
+static const attn_ab_bufs *attn_ab_get(uint32_t T, uint32_t variant) {
+    for (int i = 0; i < 4; i++) {
+        if (attn_ab_T[i] != T) continue;
+        attn_ab_bufs *b = &g_attn_ab[i][variant ? 1 : 0];
+        if (b->q) return b;
+        const uint64_t qn = (uint64_t)T * 24 * 256;
+        float *qf = malloc(qn * 4);
+        for (uint64_t j = 0; j < qn; j++) qf[j] = frand() - 0.5f;
+        b->q = upload(qf, qn);
+        b->gate = upload(qf, qn);
+        free(qf);
+        int32_t *sel = malloc((uint64_t)T * 2052 * 4);
+        uint32_t *cnt = malloc(T * 4);
+        for (uint32_t t = 0; t < T; t++) {
+            const uint32_t pos = 262144 - T + t, n_blocks = pos / 4;
+            const uint32_t lo = variant ? n_blocks - 2048 : 0, span = n_blocks - lo;
+            uint32_t blocks[512];
+            for (int bi = 0; bi < 512; bi++) {
+                uint32_t bb;
+                bool dup;
+                do {
+                    bb = lo + (uint32_t)((frand() + 1.0f) * 0.5f * span) % span;
+                    dup = false;
+                    for (int j = 0; j < bi && !dup; j++) dup = blocks[j] == bb;
+                } while (dup);
+                blocks[bi] = bb;
+            }
+            /* production's radix-select emits top-k blocks in ascending
+             * block order (contiguous-chunk gather); sort to match */
+            for (int bi = 1; bi < 512; bi++) {
+                const uint32_t bb = blocks[bi];
+                int j = bi - 1;
+                while (j >= 0 && blocks[j] > bb) { blocks[j + 1] = blocks[j]; j--; }
+                blocks[j + 1] = bb;
+            }
+            for (int bi = 0; bi < 512; bi++)
+                for (int r = 0; r < 4; r++) sel[(uint64_t)t * 2052 + bi * 4 + r] = (int32_t)(blocks[bi] * 4 + r);
+            cnt[t] = 2048;
+        }
+        b->sel = ds4_gpu_tensor_alloc((uint64_t)T * 2052 * 4);
+        require_ok(b->sel && ds4_gpu_tensor_write(b->sel, 0, sel, (uint64_t)T * 2052 * 4), "sel write");
+        b->cnt = ds4_gpu_tensor_alloc(T * 4);
+        require_ok(b->cnt && ds4_gpu_tensor_write(b->cnt, 0, cnt, T * 4), "cnt write");
+        b->out = upload(NULL, qn);
+        free(sel); free(cnt);
+        return b;
+    }
+    return NULL;
+}
+
+static int bench_p_attn_sparse_ab(void *ud) {
+    bench_ctx *c = ud;
+    const attn_ab_bufs *b = attn_ab_get(c->n[0], c->n[2]);
+    require_ok(b != NULL, "attn ab shape");
+    return ds4_gpu_qwen4_attn_decode_tensor(b->out, b->q, b->gate, c->t[31], c->t[32], b->sel, b->cnt, NULL,
+                                            c->n[0], 24, 2, 256, 262144 - c->n[0], true, 2052, 0.0625f);
+}
 static int bench_p_gdn_r4(void *ud) { bench_ctx *c = ud; return ds4_gpu_qwen4_gdn_scan_tensor(c->t[15], c->t[1], c->t[11], c->t[13], c->t[14], 1024, 16, 48, 128, NULL, 0u, NULL, 0u); }
 /* GDN bucket decomposition at the live prefill chunk (QSA-ATTRIBUTION SEED
  * item 2): qkv/z projections (q8, NAX tensor arm), conv+prep (gemv a/b, conv
@@ -3661,6 +3727,19 @@ static void bench_dispatch(arena_t *a) {
     unsetenv("DS4_QWEN4_NO_ATTN_MM");
     c.n[2] = 0; bench_run("attn sparse T=1024 ctx=256k random blocks", bench_p_attn_sparse, &c, 5);
     c.n[2] = 1; bench_run("attn sparse T=1024 ctx=256k blocks in last 8k", bench_p_attn_sparse, &c, 5);
+    printf("  --- attn mm A/B: PR1149 NAX vs classic (mm gate open) ---\n");
+    setenv("DS4_QWEN4_NO_ATTN_MM_NAX", "1", 1);
+    c.n[0] = 512;  c.n[2] = 0; bench_run("attn mm T=512 ctx=256k random (classic)", bench_p_attn_sparse_ab, &c, 10);
+    c.n[0] = 1024; c.n[2] = 0; bench_run("attn mm T=1024 ctx=256k random (classic)", bench_p_attn_sparse_ab, &c, 5);
+    c.n[0] = 1024; c.n[2] = 1; bench_run("attn mm T=1024 ctx=256k last-8k (classic)", bench_p_attn_sparse_ab, &c, 5);
+    c.n[0] = 2048; c.n[2] = 0; bench_run("attn mm T=2048 ctx=256k random (classic)", bench_p_attn_sparse_ab, &c, 5);
+    c.n[0] = 8192; c.n[2] = 0; bench_run("attn mm T=8192 ctx=256k random (classic)", bench_p_attn_sparse_ab, &c, 3);
+    unsetenv("DS4_QWEN4_NO_ATTN_MM_NAX");
+    c.n[0] = 512;  c.n[2] = 0; bench_run("attn mm T=512 ctx=256k random (NAX)", bench_p_attn_sparse_ab, &c, 10);
+    c.n[0] = 1024; c.n[2] = 0; bench_run("attn mm T=1024 ctx=256k random (NAX)", bench_p_attn_sparse_ab, &c, 5);
+    c.n[0] = 1024; c.n[2] = 1; bench_run("attn mm T=1024 ctx=256k last-8k (NAX)", bench_p_attn_sparse_ab, &c, 5);
+    c.n[0] = 2048; c.n[2] = 0; bench_run("attn mm T=2048 ctx=256k random (NAX)", bench_p_attn_sparse_ab, &c, 5);
+    c.n[0] = 8192; c.n[2] = 0; bench_run("attn mm T=8192 ctx=256k random (NAX)", bench_p_attn_sparse_ab, &c, 3);
     bench_run("router gemv f32 512x2560", bench_router_gemv, &c, 100);
     bench_run("router_topk (+gate logit)", bench_router_topk, &c, 100);
     bench_run("router_topk no gate", bench_router_topk_nogate, &c, 100);
