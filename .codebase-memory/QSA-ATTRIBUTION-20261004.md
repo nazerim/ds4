@@ -243,3 +243,13 @@ Phase 3 golden protocol + battery). Est. 4-7 windows for +3-6% prefill wall.
   the `kv cache hit ... load=NNN ms` line carries no chain depth (samples
   today: 121.6 ms @4096, 1609.4 @175252, 2691.1 @163840, 2777.5 max); a one-
   line enrich (depth= in the hit line) would make it measurable.
+
+## Addendum 2026-10-08 (PR1149 review)
+
+Upstream #1149 proves the datapath lever for MAIN attention: a Metal-4
+tensor-unit rewrite of `kernel_qwen4_attn_mm` (NAX, ported from oMLX)
+measures 1.31x at T=1024/256k sparse and +2.8-7.4% e2e prefill on M5 Max.
+Our tile-widening negatives above were about the SCORER and tile geometry;
+the winning lever is restructuring the whole attention kernel onto tensor
+cores. It drifts ~1 ulp on prefill rows (T>8) — golden-decision class;
+review + gated path in PR1149-REVIEW-20261008.md.
