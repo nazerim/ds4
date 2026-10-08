@@ -1,0 +1,17 @@
+ds4: Metal device Apple M5 Max, 128.00 GiB RAM
+ds4: Metal 4 tensor API enabled for Tensor kernels
+ds4: drift-patch flags hc_stable=on norm_unify=on kv_raw_f32=off rope_exp2_log2=off math_safe=off tensor_matmul=on
+ds4: Metal model views created in 0.221 ms, residency requested in 65.479 ms, warmup 3.143 ms (mapped 3072.00 MiB from offset 0.00 MiB)
+ds4: Metal mapped mmaped model as 1 overlapping shared buffers
+  --- prefill T=256 ---
+  --- attn mm A/B: PR1149 NAX vs classic (mm gate open) ---
+  attn mm T=512 ctx=256k random (classic)        4072.9 us
+  attn mm T=1024 ctx=256k random (classic)       8057.8 us
+  attn mm T=1024 ctx=256k last-8k (classic)      7579.2 us
+  attn mm T=2048 ctx=256k random (classic)      15841.8 us
+  attn mm T=8192 ctx=256k random (classic)      63107.3 us
+  attn mm T=512 ctx=256k random (NAX)            3248.2 us
+  attn mm T=1024 ctx=256k random (NAX)           6216.0 us
+  attn mm T=1024 ctx=256k last-8k (NAX)          3385.6 us
+  attn mm T=2048 ctx=256k random (NAX)          12735.2 us
+  attn mm T=8192 ctx=256k random (NAX)          63330.7 us

@@ -959,6 +959,7 @@ static void test_attn_mm_keys(uint32_t T, uint32_t pos0, bool sparse, uint32_t k
     ds4_gpu_tensor *gk = ds4_gpu_tensor_alloc(kvn * 2), *gv = ds4_gpu_tensor_alloc(kvn * 2);
     ds4_gpu_tensor *gsel = ds4_gpu_tensor_alloc((uint64_t)T * sel_stride * 4), *gcnt = ds4_gpu_tensor_alloc(T * 4);
     ds4_gpu_tensor *go_ref = upload(NULL, qn), *go_new = upload(NULL, qn);
+    ds4_gpu_tensor *go_cls = upload(NULL, qn);
     ds4_gpu_tensor *partial = split ? ds4_gpu_tensor_alloc((uint64_t)T*H*64*(D+2)*4) : NULL;
     require_ok(!split || partial, "attention partial allocation");
     require_ok(gk && gv && gsel && gcnt && ds4_gpu_tensor_write(gk, 0, kc, kvn * 2) && ds4_gpu_tensor_write(gv, 0, vc, kvn * 2) &&
@@ -967,7 +968,10 @@ static void test_attn_mm_keys(uint32_t T, uint32_t pos0, bool sparse, uint32_t k
     require_ok(ds4_gpu_qwen4_attn_decode_tensor(go_ref, gq, ggate, gk, gv, gsel, gcnt, NULL, T, H, Hkv, D, pos0, sparse, sel_stride, 0.0625f), "attn reference");
     unsetenv("DS4_QWEN4_NO_ATTN_MM");
     require_ok(ds4_gpu_qwen4_attn_decode_tensor(go_new, gq, ggate, gk, gv, gsel, gcnt, partial, T, H, Hkv, D, pos0, sparse, sel_stride, 0.0625f), "attn mm");
-    float *ref = download(go_ref, qn), *got = download(go_new, qn);
+    setenv("DS4_QWEN4_NO_ATTN_MM_NAX", "1", 1);
+    require_ok(ds4_gpu_qwen4_attn_decode_tensor(go_cls, gq, ggate, gk, gv, gsel, gcnt, partial, T, H, Hkv, D, pos0, sparse, sel_stride, 0.0625f), "attn classic mm");
+    unsetenv("DS4_QWEN4_NO_ATTN_MM_NAX");
+    float *ref = download(go_ref, qn), *got = download(go_new, qn), *cls = download(go_cls, qn);
     double worst = 0.0, scale = 0.0;
     for (uint64_t i = 0; i < qn; i++) {
         require_ok(isfinite(got[i]) && isfinite(ref[i]), "finite attention output");
@@ -975,10 +979,23 @@ static void test_attn_mm_keys(uint32_t T, uint32_t pos0, bool sparse, uint32_t k
         if (d > worst) worst = d;
         if (fabs(ref[i]) > scale) scale = fabs(ref[i]);
     }
+    double worst_cls = 0.0, scale_cls = 0.0;
+    for (uint64_t i = 0; i < qn; i++) {
+        require_ok(isfinite(cls[i]), "finite classic attention output");
+        const double d = fabs((double)got[i] - cls[i]);
+        if (d > worst_cls) worst_cls = d;
+        if (fabs(cls[i]) > scale_cls) scale_cls = fabs(cls[i]);
+    }
     char name[96];
     snprintf(name, sizeof(name), "attn mm T=%u H=%u pos0=%u %s%s", T, H, pos0, sparse ? "sparse" : "dense", split ? " split" : "");
 #ifdef __APPLE__
     require_ok(worst <= 4e-3 * scale, name);
+    /* The default path may run the tensor-unit (NAX) tiles, which drift from
+     * the classic simdgroup kernel by about an ulp (tensor accumulation
+     * order).  The kill switch must select the classic kernel bit-exactly
+     * wherever the mm gate is closed (short tails, key splits). */
+    require_ok(worst_cls <= 2e-3 * fmax(scale_cls, 1e-8), "attn nax vs classic mm");
+    if (split || T <= 8u) require_ok(worst_cls == 0.0, "non-mm paths are kill-switch invariant");
 #else
     require_ok(worst <= 3e-5 * scale, name);
     /* Check selected rows against the definition, independently of both GPU
@@ -1020,10 +1037,11 @@ static void test_attn_mm_keys(uint32_t T, uint32_t pos0, bool sparse, uint32_t k
     printf("  %-44s CPU max|d|=%.2e scalar=%.2e (scale %.2e)\n", name, cpu_error, scalar_error, cpu_scale);
 #endif
     if (T <= 8u && !split) require_ok(worst == 0.0, "short attention tails keep decode arithmetic");
-    printf("  %-44s ok  max|d|=%.2e (scale %.2e)\n", name, worst, scale);
-    free(ref); free(got); free(q); free(gate); free(kc); free(vc); free(sel); free(cnt);
+    printf("  %-44s ok  max|d|=%.2e (scale %.2e)  mm-vs-classic %.2e\n", name, worst, scale, worst_cls);
+    free(ref); free(got); free(cls); free(q); free(gate); free(kc); free(vc); free(sel); free(cnt);
     ds4_gpu_tensor_free(gq); ds4_gpu_tensor_free(ggate); ds4_gpu_tensor_free(gk); ds4_gpu_tensor_free(gv);
     ds4_gpu_tensor_free(gsel); ds4_gpu_tensor_free(gcnt); ds4_gpu_tensor_free(go_ref); ds4_gpu_tensor_free(go_new);
+    ds4_gpu_tensor_free(go_cls);
     ds4_gpu_tensor_free(partial);
 }
 
@@ -3311,6 +3329,72 @@ static int bench_p_attn_sparse(void *ud) {
     return ds4_gpu_qwen4_attn_decode_tensor(c->t[37], c->t[33], c->t[34], c->t[31], c->t[32], c->n[2] ? c->t[36] : c->t[35], c->t[38], NULL,
                                             1024, 24, 2, 256, 262144 - 1024, true, 2052, 0.0625f);
 }
+/* PR1149 A/B: per-T lazy buffers against the shared 256k K/V caches.
+ * c->n[0] picks T (512/1024/2048/8192 prefill chunks), c->n[2] the selection
+ * variant (0 random blocks, 1 blocks in the last 8k).  The
+ * DS4_QWEN4_NO_ATTN_MM_NAX kill switch selects classic vs NAX at the call
+ * site. */
+typedef struct { ds4_gpu_tensor *q, *gate, *sel, *cnt, *out; } attn_ab_bufs;
+static const uint32_t attn_ab_T[4] = { 512, 1024, 2048, 8192 };
+static attn_ab_bufs g_attn_ab[4][2];
+
+static const attn_ab_bufs *attn_ab_get(uint32_t T, uint32_t variant) {
+    for (int i = 0; i < 4; i++) {
+        if (attn_ab_T[i] != T) continue;
+        attn_ab_bufs *b = &g_attn_ab[i][variant ? 1 : 0];
+        if (b->q) return b;
+        const uint64_t qn = (uint64_t)T * 24 * 256;
+        float *qf = malloc(qn * 4);
+        for (uint64_t j = 0; j < qn; j++) qf[j] = frand() - 0.5f;
+        b->q = upload(qf, qn);
+        b->gate = upload(qf, qn);
+        free(qf);
+        int32_t *sel = malloc((uint64_t)T * 2052 * 4);
+        uint32_t *cnt = malloc(T * 4);
+        for (uint32_t t = 0; t < T; t++) {
+            const uint32_t pos = 262144 - T + t, n_blocks = pos / 4;
+            const uint32_t lo = variant ? n_blocks - 2048 : 0, span = n_blocks - lo;
+            uint32_t blocks[512];
+            for (int bi = 0; bi < 512; bi++) {
+                uint32_t bb;
+                bool dup;
+                do {
+                    bb = lo + (uint32_t)((frand() + 1.0f) * 0.5f * span) % span;
+                    dup = false;
+                    for (int j = 0; j < bi && !dup; j++) dup = blocks[j] == bb;
+                } while (dup);
+                blocks[bi] = bb;
+            }
+            /* production's radix-select emits top-k blocks in ascending
+             * block order (contiguous-chunk gather); sort to match */
+            for (int bi = 1; bi < 512; bi++) {
+                const uint32_t bb = blocks[bi];
+                int j = bi - 1;
+                while (j >= 0 && blocks[j] > bb) { blocks[j + 1] = blocks[j]; j--; }
+                blocks[j + 1] = bb;
+            }
+            for (int bi = 0; bi < 512; bi++)
+                for (int r = 0; r < 4; r++) sel[(uint64_t)t * 2052 + bi * 4 + r] = (int32_t)(blocks[bi] * 4 + r);
+            cnt[t] = 2048;
+        }
+        b->sel = ds4_gpu_tensor_alloc((uint64_t)T * 2052 * 4);
+        require_ok(b->sel && ds4_gpu_tensor_write(b->sel, 0, sel, (uint64_t)T * 2052 * 4), "sel write");
+        b->cnt = ds4_gpu_tensor_alloc(T * 4);
+        require_ok(b->cnt && ds4_gpu_tensor_write(b->cnt, 0, cnt, T * 4), "cnt write");
+        b->out = upload(NULL, qn);
+        free(sel); free(cnt);
+        return b;
+    }
+    return NULL;
+}
+
+static int bench_p_attn_sparse_ab(void *ud) {
+    bench_ctx *c = ud;
+    const attn_ab_bufs *b = attn_ab_get(c->n[0], c->n[2]);
+    require_ok(b != NULL, "attn ab shape");
+    return ds4_gpu_qwen4_attn_decode_tensor(b->out, b->q, b->gate, c->t[31], c->t[32], b->sel, b->cnt, NULL,
+                                            c->n[0], 24, 2, 256, 262144 - c->n[0], true, 2052, 0.0625f);
+}
 static int bench_p_gdn_r4(void *ud) { bench_ctx *c = ud; return ds4_gpu_qwen4_gdn_scan_tensor(c->t[15], c->t[1], c->t[11], c->t[13], c->t[14], 1024, 16, 48, 128, NULL, 0u, NULL, 0u); }
 /* GDN bucket decomposition at the live prefill chunk (QSA-ATTRIBUTION SEED
  * item 2): qkv/z projections (q8, NAX tensor arm), conv+prep (gemv a/b, conv
@@ -3643,6 +3727,19 @@ static void bench_dispatch(arena_t *a) {
     unsetenv("DS4_QWEN4_NO_ATTN_MM");
     c.n[2] = 0; bench_run("attn sparse T=1024 ctx=256k random blocks", bench_p_attn_sparse, &c, 5);
     c.n[2] = 1; bench_run("attn sparse T=1024 ctx=256k blocks in last 8k", bench_p_attn_sparse, &c, 5);
+    printf("  --- attn mm A/B: PR1149 NAX vs classic (mm gate open) ---\n");
+    setenv("DS4_QWEN4_NO_ATTN_MM_NAX", "1", 1);
+    c.n[0] = 512;  c.n[2] = 0; bench_run("attn mm T=512 ctx=256k random (classic)", bench_p_attn_sparse_ab, &c, 10);
+    c.n[0] = 1024; c.n[2] = 0; bench_run("attn mm T=1024 ctx=256k random (classic)", bench_p_attn_sparse_ab, &c, 5);
+    c.n[0] = 1024; c.n[2] = 1; bench_run("attn mm T=1024 ctx=256k last-8k (classic)", bench_p_attn_sparse_ab, &c, 5);
+    c.n[0] = 2048; c.n[2] = 0; bench_run("attn mm T=2048 ctx=256k random (classic)", bench_p_attn_sparse_ab, &c, 5);
+    c.n[0] = 8192; c.n[2] = 0; bench_run("attn mm T=8192 ctx=256k random (classic)", bench_p_attn_sparse_ab, &c, 3);
+    unsetenv("DS4_QWEN4_NO_ATTN_MM_NAX");
+    c.n[0] = 512;  c.n[2] = 0; bench_run("attn mm T=512 ctx=256k random (NAX)", bench_p_attn_sparse_ab, &c, 10);
+    c.n[0] = 1024; c.n[2] = 0; bench_run("attn mm T=1024 ctx=256k random (NAX)", bench_p_attn_sparse_ab, &c, 5);
+    c.n[0] = 1024; c.n[2] = 1; bench_run("attn mm T=1024 ctx=256k last-8k (NAX)", bench_p_attn_sparse_ab, &c, 5);
+    c.n[0] = 2048; c.n[2] = 0; bench_run("attn mm T=2048 ctx=256k random (NAX)", bench_p_attn_sparse_ab, &c, 5);
+    c.n[0] = 8192; c.n[2] = 0; bench_run("attn mm T=8192 ctx=256k random (NAX)", bench_p_attn_sparse_ab, &c, 3);
     bench_run("router gemv f32 512x2560", bench_router_gemv, &c, 100);
     bench_run("router_topk (+gate logit)", bench_router_topk, &c, 100);
     bench_run("router_topk no gate", bench_router_topk_nogate, &c, 100);
