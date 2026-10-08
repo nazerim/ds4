@@ -253,3 +253,12 @@ Our tile-widening negatives above were about the SCORER and tile geometry;
 the winning lever is restructuring the whole attention kernel onto tensor
 cores. It drifts ~1 ulp on prefill rows (T>8) — golden-decision class;
 review + gated path in PR1149-REVIEW-20261008.md.
+
+**UPDATE 2026-10-08 (accepted):** the operator took (a). NAX is merged
+(`c5211b2`) and LIVE in production. The attribution shares above were
+canary-measured on the kill-switch arm; the production attn bucket is now
+~21% smaller (384 vs 486 ms/chunk) and cold prefill runs +4.6..+8.2%.
+The production path has its own pinned golden now
+(`tests/test-vectors/qwen38-flashnext/local-golden-nax.vec`); rollback =
+`DS4_QWEN4_NO_ATTN_MM_NAX=1` (exact vs `local-golden-pre-nax.vec`).
+Decision record: PR1149-REVIEW-20261008.md.

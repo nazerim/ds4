@@ -6707,7 +6707,15 @@ static void test_local_golden_apply_canonical_env(char **saved_prefill_chunk,
     *saved_moe_tile_max = test_save_env("DS4_METAL_MOE_TILE_MAX");
     *saved_streaming = test_force_canonical_streaming_prefill();
     setenv("DS4_METAL_PREFILL_CHUNK", "4096", 1);
-    setenv("DS4_METAL_DISABLE_METAL4", "1", 1);
+    /* DS4_TEST_LOCAL_GOLDEN_METAL4=1 keeps the automatic Metal4 path (PR1149
+     * NAX prefill attention) enabled for capture/verify, so the production
+     * numerics path can be pinned alongside the classic canonical fixture.
+     * Default stays Metal4-off: the existing classic fixture remains valid. */
+    if (getenv("DS4_TEST_LOCAL_GOLDEN_METAL4") == NULL) {
+        setenv("DS4_METAL_DISABLE_METAL4", "1", 1);
+    } else {
+        unsetenv("DS4_METAL_DISABLE_METAL4");
+    }
     unsetenv("DS4_METAL_MOE_TILE_MAX");
 }
 
@@ -6788,6 +6796,13 @@ static void test_local_golden_capture(void) {
     test_local_golden_record_model(model, sizeof(model));
     fputs("# ds4-local-golden-v1\n", out);
     fprintf(out, "# captured by ds4_test --local-golden-capture from %s.\n", model);
+    if (getenv("DS4_TEST_LOCAL_GOLDEN_METAL4") != NULL) {
+        if (getenv("DS4_QWEN4_NO_ATTN_MM_NAX") != NULL)
+            fputs("# path DS4_TEST_LOCAL_GOLDEN_METAL4=1 + DS4_QWEN4_NO_ATTN_MM_NAX=1 "
+                  "(Metal4 on, NAX attention off = pre-#1149 production)\n", out);
+        else
+            fputs("# path DS4_TEST_LOCAL_GOLDEN_METAL4=1 (Metal4/NAX prefill attention)\n", out);
+    }
     fprintf(out, "# model %s\n", model);
     fputs("# ('# model' resolves relative to the cwd; run ds4_test from the repo root)\n", out);
     fputs("# case <id> <mode> <ctx> <frontier> <prompt-file> <top-count>\n", out);

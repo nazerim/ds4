@@ -1,0 +1,13 @@
+=== C: capture NAX golden (hatch on) -> local-golden-nax.vec ===
+local-golden-capture:
+ds4-test: local golden long_story_4096 top1 ref=248046 cand=248046 top5_overlap=5/5 top20_overlap=20/20 top64_overlap=64/64 top20_max_abs=0
+local-golden-capture: OK
+ds4 tests: ok
+=== D: NAX verify vs NAX pin ===
+ds4-test: local golden long_story_4096 top1 ref=248046 cand=248046 top5_overlap=5/5 top20_overlap=20/20 top64_overlap=64/64 top20_max_abs=0
+ds4 tests: ok
+=== E: kill switch + hatch vs classic pin (must be bit-classic) ===
+ds4-test: local golden long_story_4096 top1 ref=248046 cand=248046 top5_overlap=2/5 top20_overlap=12/20 top64_overlap=43/64 top20_max_abs=5.24951
+tests/ds4_test.c:6602: assertion failed: top5_overlap >= 4
+tests/ds4_test.c:6603: assertion failed: top20_overlap >= 15
+ds4 tests: 2 failure(s)

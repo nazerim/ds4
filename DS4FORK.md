@@ -1455,3 +1455,18 @@ well inside the supported range.
 Confirm by watching decode t/s during a concurrent prefill, and whether the ladder
 rebuild (see .codebase-memory/OVERNIGHT-20260928.md 3h/3i) now lands rungs above the
 resume frontier instead of repeated siblings of one 131072-parented delta.
+
+---
+
+# Divergence 2026-10-08 — upstream #1149 accepted (NAX prefill attention)
+
+main merged `pr1149-ab` (`c5211b2`): upstream #1149's Metal-4 tensor-unit
+rewrite of the QSA prefill attention kernel (`kernel_qwen4_attn_mm_nax`).
+Production numerics now differ from upstream for prefill attention
+(~1e-4 logit class; top-1 holds at the golden anchor, top-5 membership
+moves 2/5; 9/11 stream prompts move visibly — accepted cost). Live win:
+attn bucket -20.9%, prefill chunk -6.7%, cold prefill tok/s +4.6..+8.2%.
+Guards: three local goldens under `tests/test-vectors/qwen38-flashnext/`
+(canonical / NAX production / pre-#1149 production); rollback without
+rebuild = `DS4_QWEN4_NO_ATTN_MM_NAX=1` (verified exact vs the pre-nax
+pin). Decision + evidence: `.codebase-memory/PR1149-REVIEW-20261008.md`.

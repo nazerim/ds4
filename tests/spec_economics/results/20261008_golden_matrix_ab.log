@@ -1,0 +1,9 @@
+=== A: classic canonical (Metal4 off) vs classic vec ===
+ds4-test: local golden long_story_4096 top1 ref=248046 cand=248046 top5_overlap=5/5 top20_overlap=20/20 top64_overlap=64/64 top20_max_abs=1.90735e-06
+ds4 tests: ok
+rc=0
+=== B: NAX (DS4_TEST_LOCAL_GOLDEN_METAL4=1) vs classic vec — cross-path drift ===
+ds4-test: local golden long_story_4096 top1 ref=248046 cand=248046 top5_overlap=3/5 top20_overlap=17/20 top64_overlap=54/64 top20_max_abs=3.35053
+tests/ds4_test.c:6602: assertion failed: top5_overlap >= 4
+ds4 tests: 1 failure(s)
+rc=0

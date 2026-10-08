@@ -3,11 +3,12 @@
 Context-limit checkpoint. Read this first after compaction.
 
 ## Repo / production state
-- `main` @ 781e615, clean. Branch `pr1149-ab` @ e71b1b6 (pushed) =
-  upstream #1149 cherry-picks + A/B bench arms + step-2 probe + review doc.
-- Production UP: ds4-server (qwen) PID 2132, smoke OK. On-disk
-  `./ds4-server` = MAIN build (do not restart into the branch binary by
-  accident; the canary builds it explicitly).
+- `main` @ c5211b2 (PR1149 MERGED), clean. Branch `pr1149-ab` merged;
+  evidence + review doc now on main.
+- Production UP: ds4-server (qwen) PID 4434, smoke OK — running the
+  merged binary with NAX LIVE (live prefill probe 1271 tok/s @6581).
+  Rollback without rebuild: `DS4_QWEN4_NO_ATTN_MM_NAX=1` (verified exact
+  vs `tests/test-vectors/qwen38-flashnext/local-golden-pre-nax.vec`).
 - Subagent lane healthy (general + coder verified this week).
 - Engine cycles: operator grants windows as needed (stop/start-qwen).
 
@@ -20,11 +21,12 @@ Context-limit checkpoint. Read this first after compaction.
   spec acceptance 73.57% vs 73.03% (within noise). Full golden-tree
   re-anchor class, NOT ~1ulp-invisible. Package:
   .codebase-memory/PR1149-REVIEW-20261008.md (on pr1149-ab).
-- **OPERATOR DECISION PENDING**: (a) accept + re-anchor goldens for
-  ~3-5% prefill wall; (b) merge dark; (c) decline [review leans (c),
-  HC-f16 precedent]. Operator asked: will (a) beat performance / worth
-  testing both — answered YES (kernel-measured; e2e live pending) and
-  agreed to a live canary first.
+- **OPERATOR DECISION: (a) ACCEPTED 2026-10-08** — merged (`c5211b2`),
+  deployed (PID 4434). Golden guard = triple pin (canonical classic /
+  NAX production / pre-#1149 production), NO re-anchor of the classic
+  fixture; harness hatch `DS4_TEST_LOCAL_GOLDEN_METAL4=1`. Stream gate
+  on merged binary: 11/11 bit-identical to banked NAX arm; acceptance
+  73.70% (noise). Golden matrix: `results/20261008_golden_matrix_*.log`.
 - **Step 3 = live canary A/B: DONE 2026-10-08** (runbook was appended to
   the review doc). Result: prefill win REAL — cold prefill tok/s
   **+4.6/+8.2/+7.2%** (6.6k/13k/25.8k prompts), TIMING=2 attn bucket
@@ -36,7 +38,7 @@ Context-limit checkpoint. Read this first after compaction.
   Canary committed nothing; goldens move only on deliberate re-capture.
 
 ## Queue after the canary
-1. Operator (a)/(b)/(c) call on PR1149 (see review doc).
+1. DONE: PR1149 (a) accepted, merged, deployed, triple-pinned.
 2. Watch upstream: #1179 (WIP, no prefill-scan change — review banked
    PR1179-REVIEW-20261008.md, HOLD), #1167/#1168, #1163, #1150/#1154,
    #1149 (this one), #1176 (issue, ours latest).

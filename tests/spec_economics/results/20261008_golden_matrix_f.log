@@ -1,0 +1,13 @@
+=== F: capture pre-#1149 production pin (hatch + kill switch) -> local-golden-pre-nax.vec ===
+local-golden-capture:
+ds4-test: local golden long_story_4096 top1 ref=248046 cand=248046 top5_overlap=5/5 top20_overlap=20/20 top64_overlap=64/64 top20_max_abs=0
+local-golden-capture: OK
+ds4 tests: ok
+=== E2: kill switch verify vs pre-nax pin (rollback guard, must be exact) ===
+ds4-test: local golden long_story_4096 top1 ref=248046 cand=248046 top5_overlap=5/5 top20_overlap=20/20 top64_overlap=64/64 top20_max_abs=0
+ds4 tests: ok
+=== G: NAX vs pre-nax pin (cross-path, production paths only) ===
+ds4-test: local golden long_story_4096 top1 ref=248046 cand=248046 top5_overlap=2/5 top20_overlap=11/20 top64_overlap=41/64 top20_max_abs=6.40679
+tests/ds4_test.c:6602: assertion failed: top5_overlap >= 4
+tests/ds4_test.c:6603: assertion failed: top20_overlap >= 15
+ds4 tests: 2 failure(s)

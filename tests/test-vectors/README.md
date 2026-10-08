@@ -103,3 +103,40 @@ To inspect a local top-logprob dump manually:
   --dump-logprobs /tmp/long_code_audit.ds4.json \
   --logprobs-top-k 20
 ```
+
+## qwen38-flashnext local goldens (three pins, 2026-10-08)
+
+`qwen38-flashnext/` holds the fork's own anchors for
+`gguf/Qwen3.8-Flash-Next-Q4.gguf` (case `long_story_4096`, top-64 logits at
+the frontier). Since upstream #1149 (NAX prefill attention) the directory
+pins THREE paths; each fixture's `# path` header records which:
+
+- `local-golden.vec` — canonical path, Metal4 OFF (default verify).
+- `local-golden-nax.vec` — production path, Metal4 + NAX on.
+- `local-golden-pre-nax.vec` — pre-#1149 production, Metal4 on + NAX off
+  (the `DS4_QWEN4_NO_ATTN_MM_NAX=1` rollback target).
+
+Verify (engine stopped, from the repo root):
+
+```sh
+M=gguf/Qwen3.8-Flash-Next-Q4.gguf
+V=tests/test-vectors/qwen38-flashnext
+# canonical canary (default; Metal4 off)
+DS4_TEST_MODEL=$M DS4_TEST_LOCAL_GOLDEN_FILE=$V/local-golden.vec \
+  ./ds4_test --local-golden-vectors
+# production canary (NAX pin)
+DS4_TEST_MODEL=$M DS4_TEST_LOCAL_GOLDEN_METAL4=1 \
+  DS4_TEST_LOCAL_GOLDEN_FILE=$V/local-golden-nax.vec \
+  ./ds4_test --local-golden-vectors
+# rollback guard (kill switch must reproduce the pre-nax pin exactly)
+DS4_TEST_MODEL=$M DS4_TEST_LOCAL_GOLDEN_METAL4=1 DS4_QWEN4_NO_ATTN_MM_NAX=1 \
+  DS4_TEST_LOCAL_GOLDEN_FILE=$V/local-golden-pre-nax.vec \
+  ./ds4_test --local-golden-vectors
+```
+
+Capture a new pin with `--local-golden-capture` (needs
+`DS4_TEST_LOCAL_GOLDEN_CAPTURE=<new-file>`; input cases come from
+`DS4_TEST_LOCAL_GOLDEN_FILE`; the capture self-verifies before installing).
+`DS4_TEST_LOCAL_GOLDEN_METAL4=1` selects the Metal4/NAX path. Cross-path
+drift runs (NAX vs a classic pin) are expected to trip the top-5 overlap
+heuristic — top-1 holds; see `.codebase-memory/PR1149-REVIEW-20261008.md`.
