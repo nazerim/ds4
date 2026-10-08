@@ -174,4 +174,7 @@ gdn_chunk_f16_audit.py (P1b.5), logs results/20261005_*.
 
 ## Watch
 - Upstream #1154 (PLE overlap) / #1150 (HC writes) touch neighboring
-  buckets; #1179 does not touch scan internals. Re-check before merge work.
+  buckets. #1179 reviewed 2026-10-08 (PR1179-REVIEW-20261008.md): its GDN
+  work is decode/verify-only (fused kernel capped T<=16) — the prefill scan
+  is untouched, so the re-visit trigger above is NOT met. Re-check before
+  merge work.
