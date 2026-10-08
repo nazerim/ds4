@@ -25,12 +25,15 @@ Context-limit checkpoint. Read this first after compaction.
   HC-f16 precedent]. Operator asked: will (a) beat performance / worth
   testing both — answered YES (kernel-measured; e2e live pending) and
   agreed to a live canary first.
-- **Step 3 = live canary A/B (planned, runbook appended to the review
-  doc)**: same branch binary, kill switch on/off, fresh KV, production
-  config; measures prefill_probe cold t/s (headline), TIMING=2 attn
-  bucket (`DS4_QWEN4_TIMING=2`, ds4.c:59308), battery acceptance. Then
-  the operator decides with live numbers. Canary commits nothing;
-  goldens move only on deliberate re-capture.
+- **Step 3 = live canary A/B: DONE 2026-10-08** (runbook was appended to
+  the review doc). Result: prefill win REAL — cold prefill tok/s
+  **+4.6/+8.2/+7.2%** (6.6k/13k/25.8k prompts), TIMING=2 attn bucket
+  **384.2 vs 485.8 ms/chunk (-20.9%)**, total prefill chunk **-6.7%**;
+  controls (gdn/moe/ple/hc) unchanged; acceptance 73.85% vs 72.97%
+  (noise); 0 errors. Banked: `tests/spec_economics/results/20261008_canary.log`
+  + canary battery JSONs (main `448d9c8`); STEP 3 RESULT section in the
+  review doc (pr1149-ab `6af4be9`). Production restored (PID 3291).
+  Canary committed nothing; goldens move only on deliberate re-capture.
 
 ## Queue after the canary
 1. Operator (a)/(b)/(c) call on PR1149 (see review doc).
