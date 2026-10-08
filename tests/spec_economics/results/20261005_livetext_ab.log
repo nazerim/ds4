@@ -1,0 +1,18 @@
+arm 1 (thinking on, <=7009 tok)
+  before: 40 refreshes paths=['full'] total=2.144 ms  max session=7009
+  after:  40 refreshes paths=['full'] total=2.146 ms  max session=7009
+  saved over 40 turns: -0.002 ms; matched sessions 40, mean delta -0.1 us/turn, max |delta| 23.0 us
+  full-render fit: wall_ms ~= 0.0101 + 9.17 ns/token * session_len
+    session=   7009: full~  0.074 ms/turn
+    session= 100000: full~  0.928 ms/turn
+    session= 300000: full~  2.762 ms/turn
+
+arm 2 (effort=none, <=3598 tok)
+  before: 40 refreshes paths=['full'] total=1.084 ms  max session=3598
+  after:  40 refreshes paths=['full'] total=1.107 ms  max session=3598
+  saved over 40 turns: -0.023 ms; matched sessions 40, mean delta -0.6 us/turn, max |delta| 10.0 us
+  full-render fit: wall_ms ~= 0.0141 + 4.67 ns/token * session_len
+    session=   7009: full~  0.047 ms/turn
+    session= 100000: full~  0.481 ms/turn
+    session= 300000: full~  1.414 ms/turn
+

@@ -55,6 +55,10 @@ def run_turn(prompt: str, max_tokens: int) -> dict:
         "max_tokens": max_tokens,
         "temperature": 0.0,
         "stream": False,
+        # thinking off: the returned text is then exactly the raw generated
+        # tokens' text, so the next turn's prompt re-tokenizes the completion
+        # cleanly and the live_text append predicate can actually fire.
+        "reasoning_effort": "none",
     }).encode()
     req = urllib.request.Request(
         URL, data=body, headers={"Content-Type": "application/json"})

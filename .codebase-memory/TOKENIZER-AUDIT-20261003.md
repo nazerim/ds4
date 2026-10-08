@@ -81,18 +81,51 @@ against the heap variant before touching.
   live_text (refresh runs after `job_complete`, lands on the NEXT request's
   queue time; a cold first prompt sees ~0). live_text fix buys per-turn
   overhead on multi-turn traffic; the cold-floor decomposition remains open.
-- DESIGN-NOTE only (unchanged): fix 3 (detok table — memory budget across
-  TP workers), fix 4 (distributed scratch, open question 3 still gates).
+- **Fix #3 (detok table) SHIPPED `c922e14`** — open question 2 answered:
+  EAGER per-engine table at vocab_load (no lazy cache). Measured 1.58 MiB
+  @ n_vocab=129,280 (arena 1.00 + off 0.49 + lit 0.12 MiB; ~2.3 MiB at the
+  Qwen 152k vocab) — acceptable in every instantiation (one engine per
+  process, slots share it, per-slot vocab-sized buffers already exist, TP
+  workers pay a few MB each). Cross-check 0 mismatches / 129,280 entries;
+  28.7x faster (0.001 vs 0.028 us/token); golden vectors OK.
+- Fix 4 (distributed scratch, open question 3 still gates) — unchanged.
 
 ## Open questions
 
 1. ~~`slot->live_text` consumers…~~ — **ANSWERED 2026-10-03 lane C: no
    fresh-render requirement anywhere; fix #2 shipped (`58c549c`)** with the
    conditions recorded above.
-2. Detok-table memory (few MB/engine) acceptable in every `ds4_engine`
-   instantiation (multi-slot batched servers, TP workers), or lazy? —
-   still open, gates fix 3.
+2. ~~Detok-table memory …~~ — **ANSWERED 2026-10-05: EAGER table shipped
+   (`c922e14`)**; measurement above.
 3. Is `ds4_dist_run` perf-relevant in production? Gates fix 4. — open.
-4. NEW (lane C follow-up): measure realized per-turn refresh savings via
-   `TRACE_PATH=./log/ds4.trace` (before/after wall time of
-   slot_refresh_live_text at long sessions) to size fix #2's win.
+4. ~~measure realized per-turn refresh savings~~ — **ANSWERED 2026-10-05
+   (measured A/B, ~0 realized win).** Method: trace-gated
+   slot_refresh_live_text wall-time instrumentation (`6af15aa`) +
+   DS4_LIVE_TEXT_FULL A/B knob (`04c421a`) + 40-turn prefix-extending probe
+   traffic on one slot (tests/spec_economics/livetext_probe.py), two traffic
+   shapes (thinking on / reasoning_effort=none), one binary both arms
+   (parse: livetext_ab.py, log results/20261005_livetext_ab.log):
+   - arm 1 (thinking on, sessions to 7009 tok): full-render total 2.144 ms
+     vs incremental-enabled 2.146 ms over 40 turns — saved −0.002 ms (noise).
+   - arm 2 (effort=none, sessions to 3598 tok): 1.084 vs 1.107 ms — saved
+     −0.023 ms (noise).
+   - The append path NEVER fired (40/40 path=full, both arms). Root cause
+     from the trace's first-mismatch window: the live checkpoint and each
+     incoming prompt diverge at the prompt/completion token seam — thinking
+     on: at the first generated token (the API's returned text omits the
+     thinking tokens the session contains); thinking off: the whole
+     completion region re-tokenizes differently from the generated tokens
+     (API text normalization). The session sync rewinds the completion every
+     turn, so the checkpoint is never a strict extension of the rendered
+     snapshot and `live_text_can_append` fails closed by design.
+   - With the detok table, the full re-render fallback costs ~5-9
+     ns/token (arm fits: 0.010 ms + 9.2 ns/tok; 0.014 ms + 4.7 ns/tok):
+     0.05-0.07 ms/turn @7k, ~0.5-0.9 ms/turn @100k, ~1.4-2.8 ms/turn @300k.
+   Verdict: fix #2 stays shipped (correct, fails closed, unit-pinned) but
+   its realized win on API-text round-trip traffic is ~0 — its value case
+   rested on the pre-table slow detok, which fix #3 already captured.
+   Remaining value is bounded by the full-render cost above and gated on
+   token-clean seams that API round-trips don't produce. Optional follow-up:
+   a production TRACE_PATH day would measure the real append firing rate on
+   chat traffic (chat clients also re-render canonically, so the same seam
+   question applies).
