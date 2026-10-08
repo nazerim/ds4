@@ -1,0 +1,38 @@
+PR1149 live canary A/B — 2026-10-08 (branch pr1149-ab binary, production config)
+Run A = NAX on    (DS4_QWEN4_TIMING=2 DS4_QWEN4_SPEC_TRACE=1, fresh KV /tmp/ds4-kv-can-a)
+Run B = classic   (DS4_QWEN4_NO_ATTN_MM_NAX=1, same env, fresh KV /tmp/ds4-kv-can-b)
+Workload per arm: prefill_probe 8192x3 16384x2 32768x2 (cold, fresh nonces, 1-token
+                  greedy) then battery.py 10 prompts (SPEC_TRACE acceptance).
+Both arms: 0 errors; control buckets (gdn/moe/ple/hc_*) unchanged between arms.
+
+COLD PREFILL tok/s (TTFT-implied, mean of reps):
+  prompt_tok   NAX(A)   classic(B)   delta
+  6581         1153.6   1103.2       +4.6%
+  13006        1234.5   1141.4       +8.2%
+  25781        1242.7   1159.0       +7.2%
+
+PREFILL STAGE ms per T=2048 chunk (DS4_QWEN4_TIMING=2, n=45 full chunks/arm):
+  bucket   NAX(A)   classic(B)   delta
+  attn     384.2    485.8        -101.6 (-20.9%)   <- NAX target bucket
+  gdn      363.2    365.0        ~0 (control)
+  moe      562.3    569.0        ~0 (control)
+  ple      19.7     20.0         ~0 (control)
+  hc_attn  107.9    108.9        ~0 (control)
+  hc_ffn   124.2    125.2        ~0 (control)
+  TOTAL    1561.6   1674.0       -112.4 (-6.7%)
+
+SPEC ACCEPTANCE (accept/(accept+reject), server-log counts):
+  NAX 1562/2115 = 73.85%   classic 1552/2127 = 72.97%
+  (within noise; step-2 stream A/B: 73.57% vs 73.03%)
+
+BATTERY wall: A 161.3s vs B 160.2s (decode-bound; noise)
+
+VERDICT: the live prefill win is REAL — attn bucket -20.9% (matches step-1 kernel
+A/B 1.14-1.30x at T=2048), total prefill chunk -6.7%, cold prefill tok/s
++4.6/+8.2/+7.2% at 6.6k/13k/25.8k prompts. Acceptance unchanged (noise).
+Cost class unchanged from step 2: prefill stream moves on ~9/11 prompts
+(golden first flip char 378) -> full golden re-anchor if accepted.
+
+Evidence: 20261008_canary_a_battery.json / 20261008_canary_b_battery.json (banked);
+server logs /tmp/can-a-server.log /tmp/can-b-server.log (scratch, not banked);
+probe stdout in this file. Production restored: PID 3291 (main binary).
