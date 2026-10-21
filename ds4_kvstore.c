@@ -44,8 +44,15 @@
 #define KV_CACHE_DEFAULT_BOUNDARY_ALIGN_TOKENS 2048
 #define KV_CACHE_DEFAULT_CONTINUED_INTERVAL_TOKENS 10000
 
-/* Hard cap on the sha-keyed text cache (see kv_cache_entry_text). */
+/* Hard cap on the sha-keyed text cache (see kv_cache_entry_text).  Charged
+ * against bytes ACTUALLY read: partial refs cost their prefix, so the cap
+ * governs the streamed prefix reads too. */
 #define KV_TEXT_CACHE_MAX_BYTES (256ull << 20)
+
+/* Incremental read unit for streamed prefix tests (see kv_text_ref_extend).
+ * A false candidate stops at the divergence chunk instead of loading (and
+ * hashing) either full text. */
+#define KV_PREFIX_CHUNK (256u << 10)
 
 typedef struct {
     char *ptr;
@@ -817,7 +824,7 @@ static void kv_text_refs_prune(ds4_kvstore *kc) {
             }
         }
         if (used) { i++; continue; }
-        kc->text_ref_bytes -= kc->text_refs[i].text_len + 1;
+        kc->text_ref_bytes -= kc->text_refs[i].loaded + 1;
         free(kc->text_refs[i].text);
         memmove(&kc->text_refs[i], &kc->text_refs[i + 1],
                 (size_t)(kc->text_ref_len - i - 1) * sizeof(kc->text_refs[0]));
@@ -825,72 +832,280 @@ static void kv_text_refs_prune(ds4_kvstore *kc) {
     }
 }
 
-/* Entry idx's rendered text, read once per process and cached by sha.
- * NULL when the text section is unreadable or fails its hash check. */
-static const char *kv_cache_entry_text(ds4_kvstore *kc, int idx) {
+/* ---- verified-sha set ----
+ * A text ref that passed the full SHA1 check once per process may skip the
+ * rehash when LRU eviction forces a reload: files are content-addressed and
+ * touch rewrites only the header, so the bytes re-read are the bytes that
+ * were verified (same invariant that makes cached texts never go stale). */
+static bool kv_sha_set_p(const char *arr, int len, const char sha[41]) {
+    int lo = 0, hi = len - 1;
+    while (lo <= hi) {
+        int mid = lo + (hi - lo) / 2;
+        int c = memcmp(arr + (size_t)mid * 41, sha, 41);
+        if (c == 0) return true;
+        if (c < 0) lo = mid + 1; else hi = mid - 1;
+    }
+    return false;
+}
+
+static void kv_sha_set_add(char **arr, int *len, int *cap, const char sha[41]) {
+    int lo = 0, hi = *len;
+    while (lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (memcmp(*arr + (size_t)mid * 41, sha, 41) < 0) lo = mid + 1;
+        else hi = mid;
+    }
+    if (lo < *len && memcmp(*arr + (size_t)lo * 41, sha, 41) == 0) return;
+    if (*len == *cap) {
+        *cap = *cap ? *cap * 2 : 256;
+        *arr = kv_xrealloc(*arr, (size_t)*cap * 41);
+    }
+    memmove(*arr + (size_t)(lo + 1) * 41, *arr + (size_t)lo * 41,
+            (size_t)(*len - lo) * 41);
+    memcpy(*arr + (size_t)lo * 41, sha, 41);
+    (*len)++;
+}
+
+static bool kv_sha_verified_p(const ds4_kvstore *kc, const char sha[41]) {
+    return kv_sha_set_p(kc->verified_shas, kc->verified_len, sha);
+}
+
+static bool kv_sha_corrupt_p(const ds4_kvstore *kc, const char sha[41]) {
+    return kv_sha_set_p(kc->corrupt_shas, kc->corrupt_len, sha);
+}
+
+/* Discard an untrusted ref (unreadable section or hash-check failure) so a
+ * later attempt re-reads from disk.  No held pointer may survive this. */
+static void kv_text_ref_drop(ds4_kvstore *kc, ds4_kvstore_text_ref *ref) {
+    for (int i = 0; i < kc->text_ref_len; i++) {
+        if (&kc->text_refs[i] != ref) continue;
+        kc->text_ref_bytes -= ref->loaded + 1;
+        free(ref->text);
+        memmove(kc->text_refs + i, kc->text_refs + i + 1,
+                (size_t)(kc->text_ref_len - i - 1) * sizeof(kc->text_refs[0]));
+        kc->text_ref_len--;
+        return;
+    }
+}
+
+/* Locate (or register) the ref for entry idx, validating the header's text
+ * size without reading any bytes.  Returns NULL when the file or its header
+ * is unreadable; otherwise the ref may have loaded==0 and is filled by
+ * kv_text_ref_extend. */
+static ds4_kvstore_text_ref *kv_text_ref_open(ds4_kvstore *kc, int idx) {
     const ds4_kvstore_entry *e = &kc->entry[idx];
     ds4_kvstore_text_ref *ref = kv_text_ref_find(kc, e->sha);
-    if (ref) return ref->text;
+    if (ref) return ref;
     FILE *fp = fopen(e->path, "rb");
     if (!fp) return NULL;
     ds4_kvstore_entry hdr = {0};
     uint32_t text_bytes = 0;
-    char *buf = NULL;
     bool ok = ds4_kvstore_read_header(fp, &hdr, &text_bytes) &&
-              text_bytes == e->text_bytes;
-    if (ok) {
-        buf = kv_xmalloc((size_t)text_bytes + 1);
-        ok = fread(buf, 1, text_bytes, fp) == text_bytes;
-    }
+              text_bytes == e->text_bytes && text_bytes < UINT32_MAX;
     fclose(fp);
-    if (ok) {
-        buf[text_bytes] = '\0';
-        char sha[41];
-        ds4_kvstore_sha1_bytes_hex(buf, text_bytes, sha);
-        ok = memcmp(sha, e->sha, 41) == 0;
-    }
-    if (!ok) {
-        free(buf);
-        return NULL;
-    }
+    if (!ok) return NULL;
     if (kc->text_ref_len == kc->text_ref_cap) {
         kc->text_ref_cap = kc->text_ref_cap ? kc->text_ref_cap * 2 : 16;
         kc->text_refs = kv_xrealloc(kc->text_refs,
                 (size_t)kc->text_ref_cap * sizeof(kc->text_refs[0]));
     }
-    ds4_kvstore_text_ref *slot = &kc->text_refs[kc->text_ref_len++];
-    memcpy(slot->sha, e->sha, 41);
-    slot->text = buf;
-    slot->text_len = text_bytes;
-    kc->text_ref_bytes += (size_t)text_bytes + 1;
-    /* Review M-1: the cache is a pure accelerator, so it must never grow
-     * unbounded with the directory.  Over the cap, drop refs from the HEAD
-     * (LRU order: kv_text_ref_find promotes hits to the tail, inserts land
-     * at the tail, so head = least-recently-used).  The loop stops at two
-     * held refs: find/insert just placed the caller's text in the newest
-     * slot, and kv_chain_rel_build may still hold the SECOND newest (it
-     * fetches `at`, fetches `dt` — which may reload and trigger this
-     * eviction — then memcmps both).  Evicting below two would be the
-     * dangling-pointer class this cap must not introduce. */
-    while (kc->text_ref_bytes > KV_TEXT_CACHE_MAX_BYTES && kc->text_ref_len > 2) {
-        kc->text_ref_bytes -= kc->text_refs[0].text_len + 1;
-        free(kc->text_refs[0].text);
-        memmove(kc->text_refs, kc->text_refs + 1,
-                (size_t)(kc->text_ref_len - 1) * sizeof(kc->text_refs[0]));
-        kc->text_ref_len--;
-    }
-    return buf;
+    ref = &kc->text_refs[kc->text_ref_len++];
+    memcpy(ref->sha, e->sha, 41);
+    ref->text = NULL;
+    ref->text_len = text_bytes;
+    ref->loaded = 0;
+    ref->cap = 0;
+    kc->text_ref_bytes += 1;
+    return ref;
 }
 
-/* -- prefix relation, built once per eviction pass over the current array --
- * rel[i*len + j] == 1  <=>  entry i's text is a byte-prefix of entry j's.
+/* Make the first `want` bytes of entry idx's text available in its cached
+ * ref (growing the buffer with the read).  The section lives at a
+ * deterministic offset (header + 4-byte text-size word) and files are
+ * immutable, so extending a partial ref is a positional re-open.  The SHA1
+ * check runs on the first load that reaches full bytes; later reloads skip
+ * it via the verified set.  On unreadable/corrupt text the ref is dropped
+ * and false returned.
+ *
+ * Pointer discipline: kv_text_ref_find() PROMOTES its slot (memmove of the
+ * refs array), so a text_ref slot pointer NEVER outlives the next cache
+ * operation — only the separately malloc'd text buffers are stable across
+ * slot moves (and reallocs only resize the one being extended).  This
+ * function therefore re-looks up its ref every chunk instead of holding a
+ * slot pointer. */
+static bool kv_text_ref_ensure(ds4_kvstore *kc, int idx, uint32_t want) {
+    const char *sha = kc->entry[idx].sha;
+    if (kv_sha_corrupt_p(kc, sha)) return false;
+    for (;;) {
+        ds4_kvstore_text_ref *ref = kv_text_ref_find(kc, sha);
+        if (!ref) ref = kv_text_ref_open(kc, idx);
+        if (!ref) return false;
+        const uint32_t target = want < ref->text_len ? want : ref->text_len;
+        if (ref->loaded >= target) break;
+        uint32_t step = target - ref->loaded;
+        if (step > KV_PREFIX_CHUNK) step = KV_PREFIX_CHUNK;
+        const uint64_t need = (uint64_t)ref->loaded + step + 1ull;
+        if ((uint64_t)ref->cap < need) {
+            uint64_t c = ref->cap ? ref->cap : (uint64_t)KV_PREFIX_CHUNK + 1ull;
+            while (c < need && c < (uint64_t)ref->text_len + 1ull) c *= 2ull;
+            if (c < need) c = need;
+            ref->text = kv_xrealloc(ref->text, (size_t)c);
+            ref->cap = (uint32_t)c;   /* c <= text_len+1 <= UINT32_MAX */
+        }
+        const ds4_kvstore_entry *e = &kc->entry[idx];
+        FILE *fp = fopen(e->path, "rb");
+        if (!fp) { kv_text_ref_drop(kc, ref); return false; }
+        /* kv_header_total() already includes the 4-byte text-size word. */
+        const long off = (long)(kv_header_total(e->hdr_version) +
+                                ref->loaded);
+        size_t got = 0;
+        if (fseek(fp, off, SEEK_SET) == 0)
+            got = fread(ref->text + ref->loaded, 1, step, fp);
+        fclose(fp);
+        if (got != step) { kv_text_ref_drop(kc, ref); return false; }
+        ref->loaded += (uint32_t)got;
+        kc->text_ref_bytes += got;
+        /* Review M-1 (amended): the cache is a pure accelerator and never
+         * grows unbounded — the cap now charges BYTES ACTUALLY READ, so
+         * streamed partial refs stay proportional to their prefixes.  Same
+         * "stop at two held refs" discipline: this chunk's ref is the
+         * freshest slot, and the caller's second ref (if any) sits directly
+         * below it after its find-promote, so both survive head eviction.
+         * NOTE: the eviction memmoves the array; the loop above re-looks
+         * the ref up instead of trusting any slot pointer across this. */
+        while (kc->text_ref_bytes > KV_TEXT_CACHE_MAX_BYTES &&
+               kc->text_ref_len > 2) {
+            kc->text_ref_bytes -= kc->text_refs[0].loaded + 1;
+            free(kc->text_refs[0].text);
+            memmove(kc->text_refs, kc->text_refs + 1,
+                    (size_t)(kc->text_ref_len - 1) *
+                    sizeof(kc->text_refs[0]));
+            kc->text_ref_len--;
+        }
+    }
+    ds4_kvstore_text_ref *ref = kv_text_ref_find(kc, sha);
+    if (!ref) return false;
+    if (ref->loaded == ref->text_len) {
+        /* Full bytes in RAM: NUL-terminate (empty texts never grew a
+         * buffer) and run the hash check unless this sha already passed it.
+         * A mismatch quarantines the entry (reads then fail closed like the
+         * legacy full-load-and-verify path) and invalidates the persistent
+         * matrix, so bits derived from the corrupt bytes cannot survive the
+         * next reconcile by sha-gather. */
+        if (!ref->text) {
+            ref->text = kv_xmalloc(1);
+            ref->cap = 1;
+        }
+        ref->text[ref->text_len] = '\0';
+        if (!kv_sha_verified_p(kc, ref->sha)) {
+            char sha2[41];
+            ds4_kvstore_sha1_bytes_hex(ref->text, ref->text_len, sha2);
+            if (memcmp(sha2, ref->sha, 41) != 0) {
+                kv_text_ref_drop(kc, ref);
+                kv_sha_set_add(&kc->corrupt_shas, &kc->corrupt_len,
+                               &kc->corrupt_cap, sha);
+                kc->rel_invalidate = true;
+                return false;
+            }
+            kv_sha_set_add(&kc->verified_shas, &kc->verified_len,
+                           &kc->verified_cap, ref->sha);
+        }
+    }
+    return true;
+}
+
+/* Look up the ref for entry idx after all bytes were ensured. */
+static ds4_kvstore_text_ref *kv_text_ref_lookup(ds4_kvstore *kc, int idx) {
+    return kv_text_ref_find(kc, kc->entry[idx].sha);
+}
+
+/* Entry idx's rendered text, fully read and hash-checked, cached by sha.
+ * NULL when the text section is unreadable or fails its hash check.
+ * The returned buffer stays valid under the existing two-newest-refs
+ * protection (same invariant the full-text pairwise build relied on). */
+static const char *kv_cache_entry_text(ds4_kvstore *kc, int idx) {
+    const ds4_kvstore_entry *e = &kc->entry[idx];
+    if (!kv_text_ref_ensure(kc, idx, (uint32_t)e->text_bytes)) return NULL;
+    ds4_kvstore_text_ref *ref = kv_text_ref_lookup(kc, idx);
+    return ref ? ref->text : NULL;
+}
+
+/* Does entry a's text byte-prefix entry d's (strict; a != d)?  Same verdict
+ * as the full builder's pairwise test: equal text_bytes with distinct shas
+ * never prefix, empty text prefixes everything.  The ancestor loads full
+ * (cached by sha, verified once); the descendant is extended in chunks and
+ * compared per chunk, so a mismatching pair costs bytes only up to the
+ * divergence point.  Buffers are captured per chunk (heap pointers), never
+ * as slots. */
+static bool kv_text_ref_prefix(ds4_kvstore *kc, int a, int d) {
+    const ds4_kvstore_entry *ea = &kc->entry[a];
+    const ds4_kvstore_entry *ed = &kc->entry[d];
+    if (ea->text_bytes >= ed->text_bytes) return false;
+    if (ea->text_bytes == 0)
+        return kv_text_ref_ensure(kc, a, 0) && kv_text_ref_ensure(kc, d, 0);
+    const uint32_t total = (uint32_t)ea->text_bytes;
+    if (!kv_text_ref_ensure(kc, a, total)) return false;
+    uint32_t off = 0;
+    while (off < total) {
+        const uint32_t want = total - off > KV_PREFIX_CHUNK
+                              ? off + KV_PREFIX_CHUNK : total;
+        if (!kv_text_ref_ensure(kc, d, want)) return false;
+        ds4_kvstore_text_ref *ra = kv_text_ref_lookup(kc, a);
+        if (!ra) return false;
+        char *ab = ra->text;                       /* stable across the
+                                                      next promote */
+        ds4_kvstore_text_ref *rd = kv_text_ref_lookup(kc, d);
+        if (!rd) return false;
+        if (memcmp(rd->text + off, ab + off, want - off) != 0) return false;
+        off = want;
+    }
+    return true;
+}
+
+/* Does entry idx's text byte-prefix the resident buffer (text, text_len)?
+ * Streams the entry's ref in chunks; used for the active/protect chain tests
+ * so false candidates stop at the divergence chunk. */
+static bool kv_text_resident_prefix(ds4_kvstore *kc, int idx,
+                                    const char *text, size_t text_len) {
+    const ds4_kvstore_entry *e = &kc->entry[idx];
+    if ((uint64_t)e->text_bytes > text_len) return false;
+    if (e->text_bytes == 0) return kv_text_ref_ensure(kc, idx, 0);
+    const uint32_t total = (uint32_t)e->text_bytes;
+    size_t off = 0;
+    while (off < total) {
+        const size_t want = total - off > KV_PREFIX_CHUNK
+                            ? off + KV_PREFIX_CHUNK : total;
+        if (!kv_text_ref_ensure(kc, idx, (uint32_t)want)) return false;
+        ds4_kvstore_text_ref *ref = kv_text_ref_lookup(kc, idx);
+        if (!ref) return false;
+        if (memcmp(ref->text + off, text + off, want - off) != 0)
+            return false;
+        off = want;
+    }
+    return true;
+}
+
+/* -- persistent byte-prefix relation matrix --------------------------------
+ * rel[i*rel_n + j] == 1  <=>  entry i's text is a byte-prefix of entry j's.
  * active[i] marks the incoming store's on-disk ancestors (the active chain).
- * Unlinking entries invalidates the matrix; rebuild after structural change. */
+ * leaf[i] precomputes "i has no strict descendant" (kv_rel_is_leaf).
+ * The matrix lives on kc (rel_bits/rel_shas/rel_n) keyed by sha; every
+ * eviction pass reconciles it against the current entry array with
+ * kv_chain_rel_build, which re-gathers known pairs instead of re-deriving
+ * them.  The only pairs that ever need a text comparison are those touching
+ * entries new since the last pass, and a new entry's ancestors are copied
+ * transitively from its v3 parent: pick_parent verified the byte-prefix
+ * relation when the child was written, and text sections are immutable on
+ * disk (content-addressed; touch rewrites only the header), so the chained
+ * verdicts need no re-verification here. */
 
 typedef struct {
-    uint8_t *rel;
-    uint8_t *active;
-    int len;
+    uint8_t *rel;      /* rel_n*rel_n bit matrix; owned by kc->rel_bits in
+                        * incremental mode, by the build in full mode */
+    uint8_t *active;   /* per-pass scratch (incoming ancestors ∪ protected) */
+    uint8_t *leaf;     /* per-pass scratch (precomputed leaf table) */
+    int len;           /* row/col count == kc->len at build time */
+    int rel_n;         /* matrix width (row stride) */
 } kv_chain_rel;
 
 static bool kv_cache_entry_in_active_chain(ds4_kvstore *kc, int idx,
@@ -898,38 +1113,123 @@ static bool kv_cache_entry_in_active_chain(ds4_kvstore *kc, int idx,
 static int64_t kv_cache_entry_last_used(const ds4_kvstore_entry *e);
 static int kv_cache_leaf_exclusive_count(ds4_kvstore *kc, const kv_chain_rel *r,
                                          int leaf);
+static void kv_chain_rel_release(ds4_kvstore *kc, kv_chain_rel *r);
 
-/* Returns false on allocation failure (the rel matrix is len*len bytes; on a
- * huge directory that is a real failure mode).  The callers skip the lineage
- * passes for this eviction cycle — review M-1: this runs with the server's
- * kv_mu held, so kv_die/exit here would abort the process while request
- * threads block on the lock.  Legacy LRU still yields nothing this pass
- * (phases are lineage-driven); the next store retries. */
-static bool kv_chain_rel_build(ds4_kvstore *kc, kv_chain_rel *r,
-                               const char *active_text, size_t active_len,
-                               const char *protect_text, size_t protect_len) {
+/* -- tiny sha->index hash map (linear probing; slots store idx+1) ---------- */
+typedef struct {
+    uint32_t *slots;
+    uint32_t mask;
+    const char *keys;   /* stride-41 sha array the stored indices point into */
+} kv_sha_map;
+
+static uint32_t kv_sha_hash(const char sha[41]) {
+    uint32_t h = 2166136261u;
+    for (int i = 0; i < 40; i++) { h ^= (uint8_t)sha[i]; h *= 16777619u; }
+    return h;
+}
+
+static bool kv_sha_map_build(kv_sha_map *m, const char *keys, int n) {
+    uint32_t cap = 16;
+    while (cap < (uint32_t)n * 2u + 1u) cap *= 2u;
+    memset(m, 0, sizeof(*m));
+    m->slots = calloc(cap, sizeof(uint32_t));
+    if (!m->slots) return false;
+    m->mask = cap - 1u;
+    m->keys = keys;
+    for (int i = 0; i < n; i++) {
+        uint32_t s = kv_sha_hash(keys + (size_t)i * 41) & m->mask;
+        while (m->slots[s]) s = (s + 1u) & m->mask;
+        m->slots[s] = (uint32_t)i + 1u;
+    }
+    return true;
+}
+
+static int kv_sha_map_get(const kv_sha_map *m, const char sha[41]) {
+    uint32_t s = kv_sha_hash(sha) & m->mask;
+    while (m->slots[s]) {
+        const uint32_t i = m->slots[s] - 1u;
+        if (memcmp(m->keys + (size_t)i * 41, sha, 41) == 0) return (int)i;
+        s = (s + 1u) & m->mask;
+    }
+    return -1;
+}
+
+static void kv_sha_map_free(kv_sha_map *m) { free(m->slots); m->slots = NULL; }
+
+/* Per-pass scratch (active/leaf) and the rel pointer for the current view.
+ * Returns false when the scratch allocations fail — the same skip-the-
+ * lineage-passes contract as review M-1 below. */
+static bool kv_chain_rel_view(ds4_kvstore *kc, kv_chain_rel *r) {
+    memset(r, 0, sizeof(*r));
     r->len = kc->len;
-    const size_t rel_bytes = (size_t)r->len * (size_t)r->len;
-    r->rel = malloc(rel_bytes ? rel_bytes : 1);
-    r->active = malloc((size_t)r->len ? (size_t)r->len : 1);
-    if (!r->rel || !r->active) {
-        free(r->rel); free(r->active);
-        r->rel = NULL; r->active = NULL; r->len = 0;
-        kv_logf(kc, DS4_KVSTORE_LOG_WARNING,
-                "%s: kv cache lineage pass skipped: allocation failure for %d entries",
-                kv_log_name(kc), kc->len);
+    r->active = malloc((size_t)kc->len ? (size_t)kc->len : 1);
+    r->leaf = malloc((size_t)kc->len ? (size_t)kc->len : 1);
+    if (!r->active || !r->leaf) {
+        free(r->active); free(r->leaf);
+        r->active = NULL; r->leaf = NULL; r->len = 0;
         return false;
     }
-    memset(r->rel, 0, rel_bytes);
-    memset(r->active, 0, (size_t)r->len);
+    memset(r->active, 0, (size_t)kc->len);
+    memset(r->leaf, 0, (size_t)kc->len);
+    /* r->rel is assigned by the builder once the matrix it must see is
+     * pinned (the cache may be dropped/rebuilt in between). */
+    return true;
+}
+
+/* Fill r->active (incoming ∪ protected ancestors) and the leaf table. */
+static void kv_chain_rel_finalize(ds4_kvstore *kc, kv_chain_rel *r,
+                                  const char *active_text, size_t active_len,
+                                  const char *protect_text, size_t protect_len) {
     for (int i = 0; i < r->len; i++) {
-        r->rel[(size_t)i * r->len + i] = 1;
         r->active[i] = (kv_cache_entry_in_active_chain(kc, i, active_text,
                                                        active_len) ||
                         (protect_text &&
                          kv_cache_entry_in_active_chain(kc, i, protect_text,
                                                         protect_len))) ? 1 : 0;
     }
+    for (int i = 0; i < r->len; i++) {
+        bool leaf = true;
+        for (int j = 0; j < r->len; j++) {
+            if (i == j) continue;
+            if (r->rel[(size_t)i * r->rel_n + j]) { leaf = false; break; }
+        }
+        r->leaf[i] = leaf ? 1 : 0;
+    }
+}
+
+/* The historical behaviour: derive every pair from texts (kept as
+ * DS4_KV_REL_FULL=1 for A/B verification in tests/kv_policy_harness.c and as
+ * an operator escape hatch).  Returns false on allocation failure (the rel
+ * matrix is len*len bytes; on a huge directory that is a real failure
+ * mode).  The callers skip the lineage passes for this eviction cycle —
+ * review M-1: this runs with the server's kv_mu held, so kv_die/exit here
+ * would abort the process while request threads block on the lock.  Legacy
+ * LRU still yields nothing this pass (phases are lineage-driven); the next
+ * store retries. */
+static bool kv_chain_rel_build_full(ds4_kvstore *kc, kv_chain_rel *r,
+                                    const char *active_text, size_t active_len,
+                                    const char *protect_text, size_t protect_len) {
+    if (!kv_chain_rel_view(kc, r)) {
+        r->rel = NULL;
+        kv_logf(kc, DS4_KVSTORE_LOG_WARNING,
+                "%s: kv cache lineage pass skipped: allocation failure for %d entries",
+                kv_log_name(kc), kc->len);
+        return false;
+    }
+    r->rel_n = r->len;
+    const size_t rel_bytes = (size_t)r->len * (size_t)r->len;
+    r->rel = malloc(rel_bytes ? rel_bytes : 1);
+    if (!r->rel) {
+        free(r->active); free(r->leaf);
+        r->rel = NULL; r->active = NULL; r->leaf = NULL; r->len = 0; r->rel_n = 0;
+        kv_logf(kc, DS4_KVSTORE_LOG_WARNING,
+                "%s: kv cache lineage pass skipped: allocation failure for %d entries",
+                kv_log_name(kc), kc->len);
+        return false;
+    }
+    memset(r->rel, 0, rel_bytes);
+    for (int i = 0; i < r->len; i++)
+        r->rel[(size_t)i * r->len + i] = 1;
     for (int i = 0; i < r->len; i++) {
         for (int j = i + 1; j < r->len; j++) {
             const ds4_kvstore_entry *a = &kc->entry[i];
@@ -938,49 +1238,251 @@ static bool kv_chain_rel_build(ds4_kvstore *kc, kv_chain_rel *r,
             if (a->text_bytes < b->text_bytes) { anc = i; desc = j; }
             else if (b->text_bytes < a->text_bytes) { anc = j; desc = i; }
             else continue; /* equal length + distinct sha: cannot prefix */
-            const char *at = kv_cache_entry_text(kc, anc);
-            const char *dt = kv_cache_entry_text(kc, desc);
-            if (!at || !dt) continue;
-            if (memcmp(dt, at, kc->entry[anc].text_bytes) == 0)
+            if (kv_text_ref_prefix(kc, anc, desc))
                 r->rel[(size_t)anc * r->len + desc] = 1;
         }
     }
+    kv_chain_rel_finalize(kc, r, active_text, active_len,
+                          protect_text, protect_len);
     return true;
 }
 
-static void kv_chain_rel_free(kv_chain_rel *r) {
-    free(r->rel);
+static int kv_cmp_len_key(const void *A, const void *B) {
+    const uint64_t a = *(const uint64_t *)A, b = *(const uint64_t *)B;
+    return a < b ? -1 : (a > b ? 1 : 0);
+}
+
+/* Reconcile kc->rel_bits (keyed by kc->rel_shas from the previous pass) with
+ * the current entry array.  Old x old pairs are gathered by sha (no text IO);
+ * entries new since the last pass get exactly one column and one row, and
+ * even those are mostly copied transitively through the v3 parent chain.
+ * The eviction loop's per-victim calls land on the fast path (array
+ * unchanged) or a pure gather (unlink/re-scan) — never the pairwise text
+ * storm that livelocked a production store for 20+ minutes over a
+ * 1081-entry directory (2026-10-21). */
+static bool kv_chain_rel_build_incremental(ds4_kvstore *kc, kv_chain_rel *r,
+                                           const char *active_text,
+                                           size_t active_len,
+                                           const char *protect_text,
+                                           size_t protect_len) {
+    const int n = kc->len;
+    if (!kv_chain_rel_view(kc, r)) {
+        kv_logf(kc, DS4_KVSTORE_LOG_WARNING,
+                "%s: kv cache lineage pass skipped: allocation failure for %d entries",
+                kv_log_name(kc), n);
+        return false;
+    }
+    if (kc->rel_invalidate) {
+        /* A corrupt entry was quarantined since the last reconcile: drop the
+         * matrix so its sha-gathered bits cannot persist; the next pass
+         * re-derives everything from (quarantine-fail-closed) texts. */
+        free(kc->rel_bits); free(kc->rel_shas);
+        kc->rel_bits = NULL; kc->rel_shas = NULL;
+        kc->rel_n = 0;
+        kc->rel_invalidate = false;
+    }
+    const int on = kc->rel_n;
+
+    bool current = (on == n && (n == 0 || kc->rel_bits != NULL));
+    for (int i = 0; current && i < n; i++)
+        if (memcmp(kc->rel_shas + (size_t)i * 41, kc->entry[i].sha, 41) != 0)
+            current = false;
+
+    if (!current) {
+        const size_t rel_bytes = (size_t)n * (size_t)n;
+        int *rowmap = malloc((size_t)n * sizeof(int));
+        uint64_t *sortkeys = malloc((size_t)n * sizeof(uint64_t));
+        uint8_t *bits = malloc(rel_bytes ? rel_bytes : 1);
+        char *shas = malloc((size_t)n * 41 ? (size_t)n * 41 : 1);
+        kv_sha_map oldmap = {0}, emap = {0};
+        bool oom = !rowmap || !sortkeys || !bits || !shas ||
+                   (on > 0 && !kv_sha_map_build(&oldmap, kc->rel_shas, on));
+        if (!oom && on == 0) oom = !kv_sha_map_build(&oldmap, "", 0);
+        if (!oom) memset(bits, 0, rel_bytes);
+        for (int i = 0; !oom && i < n; i++) {
+            memcpy(shas + (size_t)i * 41, kc->entry[i].sha, 41);
+            sortkeys[i] = (kc->entry[i].text_bytes << 32) | (uint64_t)(uint32_t)i;
+        }
+        if (!oom) {
+            qsort(sortkeys, (size_t)n, sizeof(sortkeys[0]), kv_cmp_len_key);
+            oom = !kv_sha_map_build(&emap, shas, n);
+        }
+        for (int i = 0; !oom && i < n; i++)
+            rowmap[i] = kv_sha_map_get(&oldmap, kc->entry[i].sha);
+
+        if (!oom) {
+            /* 1. gather the old x old block. */
+            for (int i = 0; i < n; i++) {
+                if (rowmap[i] < 0) continue;
+                const uint8_t *orow = kc->rel_bits + (size_t)rowmap[i] * on;
+                uint8_t *nrow = bits + (size_t)i * n;
+                for (int j = 0; j < n; j++)
+                    if (rowmap[j] >= 0) nrow[j] = orow[rowmap[j]];
+            }
+            /* New diagonal. */
+            for (int i = 0; i < n; i++)
+                if (rowmap[i] < 0) bits[(size_t)i * n + i] = 1;
+
+            /* 2. one column + row per new entry, ascending by text length so
+             * every source bit a derivation reads is already decided. */
+            for (int kq = 0; kq < n; kq++) {
+                const uint64_t key = sortkeys[kq];
+                const int j = (int)(key & 0xffffffffu);
+                if (rowmap[j] >= 0) continue;   /* old: gathered */
+                const uint64_t lj = key >> 32;
+                const ds4_kvstore_entry *ej = &kc->entry[j];
+                int b = -1;
+                if (ej->delta_from > 0 && ej->parent_sha[0]) {
+                    int t = kv_sha_map_get(&emap, ej->parent_sha);
+                    if (t >= 0 && t != j && kc->entry[t].text_bytes < lj)
+                        b = t;
+                }
+                if (b >= 0 && !kv_text_ref_prefix(kc, b, j)) b = -1;
+                if (b >= 0) {
+                    /* The recorded parent edge is text-true (pick_parent
+                     * verified it at store time; re-checked here once, so
+                     * fabricated or corrupted parent links degrade to exact
+                     * comparison instead of poisoning the matrix).
+                     * ancestors(j) ⊇ ancestors(b): copy b's column (b's own
+                     * diagonal lands the direct b -> j edge), but never
+                     * touch j's diagonal slot. */
+                    for (int a = 0; a < n; a++)
+                        if (a != j)
+                            bits[(size_t)a * n + j] = bits[(size_t)a * n + b];
+                    /* Rejected-parent extras: a longer than b can still be a
+                     * prefix of j only if it extends b (nested prefixes of
+                     * j all chain through the longest accepted ancestor's
+                     * subtree); compare those directly. */
+                    for (int a = 0; a < n; a++) {
+                        if (a == j || a == b || !bits[(size_t)b * n + a])
+                            continue;
+                        const uint64_t la = kc->entry[a].text_bytes;
+                        if (la <= kc->entry[b].text_bytes || la >= lj) continue;
+                        bits[(size_t)a * n + j] =
+                            kv_text_ref_prefix(kc, a, j) ? 1 : 0;
+                    }
+                } else {
+                    /* New root (or parent not in this directory): find its
+                     * ancestors by exact streamed comparison. */
+                    for (int q = 0; q < n; q++) {
+                        if (sortkeys[q] >> 32 >= lj) break;
+                        const int a = (int)(sortkeys[q] & 0xffffffffu);
+                        bits[(size_t)a * n + j] =
+                            kv_text_ref_prefix(kc, a, j) ? 1 : 0;
+                    }
+                }
+                /* Row of j against OLD entries longer than j (new longer
+                 * descendants are covered by their own column phase). */
+                for (int q = 0; q < n; q++) {
+                    const uint64_t kd = sortkeys[q];
+                    if (kd >> 32 <= lj) continue;
+                    const int d = (int)(kd & 0xffffffffu);
+                    if (rowmap[d] < 0) continue;
+                    const ds4_kvstore_entry *ed = &kc->entry[d];
+                    int bd = -1;
+                    if (ed->delta_from > 0 && ed->parent_sha[0]) {
+                        int t = kv_sha_map_get(&emap, ed->parent_sha);
+                        if (t >= 0 && t != d &&
+                            kc->entry[t].text_bytes < ed->text_bytes)
+                            bd = t;
+                    }
+                    if (bd >= 0 && bits[(size_t)bd * n + d] &&
+                        (kc->entry[bd].text_bytes < lj || rowmap[bd] >= 0)) {
+                        if (kc->entry[bd].text_bytes >= lj) {
+                            /* len_j <= len_bd: j -> d implies j -> bd. */
+                            bits[(size_t)j * n + d] = bits[(size_t)j * n + bd];
+                        } else if (bits[(size_t)bd * n + j]) {
+                            /* len_bd < len_j < len_d: bd -> j holds; whether
+                             * j -> d holds is not transitive — compare. */
+                            bits[(size_t)j * n + d] =
+                                kv_text_ref_prefix(kc, j, d) ? 1 : 0;
+                        }
+                        /* else: bd does not prefix j, so j cannot prefix d. */
+                    } else {
+                        bits[(size_t)j * n + d] =
+                            kv_text_ref_prefix(kc, j, d) ? 1 : 0;
+                    }
+                }
+            }
+        }
+
+        if (oom) {
+            free(bits); free(shas);
+            kv_sha_map_free(&oldmap); kv_sha_map_free(&emap);
+            free(rowmap); free(sortkeys);
+            kv_chain_rel_release(kc, r);
+            kv_logf(kc, DS4_KVSTORE_LOG_WARNING,
+                    "%s: kv cache lineage pass skipped: allocation failure for %d entries",
+                    kv_log_name(kc), n);
+            return false;
+        }
+        free(kc->rel_bits); free(kc->rel_shas);
+        kc->rel_bits = bits;
+        kc->rel_shas = shas;
+        kc->rel_n = n;
+        kv_sha_map_free(&oldmap); kv_sha_map_free(&emap);
+        free(rowmap); free(sortkeys);
+    }
+    r->rel = kc->rel_bits;
+    r->rel_n = kc->rel_n;   /* == n after the reconcile; == on on fast path */
+    kv_chain_rel_finalize(kc, r, active_text, active_len,
+                          protect_text, protect_len);
+    return true;
+}
+
+/* Entry point: the persistent incremental matrix by default; the full
+ * pairwise text build when DS4_KV_REL_FULL requests the legacy behaviour. */
+static bool kv_chain_rel_build(ds4_kvstore *kc, kv_chain_rel *r,
+                               const char *active_text, size_t active_len,
+                               const char *protect_text, size_t protect_len) {
+    /* Read per call (not cached): tests/kv_policy_harness.c A/B-compares the
+     * two modes inside one process; production never toggles mid-run. */
+    const char *e = getenv("DS4_KV_REL_FULL");
+    if (e && strcmp(e, "0") != 0)
+        return kv_chain_rel_build_full(kc, r, active_text, active_len,
+                                       protect_text, protect_len);
+    return kv_chain_rel_build_incremental(kc, r, active_text, active_len,
+                                          protect_text, protect_len);
+}
+
+static void kv_chain_rel_release(ds4_kvstore *kc, kv_chain_rel *r) {
+    /* Incremental mode: rel belongs to kc->rel_bits (it survives the pass).
+     * Full mode owns it per build. */
+    if (r->rel && r->rel != kc->rel_bits) free(r->rel);
     free(r->active);
+    free(r->leaf);
     r->rel = NULL;
     r->active = NULL;
+    r->leaf = NULL;
     r->len = 0;
+    r->rel_n = 0;
 }
 
 static bool kv_rel_prefixes(const kv_chain_rel *r, int anc, int desc) {
-    return r->rel[(size_t)anc * r->len + desc] != 0;
+    return r->rel[(size_t)anc * r->rel_n + desc] != 0;
 }
 
 static bool kv_cache_entry_is_legacy(const ds4_kvstore_entry *e) {
     return e->hdr_version < KV_CACHE_VERSION2;
 }
 
-/* A leaf is an entry with no strict descendant: the frontier of its branch. */
+/* A leaf is an entry with no strict descendant: the frontier of its branch.
+ * Answered from the per-pass table (kv_chain_rel_finalize) so the hot
+ * O(leaf-scan) consumers stayed O(n) after the leaf test was nested inside
+ * exclusive/member scans. */
 static bool kv_rel_is_leaf(const kv_chain_rel *r, int idx) {
-    for (int i = 0; i < r->len; i++)
-        if (i != idx && kv_rel_prefixes(r, idx, i)) return false;
-    return true;
+    return r->leaf[idx] != 0;
 }
 
 /* Entry idx's text is a byte-prefix of the incoming store text: idx lies on
- * the active chain (the ancestors of the frontier about to be stored). */
+ * the active chain (the ancestors of the frontier about to be stored).
+ * Streamed chunk-wise against the resident incoming buffer, so a false
+ * candidate stops at the divergence chunk instead of loading (and hashing)
+ * its full text. */
 static bool kv_cache_entry_in_active_chain(ds4_kvstore *kc, int idx,
                                            const char *text, size_t text_len) {
     if (!text) return false;
-    const ds4_kvstore_entry *e = &kc->entry[idx];
-    if ((uint64_t)e->text_bytes > text_len) return false;
-    const char *et = kv_cache_entry_text(kc, idx);
-    if (!et) return false;
-    return memcmp(text, et, e->text_bytes) == 0;
+    return kv_text_resident_prefix(kc, idx, text, text_len);
 }
 
 /* Is entry idx exclusive to leaf's lineage: idx prefixes leaf and no OTHER
@@ -1736,7 +2238,7 @@ void ds4_kvstore_evict(ds4_kvstore *kc, const ds4_tokens *live,
             int leaf = over ? kv_cache_find_lru_leaf(kc, &r, 1, true) : -1;
             bool retired = leaf >= 0 &&
                 kv_cache_retire_leaf(kc, &r, leaf, &total);
-            kv_chain_rel_free(&r);
+            kv_chain_rel_release(kc, &r);
             if (!over || leaf < 0 || !retired) break;
         }
     }
@@ -1755,7 +2257,7 @@ void ds4_kvstore_evict(ds4_kvstore *kc, const ds4_tokens *live,
         int victim = kv_cache_find_redundant(kc, &r);
         if (victim >= 0) {
             kv_cache_unlink_entry(kc, victim, &total, "redundant");
-            kv_chain_rel_free(&r);
+            kv_chain_rel_release(kc, &r);
             continue;
         }
         /* PHASE B: nothing redundant left — halve the LRU non-active
@@ -1788,7 +2290,7 @@ void ds4_kvstore_evict(ds4_kvstore *kc, const ds4_tokens *live,
             }
         }
         if (halved) {
-            kv_chain_rel_free(&r);
+            kv_chain_rel_release(kc, &r);
             continue; /* next pass evicts newly-redundant middle */
         }
         /* all anchors already at max level (or no halving candidate) ->
@@ -1804,16 +2306,16 @@ void ds4_kvstore_evict(ds4_kvstore *kc, const ds4_tokens *live,
         int64_t legacy_lu = legacy >= 0 ?
             kv_cache_entry_last_used(&kc->entry[legacy]) : INT64_MAX;
         if (leaf < 0 && legacy < 0) {
-            kv_chain_rel_free(&r);
+            kv_chain_rel_release(kc, &r);
             break; /* PHASE D: active at floor -> stop */
         }
         if (legacy >= 0 && (leaf < 0 || legacy_lu <= branch_recency)) {
             kv_cache_unlink_entry(kc, legacy, &total, "legacy-lru");
-            kv_chain_rel_free(&r);
+            kv_chain_rel_release(kc, &r);
             continue;
         }
         const bool retired = kv_cache_retire_leaf(kc, &r, leaf, &total);
-        kv_chain_rel_free(&r);
+        kv_chain_rel_release(kc, &r);
         if (!retired) break; /* allocation failure: stop this cycle (M-1) */
         continue;
     }
@@ -1977,6 +2479,10 @@ void ds4_kvstore_close(ds4_kvstore *kc) {
     ds4_kvstore_clear(kc);
     for (int i = 0; i < kc->text_ref_len; i++) free(kc->text_refs[i].text);
     free(kc->text_refs);
+    free(kc->rel_bits);
+    free(kc->rel_shas);
+    free(kc->verified_shas);
+    free(kc->corrupt_shas);
     free(kc->defer_tbl);
     free(kc->dir);
     memset(kc, 0, sizeof(*kc));

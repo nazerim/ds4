@@ -128,7 +128,14 @@ typedef struct {
 typedef struct {
     char sha[41];
     char *text;
-    uint32_t text_len;
+    uint32_t text_len;   /* full section size (from the header; immutable) */
+    /* Bytes read into text[] so far.  Prefix tests extend refs in chunks,
+     * so a false candidate costs bytes only up to the divergence point,
+     * not either full text.  text[] is NUL-terminated iff loaded==text_len. */
+    uint32_t loaded;
+    /* Allocated size of text[] (grows with loaded; never shrinks).  Keeps
+     * RAM charged in step with text_ref_bytes instead of full section size. */
+    uint32_t cap;
 } ds4_kvstore_text_ref;
 
 typedef struct {
@@ -168,11 +175,38 @@ typedef struct {
     ds4_kvstore_text_ref *text_refs;
     int text_ref_len;
     int text_ref_cap;
-    /* Total cached text bytes (sum of text_refs[i].text_len+1), bounded by
+    /* Total cached text bytes (sum of text_refs[i].loaded+1), bounded by
      * KV_TEXT_CACHE_MAX_BYTES in ds4_kvstore.c: oldest refs are dropped FIFO
      * when the cap is exceeded (pure cache: a dropped ref is re-read from
      * disk on next use; never a correctness loss). */
     size_t text_ref_bytes;
+    /* Private: persistent byte-prefix relation matrix for the lineage
+     * retention passes (see kv_chain_rel_build): rel_bits is a rel_n*rel_n
+     * row-major matrix keyed by rel_shas, reconciled by sha against
+     * kc->entry at the start of every eviction pass.  Unlinking entries or
+     * a readdir re-scan only re-gathers bits; per-store cost is one new
+     * column + row derived from the v3 parent chain, never a full O(n^2)
+     * text rebuild.  Survives clear/refresh; freed at close. */
+    uint8_t *rel_bits;
+    char *rel_shas;      /* rel_n * 41 */
+    int rel_n;
+    /* Set when a full read fails its SHA1 check: the matrix must be dropped
+     * at the next reconcile (bits derived from the corrupt bytes by earlier
+     * comparisons in the SAME pass are purged then, not mid-pass). */
+    bool rel_invalidate;
+    /* Private: sorted set of shas whose FULL text passed the SHA1 check once
+     * this process.  Text sections are immutable (content-addressed files;
+     * touch rewrites only the header), so a reload after LRU eviction may
+     * skip the rehash.  Grows with the directory, never pruned. */
+    char *verified_shas;
+    int verified_len;
+    int verified_cap;
+    /* Private: sorted set of shas whose full read FAILED the SHA1 check.
+     * Quarantined entries read as unreadable (same fail-closed behaviour the
+     * legacy pairwise build had when its verify rejected a text). */
+    char *corrupt_shas;
+    int corrupt_len;
+    int corrupt_cap;
     /* Lifetime store telemetry, logged every KV_STORE_STATS_EVERY stores and at
      * close.  The point is to answer "is chaining actually saving space, and how
      * fast is this cache growing" from the log, instead of needing an offline

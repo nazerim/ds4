@@ -30,6 +30,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <dirent.h>
 
 static int g_failures = 0;
 #define CHECK(cond, msg) do { \
@@ -55,6 +56,9 @@ static int g_defer_counts[4];
  * chained retire produces ZERO of these — review H-2). */
 static int g_any_defer_lines = 0;
 
+/* KV_HARNESS_EV=1 dumps evicted/deferred events (Scenario M A/B debugging). */
+static int g_evdbg = 0;
+
 /* "frontier-superseded" unlink lines (Scenario L: eager off-grid frontier
  * sweep, oMLX 0.7.0 a28e5a87 parity). */
 static int g_supersede_lines = 0;
@@ -62,6 +66,8 @@ static int g_supersede_lines = 0;
 static void log_cb(void *ud, ds4_kvstore_log_type type, const char *msg) {
     (void)ud;
     if (type == DS4_KVSTORE_LOG_WARNING) fprintf(stderr, "WARN: %s\n", msg);
+    if (g_evdbg && (strstr(msg, "evicted") || strstr(msg, "deferred")))
+        fprintf(stderr, "EV: %s\n", msg);
     if (strstr(msg, "delete deferred")) g_any_defer_lines++;
     if (strstr(msg, "frontier-superseded")) g_supersede_lines++;
     if (strstr(msg, "delete deferred") && g_defer_dir) {
@@ -829,6 +835,194 @@ static void scenario_frontier_supersede(void) {
     rmdir(dir);
 }
 
+/* ------------------------------------------------------------------ */
+/* Scenario M: persistence of the byte-prefix relation matrix.  The
+ * eviction passes reconcile a sha-keyed rel matrix kept on the kvstore
+ * (incremental: only pairs touching entries new since the last pass see a
+ * text comparison; chained ancestors copy their parent's column).  Replay
+ * the same directory and the same multi-phase eviction sequence under the
+ * incremental matrix and under the legacy full pairwise build
+ * (DS4_KV_REL_FULL=1) and assert the survivor set is byte-identical:
+ * incremental derivation must make exactly the retention verdicts a full
+ * rebuild makes. */
+
+/* Chain parents need a v3 stub with an explicit conv id (stub_file_v3 pins
+ * conv 7 for scenario D). */
+static void stub_file_v3c(const char *dir, const char *text,
+                          const char *parent_text, uint64_t conv_id,
+                          uint8_t reason, uint32_t tokens,
+                          uint32_t delta_from, uint64_t last_used,
+                          uint64_t payload_bytes) {
+    char psha[41];
+    ds4_kvstore_sha1_bytes_hex(parent_text, strlen(parent_text), psha);
+    char sha[41];
+    ds4_kvstore_sha1_bytes_hex(text, strlen(text), sha);
+    char name[64];
+    snprintf(name, sizeof(name), "%.40s.kv", sha);
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    FILE *fp = fopen(path, "wb");
+    if (!fp) { perror("stub_file_v3c fopen"); exit(1); }
+    uint8_t h[DS4_KVSTORE_FIXED_HEADER + DS4_KVSTORE_HEADER_V3_EXTRA];
+    ds4_kvstore_fill_header_v3(h, 0, 2, reason, 0, tokens, 0, 32768,
+                               100, last_used, payload_bytes,
+                               conv_id, 0,
+                               DS4_KVSTORE_DEFAULT_ANCHOR_STEP > 0
+                               ? tokens / (uint32_t)DS4_KVSTORE_DEFAULT_ANCHOR_STEP : 0,
+                               0, false, psha, delta_from);
+    uint8_t tb[4];
+    ds4_kvstore_le_put32(tb, (uint32_t)strlen(text));
+    if (fwrite(h, 1, sizeof(h), fp) != sizeof(h) ||
+        fwrite(tb, 1, sizeof(tb), fp) != sizeof(tb) ||
+        fwrite(text, 1, strlen(text), fp) != strlen(text)) {
+        fprintf(stderr, "stub v3c write failed\n");
+        exit(1);
+    }
+    for (uint64_t i = 0; i < payload_bytes; i++) fputc(0, fp);
+    fclose(fp);
+}
+
+static const char *m_texts[] = {
+    "M lineage head anchor text",
+    "M lineage head anchor text - extension two",
+    "M lineage head anchor text - extension two - extension three",
+    "M lineage head anchor text - extension two - extension three - frontier",
+    "M lineage head anchor text - branch S",
+    "M lineage head anchor text - branch S - frontier",
+    "M unrelated idle session text",
+    "M equal length fixture one",
+    "M equal length fixture two",
+    "",                                    /* empty text: prefixes everything */
+    "M brand new session root text",       /* phase-2 unrelated root */
+};
+enum { M_HEAD = 0, M_TWO, M_THREE, M_FRONT, M_S1, M_S2, M_IDLE,
+       M_EQ1, M_EQ2, M_EMPTY, M_W1 };
+#define M_NTEXTS ((int)(sizeof(m_texts) / sizeof(m_texts[0])))
+
+static void fixture_m_build(const char *dir, uint64_t now) {
+    const char *head = m_texts[M_HEAD];
+    stub_file(dir, head, 21, 1, 8192, now - 50000, 100);
+    stub_file_v3c(dir, m_texts[M_TWO], head, 21, 2, 16384, 8192, now - 40000, 100);
+    stub_file_v3c(dir, m_texts[M_THREE], m_texts[M_TWO], 21, 2, 32768, 16384, now - 30000, 100);
+    stub_file_v3c(dir, m_texts[M_FRONT], m_texts[M_THREE], 21, 2, 65536, 32768, now - 10, 3000);
+    stub_file_v3c(dir, m_texts[M_S1], head, 22, 2, 20480, 8192, now - 25000, 100);
+    stub_file_v3c(dir, m_texts[M_S2], m_texts[M_S1], 22, 2, 49152, 20480, now - 20, 2000);
+    stub_file(dir, m_texts[M_IDLE], 23, 1, 36864, now - 60000, 4000);
+    stub_file(dir, m_texts[M_EQ1], 24, 1, 40960, now - 70000, 500);
+    stub_file(dir, m_texts[M_EQ2], 24, 1, 45056, now - 80000, 400);
+    stub_file(dir, m_texts[M_EMPTY], 25, 1, 53248, now - 90000, 600);
+}
+
+static void fixture_m_phase2(const char *dir, uint64_t now) {
+    /* Two chained rungs above the frontier + one unrelated root: the next
+     * eviction pass must derive columns through parent-copy (rungs) and by
+     * streamed comparison (root), against the existing matrix. */
+    char q1[256]; snprintf(q1, sizeof(q1), "%s%s", m_texts[M_FRONT], " - M continued rung one text extension");
+    char q2[256]; snprintf(q2, sizeof(q2), "%s%s", q1, " plus rung two more");
+    stub_file_v3c(dir, q1, m_texts[M_FRONT], 21, 2, 73728, 65536, now - 8, 800);
+    stub_file_v3c(dir, q2, q1, 21, 2, 81920, 73728, now - 5, 3500);
+    stub_file(dir, m_texts[M_W1], 26, 1, 12288, now - 2, 500);
+}
+
+static int m_cmp_name(const void *A, const void *B) {
+    return strcmp(*(const char *const *)A, *(const char *const *)B);
+}
+
+/* Sorted "name;" concatenation of the directory listing. */
+static void fixture_m_list(const char *dir, char *out, size_t outsz) {
+    out[0] = '\0';
+    char *names[64];
+    int n = 0;
+    DIR *d = opendir(dir);
+    if (!d) { perror("fixture_m_list"); exit(1); }
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        if (de->d_name[0] == '.') continue;
+        names[n++] = strdup(de->d_name);
+        if (n > 60) { fprintf(stderr, "fixture_m_list overflow\n"); exit(1); }
+    }
+    closedir(d);
+    qsort(names, (size_t)n, sizeof(names[0]), m_cmp_name);
+    for (int i = 0; i < n; i++) {
+        if (strlen(out) + strlen(names[i]) + 2 >= outsz) {
+            fprintf(stderr, "fixture_m_list truncation\n"); exit(1);
+        }
+        strcat(out, names[i]);
+        strcat(out, ";");
+        free(names[i]);
+    }
+}
+
+static void fixture_m_run(const char *dir, int full_mode,
+                          char *survivors, size_t outsz) {
+    if (full_mode) setenv("DS4_KV_REL_FULL", "1", 1);
+    else unsetenv("DS4_KV_REL_FULL");
+
+    const uint64_t now = (uint64_t)time(NULL);
+    ds4_kvstore kc = {0};
+    ds4_kvstore_options opt = ds4_kvstore_default_options();
+    opt.retire_grace_seconds = 0;   /* pure recency ordering: deterministic */
+    opt.min_anchors = 1;
+    fixture_m_build(dir, now);
+    if (!ds4_kvstore_open(&kc, dir, 1, false, 0, opt, "harness", log_cb, NULL)) {
+        fprintf(stderr, "fixture_m open failed\n"); exit(1);
+    }
+    kc.budget_bytes = 9000;
+    ds4_kvstore_eviction_context inc = {
+        .text = "M incoming prompt that no fixture prefixes",
+        .text_len = strlen("M incoming prompt that no fixture prefixes"),
+        .model_id = 0, .quant_bits = 2, .ctx_size = 32768,
+        .reject_different_quant = false,
+    };
+    /* Phase 1: cold matrix build + multi-victim pass (unlink mid-loop →
+     * per-iteration reconcile). */
+    ds4_kvstore_evict(&kc, NULL, 0, &inc);
+    /* Phase 2: new chained rungs + a new root; another pass must derive
+     * columns/rows incrementally and gather the old block. */
+    fixture_m_phase2(dir, now);
+    ds4_kvstore_evict(&kc, NULL, 0, &inc);
+    /* Phase 3: external death (S2 branch tip removed by the operator). */
+    unlink_text(dir, m_texts[M_S2]);
+    /* Reopen: the cache must rebuild correctly from an empty state and
+     * converge under the same sequence of passes. */
+    ds4_kvstore_close(&kc);
+    if (!ds4_kvstore_open(&kc, dir, 1, false, 0, opt, "harness", log_cb, NULL)) {
+        fprintf(stderr, "fixture_m reopen failed\n"); exit(1);
+    }
+    kc.budget_bytes = 8000;
+    ds4_kvstore_evict(&kc, NULL, 0, &inc);
+    ds4_kvstore_evict(&kc, NULL, 0, &inc);  /* same state: fast path/gather */
+    ds4_kvstore_close(&kc);
+
+    fixture_m_list(dir, survivors, outsz);
+
+    for (int i = 0; i < M_NTEXTS; i++) unlink_text(dir, m_texts[i]);
+    char q1[256]; snprintf(q1, sizeof(q1), "%s%s", m_texts[M_FRONT], " - M continued rung one text extension");
+    char q2[256]; snprintf(q2, sizeof(q2), "%s%s", q1, " plus rung two more");
+    unlink_text(dir, q1);
+    unlink_text(dir, q2);
+    rmdir(dir);
+}
+
+static void scenario_rel_matrix_persistence(void) {
+    printf("== Scenario M: persistent rel matrix == A/B parity ==\n");
+    char dir_a[] = "/tmp/kv-harness-m-a.XXXXXX";
+    char dir_b[] = "/tmp/kv-harness-m-b.XXXXXX";
+    if (!mkdtemp(dir_a) || !mkdtemp(dir_b)) { perror("mkdtemp"); exit(1); }
+    g_evdbg = getenv("KV_HARNESS_EV") ? 1 : 0;
+    char surv_a[16384], surv_b[16384];
+    if (g_evdbg) fprintf(stderr, "=== RUN incremental ===\n");
+    fixture_m_run(dir_a, 0, surv_a, sizeof(surv_a));
+    if (g_evdbg) fprintf(stderr, "=== RUN full ===\n");
+    fixture_m_run(dir_b, 1, surv_b, sizeof(surv_b));
+    CHECK(surv_a[0] != '\0', "incremental run left a non-empty survivor set");
+    CHECK(strcmp(surv_a, surv_b) == 0,
+          "incremental matrix and full pairwise build evict the same survivors");
+    if (strcmp(surv_a, surv_b) != 0) {
+        fprintf(stderr, "  incremental: %s\n  full:        %s\n", surv_a, surv_b);
+    }
+}
+
 int main(void) {
     scenario_switch_churn();
     scenario_idle_retired();
@@ -841,6 +1035,7 @@ int main(void) {
     scenario_budget_hardening();
     scenario_quant_gates();
     scenario_frontier_supersede();
+    scenario_rel_matrix_persistence();
     if (g_failures) {
         fprintf(stderr, "kv_policy_harness: %d failure(s)\n", g_failures);
         return 1;

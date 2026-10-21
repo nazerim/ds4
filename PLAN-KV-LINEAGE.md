@@ -154,3 +154,30 @@ model/client-agnostic.
   eviction (which is why the stress test needs a shrunken budget).
 - /tmp/ds4-kv does NOT need clearing across these changes (load is conv-agnostic;
   conv_id splits from earlier fixes are harmless).
+
+## Closed 2026-10-21: rel-matrix rebuild storm (the 20-minute store stall)
+
+- Symptom: one live store blocked ~21 min at 100% CPU in a 1081-entry / 512 GB disk-KV
+  dir (`/Volumes/FireCuda520/ds4-kv-qwen`). `sample` showed all time in
+  `kv_chain_rel_build -> kv_cache_entry_text` (SHA1 of re-read texts + `fread`).
+- Causes: (1) `ds4_kvstore_evict()` rebuilt the full O(n^2) pairwise text matrix
+  after EVERY unlink while holding `kv_mu` (request path); (2) texts exceeded the
+  256 MB `KV_TEXT_CACHE_MAX_BYTES` LRU, so each rebuild re-read (GBs) and re-hashed
+  whole text sections from the external SSD.
+- Fix: the matrix is now persistent on `ds4_kvstore` (`rel_bits/rel_shas/rel_n`),
+  keyed by sha. Each pass reconciles: old x old pairs are gathered by sha (no text
+  IO); an entry new since the last pass derives its column/row mostly transitively
+  from its v3 `parent_sha` (the store path verified that byte-prefix at write time;
+  re-checked once against text so fabricated/corrupt links degrade to exact
+  compare, never poison the matrix). Text refs load STREAMED in chunks with a
+  verify-once set (immutable text justifies skipping the rehash on LRU reload).
+  `DS4_KV_REL_FULL=1` restores the legacy pairwise build (escape hatch + A/B).
+- Evidence: harness Scenario M (`tests/kv_policy_harness.c`) replays a multi-phase
+  eviction storm with chain/branch/root/empty-text fixtures under both modes and
+  asserts identical survivors; scale probe (400 chained anchors, 280 MB of text):
+  budget-storm pass 1.05 s -> 0.07 s, steady-state store+evict ~20 s -> ~0.6 s,
+  same evicted set both modes.
+- Ops note: a stalled store is detectable via the log gap (no "prompt done") and
+  `sample <pid>` landing in `kv_chain_rel_build`; dir prune
+  (`rm /Volumes/.../ds4-kv-qwen/*.kv` + restart) is the immediate remedy while
+  the matrix stays small.
