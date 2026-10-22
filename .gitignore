@@ -104,3 +104,6 @@ log/
 tests/kv_policy_harness
 tests/test_prompt_prefix
 tests/test_spec_rejection
+
+# local backup snapshot of .codebase-memory/ (stale duplicate; contents tracked in-tree)
+.codebase-memory.bak/

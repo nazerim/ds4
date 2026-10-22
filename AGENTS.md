@@ -36,6 +36,10 @@ inference engine in C with Metal, CUDA, and ROCm backends. See `AGENT.md`
   `.codebase-memory/adr.md` (Sep 3 ADRs); server script serves Vision-Exp
   by default (`./ds4-server.sh start`; TRACE_PATH=./log/ds4.trace cache-forensics setup in those ADRs)
 - DSpark: `PLAN-DSPARK-PERF.md`, `PLAN-DSPARK-TEMP-SPEC.md`
+- V4.1 decode-biased expert hotlist (SSD streaming): `PLAN-DECODE-HOTLIST.md`
+- Qwen3.8 PLE n-gram preload/cache: `PLAN-PLE-PRELOAD.md`
+- Qwen3.8 prefill/decode optimization: `PLAN-PREFILL-M5.md`, `PLAN-INT8-MOE.md` (closed),
+  `PLAN-GATED-SCAN.md` (closed), `.codebase-memory/QSA-ATTRIBUTION-20261004.md`
 - Fork divergence notes: `DS4FORK.md`
 
 ## Conventions
