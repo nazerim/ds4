@@ -1,0 +1,26 @@
+PR1238 adoption A/B — 2026-10-22, same box (M5 Max 128GB), same day, production config
+(batched-session 2, --mtp, exact-verify envs, fresh KV per run, cold nonces).
+
+DECODE t/s (decode_probe.py 400 3; finish=length reps only):
+  OLD (70c714d, pre-#1238):       64.6 64.3 65.5  -> 64.8 avg
+  NEW-DEFAULT (merged #1238):     70.1 65.5 72.7  -> 69.4 avg  (+7.1%)
+  NEW-DEFAULT drift pass:         66.2 67.9        -> 67.1 avg  (+3.5% vs OLD, within pass noise)
+  NEW + all 4 kill-switches:      55.2 54.2 55.1   -> 54.8 avg  (-21% vs NEW — switches-OFF is NOT
+     the old path: unswitched scheduling (NSG, staging, PLE overlap) alone degrades vs old
+     when the switchable features are off; do not run switched in production.)
+
+PREFILL tok/s means (prefill_probe.py 8192 3 16384 2 32768 2):
+  prompt_tokens   OLD     NEW     SWITCHED
+  6581            1331    1346    1058
+  13006           1341    1353    1112
+  25781           1406    1366    1170
+  -> NEW vs OLD: +1.1% / +0.9% / -2.8% — the claimed -4..-7% at >=14k does NOT reproduce
+     on this tree; prefill is neutral within pass noise.
+
+NUMERICS: triple-pin byte-identical to pre-#1238 (1.90735e-06 / 0 / 0), full ./ds4_test green
+both models, --server + --mtp-slice green, kernel harness green. One merge fix needed:
+moe args struct tail field-name collision (pr1238 pad0 vs our out_layout, same offset) —
+GPU init shader-compile failure caught it; see commits 244519b..
+
+VERDICT: adopted + deployed (production runs merged binary). Q4 decode win is real but
+~half the claimed size; prefill cost nil. Upstream asks: PLE-overlap kill switch, Q4 numbers.
