@@ -249,10 +249,10 @@ start_server() {
       KV_DIR="$QWEN_KV_DIR"
       KV_SIZE="${QWEN_KV_SIZE:-524288}"   # qwen ladder store lives on the external blade
       LOG_FILE="$LOG_DIR/ds4-qwen.log"
-      if [ -n "$TRACE_PATH" ] && [ "$TRACE_PATH" != "$LOG_DIR/ds4-qwen.trace" ]; then
-        echo "Note: TRACE_PATH overridden for the qwen runtime: $TRACE_PATH -> $LOG_DIR/ds4-qwen.trace"
-      fi
-      TRACE_PATH="$LOG_DIR/ds4-qwen.trace"
+      # Cache-miss trace is opt-in for the qwen runtime too: start-qwen no
+      # longer pins a default path. Set TRACE_PATH to enable (the value is
+      # respected as given; the canonical qwen location is
+      # $LOG_DIR/ds4-qwen.trace). Empty = off, as documented.
       ;;
     *)
       IS_QWEN=0
