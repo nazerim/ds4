@@ -3946,7 +3946,9 @@ kernel void kernel_qwen4_moe_down_reduce(
         ushort sgitg [[simdgroup_index_in_threadgroup]]) {
     threadgroup float part[17][QWEN4_DOWN_REDUCE_ROWS];
     threadgroup float wgt[8];
-    const uint n_hc = args.pad0, ns = args.n_slots, slot = sgitg;
+    /* #1238 passed n_hc in this struct's 13th field (named pad0 on its
+     * branch); our line reuses that slot as out_layout — same offset, ours. */
+    const uint n_hc = args.out_layout, ns = args.n_slots, slot = sgitg;
     if (tid < n_hc) wgt[tid] = qwen4_hc_inject_weight(inj, n_hc, tid);
     const uint dim = is_function_constant_defined(qwen4_mv_dim) ? qwen4_mv_dim : args.in_dim;
     const uint wt = is_function_constant_defined(qwen4_mv_type) ? qwen4_mv_type : args.weight_type;
