@@ -59394,6 +59394,12 @@ static int qwen4_idx_select(ds4_gpu_tensor *sel, const ds4_gpu_tensor *score, co
 static bool qwen4_graph_hc_mix(ds4_qwen4_gpu_graph *g, const ds4_model *m,
                                const ds4_tensor *norm, const ds4_tensor *down,
                                const ds4_tensor *up, const ds4_tensor *inject, uint32_t T) {
+#ifdef DS4_HAS_QWEN4_METAL
+    /* The norm leaves DRAM idle; have it prefetch the down projection. */
+    static int no_prefetch = -1;
+    if (no_prefetch < 0) no_prefetch = getenv("DS4_QWEN4_NO_PREFETCH") != NULL;
+    if (T == 1u && !no_prefetch) ds4_gpu_qwen4_prefetch_next(m->map, m->size, down->abs_offset, down->bytes);
+#endif
     bool ok = ds4_gpu_qwen4_hc_norm_tensor(g->xn, g->inj, g->R, m->map, m->size, norm->abs_offset,
                                            inject ? inject->abs_offset : 0, inject ? inject->type : DS4_TENSOR_F32,
                                            T, DS4_N_EMBD, DS4_N_HC, inject ? DS4_N_HC : 0u, DS4_RMS_EPS) &&
@@ -59844,11 +59850,54 @@ static bool qwen4_moe_profile_boundary(bool enabled, double *last, double *elaps
     return glm_graph_begin_commands_if_needed();
 }
 
+/* The F32 router rows are widened BF16: every value has zero low 16 bits.
+ * Single-token routing reads a BF16 copy - half the bytes, identical values,
+ * identical products and sums.  Built on first use per tensor and kept for
+ * the process; a tensor with any non-BF16 value keeps the F32 path. */
+#ifdef DS4_HAS_QWEN4_METAL
+static const ds4_gpu_tensor *qwen4_bf16_weights(const ds4_model *m, const ds4_tensor *w) {
+    static struct { const void *map; uint64_t off; ds4_gpu_tensor *t; bool bad; } cache[2u * DS4_MAX_LAYER];
+    if (w->type != DS4_TENSOR_F32 || w->ndim != 2 || getenv("DS4_QWEN4_NO_BF16_ROUTER")) return NULL;
+    uint32_t slot = UINT32_MAX;
+    for (uint32_t i = 0; i < 2u * DS4_MAX_LAYER; i++) {
+        if (cache[i].map == m->map && cache[i].off == w->abs_offset) return cache[i].bad ? NULL : cache[i].t;
+        if (slot == UINT32_MAX && !cache[i].map) slot = i;
+    }
+    if (slot == UINT32_MAX) return NULL;
+    const uint64_t n = w->dim[0] * w->dim[1];
+    const uint32_t *src = (const uint32_t *)((const uint8_t *)m->map + w->abs_offset);
+    uint16_t *bf = malloc(n * sizeof(uint16_t));
+    bool exact = bf != NULL;
+    for (uint64_t i = 0; exact && i < n; i++) {
+        exact = (src[i] & 0xffffu) == 0;
+        bf[i] = (uint16_t)(src[i] >> 16);
+    }
+    ds4_gpu_tensor *t = exact ? ds4_gpu_tensor_alloc(n * sizeof(uint16_t)) : NULL;
+    if (t && !ds4_gpu_tensor_write(t, 0, bf, n * sizeof(uint16_t))) {
+        ds4_gpu_tensor_free(t);
+        t = NULL;
+    }
+    free(bf);
+    cache[slot].map = m->map;
+    cache[slot].off = w->abs_offset;
+    cache[slot].t = t;
+    cache[slot].bad = t == NULL;
+    return t;
+}
+#endif
+
 static bool qwen4_graph_moe(ds4_qwen4_gpu_graph *g, const ds4_model *m, const ds4_layer_weights *l, uint32_t T) {
     const bool profile = T > 8u && getenv("DS4_QWEN4_MOE_PROFILE") != NULL;
     double elapsed[7] = {0}, last = 0;
     if (!qwen4_moe_profile_boundary(profile, &last, &elapsed[0])) return false;
+#ifdef DS4_HAS_QWEN4_METAL
+    const ds4_gpu_tensor *router_bf16 = T == 1u ? qwen4_bf16_weights(m, l->ffn_gate_inp) : NULL;
+    bool ok = (router_bf16 ? ds4_gpu_matmul_bf16_weights_tensor(g->router, router_bf16, (uint32_t)l->ffn_gate_inp->dim[0],
+                                                                (uint32_t)l->ffn_gate_inp->dim[1], g->mixed) != 0
+                           : qwen4_gemv(g->router, m, l->ffn_gate_inp, g->mixed, T)) &&
+#else
     bool ok = qwen4_gemv(g->router, m, l->ffn_gate_inp, g->mixed, T) &&
+#endif
               ds4_gpu_qwen4_router_topk_tensor(g->selected, g->weights, g->router, g->mixed, m->map, m->size,
                                                l->ffn_gate_inp_shexp->abs_offset, l->ffn_gate_inp_shexp->type,
                                                DS4_N_EMBD, g->sh_gate_logit, T, DS4_N_EXPERT, DS4_N_EXPERT_USED) &&
@@ -60110,7 +60159,19 @@ static bool qwen4_graph_moe(ds4_qwen4_gpu_graph *g, const ds4_model *m, const ds
                                           DS4_N_EXPERT_USED, DS4_N_EMBD, DS4_N_FF_EXP,
                                           shared_dense ? 0u : l->ffn_gate_shexp->abs_offset,
                                           shared_dense ? 0u : l->ffn_up_shexp->abs_offset,
-                                          shared_dense ? UINT32_MAX : l->ffn_gate_shexp->type) != 0 &&
+                                          shared_dense ? UINT32_MAX : l->ffn_gate_shexp->type) != 0;
+#ifdef DS4_HAS_QWEN4_METAL
+        /* One token with Q2_K down rows: the reduce rides on the down kernel. */
+        if (ok && T == 1u && !shared_dense && l->ffn_down_exps->type == DS4_TENSOR_Q2_K &&
+            getenv("DS4_QWEN4_NO_DOWN_REDUCE") == NULL) {
+            return ds4_gpu_qwen4_moe_down_reduce_tensor(g->blk, g->mid, g->selected, g->weights, g->sh_gate_logit,
+                                                        g->R, g->inj, m->map, m->size, l->ffn_down_exps->abs_offset,
+                                                        l->ffn_down_exps->type, DS4_N_EXPERT, DS4_N_EXPERT_USED,
+                                                        DS4_N_FF_EXP, DS4_N_EMBD, l->ffn_down_shexp->abs_offset,
+                                                        l->ffn_down_shexp->type, DS4_N_HC) != 0;
+        }
+#endif
+        ok = ok &&
              ds4_gpu_qwen4_moe_down_tensor(g->part, g->mid, g->selected, m->map, m->size, l->ffn_down_exps->abs_offset,
                                            l->ffn_down_exps->type, DS4_N_EXPERT, T, DS4_N_EXPERT_USED, DS4_N_FF_EXP,
                                            DS4_N_EMBD, shared_dense ? 0u : l->ffn_down_shexp->abs_offset,
@@ -60124,7 +60185,7 @@ static bool qwen4_graph_moe(ds4_qwen4_gpu_graph *g, const ds4_model *m, const ds
     return ok;
 }
 
-/* host side: embedding rows tiled into R and the PLE n-gram gather */
+/* host side: embedding rows tiled into R */
 static bool qwen4_graph_stage_inputs(ds4_qwen4_gpu_graph *g, const ds4_model *m, const ds4_weights *w,
                                      const int *tokens, uint32_t T) {
     const uint32_t E = DS4_N_EMBD, hc = DS4_N_HC, hc_dim = E * hc;
@@ -60143,9 +60204,16 @@ static bool qwen4_graph_stage_inputs(ds4_qwen4_gpu_graph *g, const ds4_model *m,
         if (t == 0 && g->snap_after_first) g->snap_mrope_delta = g->mrope_delta;
         if (t == 1u && g->snap_after_second) g->snap2_mrope_delta = g->mrope_delta;
     }
-    if (!ds4_gpu_tensor_write(g->R, 0, row, (uint64_t)T * hc_dim * sizeof(float)) ||
-        !ds4_gpu_tensor_write(g->pos3, (uint64_t)g->pos * 16u, g->host_pos3, (uint64_t)T * 16u))
-        return false;
+    return ds4_gpu_tensor_write(g->R, 0, row, (uint64_t)T * hc_dim * sizeof(float)) &&
+           ds4_gpu_tensor_write(g->pos3, (uint64_t)g->pos * 16u, g->host_pos3, (uint64_t)T * 16u);
+}
+
+/* host side: the PLE n-gram gather.  Only layer DS4_N_PLE_LAYER reads it, so
+ * the caller commits the layers before it first and the GPU runs them while
+ * the rows come from disk. */
+static bool qwen4_graph_stage_ple(ds4_qwen4_gpu_graph *g, const ds4_model *m, const int *tokens, uint32_t T) {
+    const uint32_t E = DS4_N_EMBD;
+    float *row = g->host_row;
     uint32_t ids[256 * DS4_MAX_PLE_HEADS];
     for (uint32_t t = 0; t < T; t++) {
         qwen4_ple_step(tokens[t], g->ple_prev, ids + (t % 256u) * DS4_N_PLE_HEADS);
@@ -60288,7 +60356,9 @@ static bool qwen4_graph_forward_tokens(ds4_qwen4_gpu_graph *g, const ds4_model *
     for (uint32_t il = 0; il < n_trunk && ok; il++) {
         const ds4_layer_weights *l = &w->layer[il];
         if (ds4_qwen4_layer_is_ple(il)) {
-            ok = qwen4_gemv(g->ple_key, m, l->ple_key, g->ple_emb, T) &&
+            if (il > 0u) ok = ds4_gpu_flush_commands() != 0;
+            ok = ok && qwen4_graph_stage_ple(g, m, tokens, T) &&
+                 qwen4_gemv(g->ple_key, m, l->ple_key, g->ple_emb, T) &&
                  qwen4_gemv(g->ple_val, m, l->ple_value, g->ple_emb, T) &&
                  ds4_gpu_qwen4_ple_gate_tensor(g->ple_gated, g->ple_normed, g->R, g->ple_key, g->ple_val,
                                                m->map, m->size, l->ple_norm_key->abs_offset,
@@ -60346,7 +60416,10 @@ static bool qwen4_graph_forward_tokens(ds4_qwen4_gpu_graph *g, const ds4_model *
         /* Submit this prefix while the host encodes the remaining layers.
          * Flush keeps the same ordered queue and retains pending buffers;
          * end_commands below waits for both batches before inputs are reused. */
-        if (ok && il + 1u == flush_layer) ok = ds4_gpu_flush_commands() != 0;
+        /* The PLE flush leaves the GPU only layer 1 while the host encodes
+         * the rest; a second flush hands it the next layers as well. */
+        if (ok && flush_layer && (il + 1u == flush_layer || il + 1u == 2u * flush_layer))
+            ok = ds4_gpu_flush_commands() != 0;
     }
     if (prof_on) {
         fprintf(stderr, "ds4: Qwen3.8 prefill stage ms/chunk (pos=%u T=%u ok=%d): "
