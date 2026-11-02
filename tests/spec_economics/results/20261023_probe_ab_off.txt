@@ -1,0 +1,4 @@
+nonce=1792765870-16384-0 target=16384 prompt_tokens=13006 ttft=8.48s prefill_tok_s=1534.1
+nonce=1792765878-16384-1 target=16384 prompt_tokens=13006 ttft=8.68s prefill_tok_s=1499.1
+nonce=1792765888-65536-0 target=65536 prompt_tokens=51331 ttft=36.03s prefill_tok_s=1424.5
+nonce=1792765924-65536-1 target=65536 prompt_tokens=51331 ttft=38.86s prefill_tok_s=1320.8
