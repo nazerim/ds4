@@ -118,6 +118,15 @@ TRACE_PATH="${TRACE_PATH:-}"
 DS4_VISION_KEEP_IMAGES="${DS4_VISION_KEEP_IMAGES:-128}"
 export DS4_VISION_KEEP_IMAGES
 
+# Hard thinking-token budget (server default; enforced in ds4_server.c): caps
+# thinking tokens per span at N; at the cap the server injects a short wrap-up
+# line + close tag and the model continues into its visible answer. 0/unset =
+# no cap. Per-request overrides: reasoning_budget_tokens / thinking_budget_tokens
+# (alias) / Anthropic thinking.budget_tokens; a named 0 opts that request out.
+# Details: .codebase-memory/THINKING-BUDGET-RESULTS-20261102.md
+DS4_THINKING_BUDGET_TOKENS="${DS4_THINKING_BUDGET_TOKENS:-8196}"
+export DS4_THINKING_BUDGET_TOKENS
+
 # Alternative model map: short name -> full GGUF path
 # Add entries here for each model variant. Use `start-<name>` / `restart-<name>`.
 # Uses parallel indexed arrays (bash 3.2 compatible — macOS default).
