@@ -134,3 +134,6 @@ tests/test_spec_rejection
 
 # local backup snapshot of .codebase-memory/ (stale duplicate; contents tracked in-tree)
 .codebase-memory.bak/
+
+# raw client session transcripts - NEVER commit session text
+*-conversation.json

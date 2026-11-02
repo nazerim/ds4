@@ -1,0 +1,6 @@
+tree: 9acedbcda5d138fd000f062756d6448a86495d16 + dirty(ds4.c,ds4-server.sh deployed)
+engine: PID 27033 ds4-server built Nov 2 09:07, model deepseek-v4-flash port 8001
+date: Mon Nov  2 17:17:12 +08 2026
+baseline reqs: temp0 seed42 max_tokens1536; nonstream finish=length reasoning=6371ch content=0; stream=3076 SSE lines
+a28eb75b17177f627e542738b9f9e9c18bdbd5ec87fe20cf8a62598d051e0c06  .codebase-memory/baseline-thinking-20261102/resp-baseline.json
+2eabd473cc193c02e5ecac6fac80775528aa6a02a33e51dc50d1905808fab07b  .codebase-memory/baseline-thinking-20261102/resp-baseline-stream.sse

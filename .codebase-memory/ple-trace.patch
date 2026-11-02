@@ -1,0 +1,79 @@
+diff --git a/ds4.c b/ds4.c
+index 678b766..85872d2 100644
+--- a/ds4.c
++++ b/ds4.c
+@@ -58409,6 +58409,47 @@ static int generate_glm_metal_argmax(
+ static void qwen4_ref_row(const ds4_model *m, const ds4_tensor *t, uint64_t row, float *out);
+ static void qwen4_ple_step(int token, int *prev, uint32_t *rows);
+ 
++/* DS4_QWEN4_PLE_TRACE: opt-in decode-side n-gram read wall-clock accounting.
++ * Pure measurement. When the env is unset this is a single tail call (no
++ * timing, no behavior/output change); when set, it only accumulates reads made
++ * while ds4_gpu_decode_phase() is set — i.e. token generation and MTP verify,
++ * not the overlapped prefill gather. Rows are read synchronously per call, so
++ * this wall-clock is the exposed disk-read cost on the decode critical path. */
++static int      g_ple_trace_init    = -1;     /* -1 unread, 0/1 cached env test */
++static double   g_ple_trace_sec     = 0.0;    /* cumulative decode pread seconds */
++static double   g_ple_trace_max     = 0.0;    /* slowest single read (seconds)   */
++static uint64_t g_ple_trace_calls   = 0;      /* decode-phase reads counted       */
++static uint64_t g_ple_trace_rows    = 0;      /* total rows (count) read          */
++static uint64_t g_ple_trace_gt1ms   = 0;      /* reads slower than 1 ms           */
++static uint64_t g_ple_trace_gt5ms   = 0;      /* reads slower than 5 ms           */
++
++static bool qwen4_ple_trace_enabled(void) {
++    if (g_ple_trace_init < 0)
++        g_ple_trace_init = getenv("DS4_QWEN4_PLE_TRACE") != NULL ? 1 : 0;
++    return g_ple_trace_init == 1;
++}
++
++static void qwen4_ple_trace_note(double sec, size_t rows) {
++    g_ple_trace_sec += sec;
++    g_ple_trace_calls++;
++    g_ple_trace_rows += rows;
++    if (sec > g_ple_trace_max)  g_ple_trace_max = sec;
++    if (sec > 1e-3)             g_ple_trace_gt1ms++;
++    if (sec > 5e-3)             g_ple_trace_gt5ms++;
++    if (g_ple_trace_calls % 100 == 0) {
++        fprintf(stderr, "ds4: PLE-TRACE decode calls=%llu rows=%llu rows/call=%.1f "
++                "pread_s=%.4f avg_us=%.1f max_us=%.1f gt1ms=%llu gt5ms=%llu\n",
++                (unsigned long long)g_ple_trace_calls,
++                (unsigned long long)g_ple_trace_rows,
++                g_ple_trace_calls ? (double)g_ple_trace_rows / g_ple_trace_calls : 0.0,
++                g_ple_trace_sec,
++                g_ple_trace_calls ? 1e6 * g_ple_trace_sec / g_ple_trace_calls : 0.0,
++                1e6 * g_ple_trace_max,
++                (unsigned long long)g_ple_trace_gt1ms,
++                (unsigned long long)g_ple_trace_gt5ms);
++    }
++}
++
+ static bool qwen4_ngram_row(const ds4_model *m, uint32_t row, float *out) {
+     const ds4_tensor *t = m->ngram_tensor;
+     if (!t || m->ngram_fd < 0 || !out || row >= t->dim[1] ||
+@@ -58486,7 +58527,7 @@ static void *qwen4_ngram_thread(void *context) {
+ 
+ /* Bound sorting memory and I/O concurrency independently of context size.
+  * Metal also overlaps the uncached rows of a single decode token. */
+-static bool qwen4_ngram_read(const ds4_model *m, const uint32_t *rows, size_t count, float *out) {
++static bool qwen4_ngram_read_impl(const ds4_model *m, const uint32_t *rows, size_t count, float *out) {
+     if (!m || !m->ngram_tensor || m->ngram_fd < 0 || (count && (!rows || !out)) ||
+         count > SIZE_MAX / (160u * sizeof(float))) {
+         errno = EINVAL;
+@@ -58543,6 +58584,17 @@ static bool qwen4_ngram_read(const ds4_model *m, const uint32_t *rows, size_t co
+     return ok;
+ }
+ 
++/* Timed entry point (see qwen4_ple_trace_note). Uninstrumented path is a
++ * direct tail call; decode-phase reads are timed and aggregated. */
++static bool qwen4_ngram_read(const ds4_model *m, const uint32_t *rows, size_t count, float *out) {
++    if (!qwen4_ple_trace_enabled() || !ds4_gpu_decode_phase())
++        return qwen4_ngram_read_impl(m, rows, count, out);
++    const double t0 = now_sec();
++    const bool ok = qwen4_ngram_read_impl(m, rows, count, out);
++    qwen4_ple_trace_note(now_sec() - t0, count);
++    return ok;
++}
++
+ /* Multimodal rope positions (HF get_rope_index): text tokens share one
+  * counter; an image's tokens take (t, t+row, t+col) from the counter at the
+  * image start, which then advances by max(rows, cols).  *delta tracks

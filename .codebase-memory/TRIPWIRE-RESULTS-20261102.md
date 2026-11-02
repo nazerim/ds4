@@ -61,9 +61,16 @@ force-close path verbatim; adds the loop detector + trigger).
   verbatim w/ compression, recheck w/ temp-drift, vision, tools) -> detector
   fired 0, misfired 0, every response byte-stable; injection machinery
   exercised 3x live via the budget trigger (identical code path).
-- First natural live trip: expected from production traffic (study measured
-  ~21 exact-class loop spans per unbanked pid-file per day). Watch:
-  `grep "thinking loop tripwire" log/ds4-qwen.log log/ds4.log`
+- First natural live trip: RESOLVED — production fired within ~30 min of
+  deployment. Nov-03 00:43-00:52, one deep agent conversation (ctx
+  70k->97k): 8 tripwire closes in 9 minutes, 7 consecutive at identical
+  period p=447 (spans 2745-2908 tokens), one at p=127 — detector geometry
+  matches the corpus study exactly; the recurrence pattern motivated the
+  escalation/pruning follow-up experiment (PLAN section).
+- Full case study preserved: dbwal-val-conversation.json (repo root,
+  323 KB) — 17/17 fires cross-checked against log/ds4.log; see the
+  evidence-validated addendum in the PLAN for interpretation (incl. the
+  analyzer misattribution note).
 - Engine restored to window-open state: Qwen3.8 profile, port 8002, both
   defaults live (DS4_THINKING_BUDGET_TOKENS=8192, DS4_THINK_TRIPWIRE=1) via
   ds4-server.sh; per-request overrides verified live.

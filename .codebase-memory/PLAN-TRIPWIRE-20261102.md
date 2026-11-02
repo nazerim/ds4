@@ -232,6 +232,74 @@ use): E2E loop-prompt pair + tools + byte-parity curl vs baseline ->
 T6 `restart` deepseek: same E2E subset -> T7 manual dspark acceptance ->
 T8 results doc `TRIPWIRE-RESULTS-<date>.md`; no commits unless asked.
 
+## Follow-up experiment (added 2026-11-03): escalation on repeat fires
+
+Live evidence from the first production era (log/ds4.log 00:43-00:52): a
+single deep agent conversation (ctx 70k->97k) tripwire-fired 8 times in 9
+minutes, SEVEN consecutive fires at the SAME period (p=447, span
+~2750-2910). The chop closes each turn but the loop core stays in the
+replayed context, so it re-attaches turn after turn; by fire #8 a second
+loop (p=127) had formed over the contaminated context. Notably, after each
+chop the model answered coherently — once the thought-weight of the loop
+is lifted it works normally, arguing the loop is PARTLY context
+self-contamination (attention re-attaching to its own exact block), not a
+model-level failure. The detector is doing its job; this experiment
+attacks the recurrence.
+
+Escalation ladder (per conversation, keyed by a session-level fires counter
++ loop-core fingerprint = hash of one detected period):
+1. Second+ fire with the same fingerprint -> DO NOT re-inject the same
+   template verbatim: rotate among N varied wrap-up wordings (the injected
+   tail itself becomes context and can resonate with the recycled core;
+   the close-tag special stays fixed — it's protocol).
+2. Third+ -> escalate priority phrasing (short imperative: stop
+   re-verifying, answer with what is established).
+3. Fourth+ -> CONTEXT PRUNING: drop the recycled loop core from the
+   reconstructed conversation so it cannot re-attach. Server-side/Tier-1
+   shape only: reuse the existing prompt-rebuild + rewrite-from-common
+   machinery (thinking-replay path), anchored on the fingerprinted span
+   (tripwire log already gives [pos-tokens, pos] geometry).
+   HARD constraints: tool-call id bindings of pruned turns must survive or
+   be cleanly replayed; KV lineage handles the rebuild (cost bounded to
+   the pruned suffix); capture stays untouched (pruning only reshapes
+   FUTURE prompts, and it must be opt-in behind a knob until capture-
+   distribution sign-off).
+Success metric: fires-per-conversation drops from 8+ to <=2 for
+fingerprint-recurring loops; the p=127 secondary-loop class should stop
+forming.
+Free testbed: this very conversation class is reproducing in production
+traffic — measure before/next eras via the tripwire log lines.
+
+EVIDENCE-VALIDATED ADDENDUM (2026-11-03, vs dbwal-val-conversation.json —
+the preserved db-wal-recovery trial that produced the first production
+fires; cross-checked 1:1 against log/ds4.log):
+
+- 17 server fires (00:32:51 -> 00:52, minutes 5.7 -> 25.9, ~every 70 s)
+  map exactly to 17 wrap-up-bearing reasoning parts (idx 15..33). Spans
+  2745-4058 tokens; p=447 for 15/17 fires, stable across 20 minutes.
+  Template chop NEVER broke the recurrence: 17 chops, 17 re-attachments.
+  Pure repeated-template escalation is bounded at ~0 value on this class;
+  ladder must escalate EARLY (analysis showed escape-after-1st-firing =
+  2 steps of real tool probes, then relapse -> fire #2 is already the
+  escalation point, not #4).
+- The detector itself provides the fingerprint for free: at fire time the
+  ring holds the exact p-token core (hash one period). Between-step
+  recycling is paraphrase-grade early and CONVERGES to verbatim late
+  (exact matches at min 12.9 and 25.9 = the two signature-carrying
+  messages) — pruning those verbatim history cores attacks exactly the
+  late-plateau re-attachment mechanism.
+- Context contamination cost is measurable: prompt replay grew to
+  14,403-token suffix at min ~16.9 (ctx 52.7k->67.1k) as cores piled up;
+  trial verdict 0, death class 0-THINK-LOOP — the loop killed the reward,
+  so this experiment's payoff is reward-direct, not just token waste.
+- ANALYZER FIX on the preserve side: loop_analysis.detector_firings[3]
+  captured the MODEL's own directives ("I need to stop the repetitive
+  loop...") — self-interrupts, not server events. Server fires are
+  uniquely identified by the fixed wrap-up string ("conclude my
+  reasoning"); any downstream counter must key on that, not on
+  loop-mention phrases (they also appear in genuine model escape
+  attempts and are a signal of model-side awareness worth its own study).
+
 ## Open items — RESOLVED 2026-11-02
 
 1. **Re-arm**: confirmed as read — a tripwire-closed span can't re-trip; a

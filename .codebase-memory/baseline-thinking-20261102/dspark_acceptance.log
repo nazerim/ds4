@@ -1,0 +1,4 @@
+DS4_DSPARK_MODEL="ds4flash.gguf" \
+	DS4_DSPARK_SUPPORT="gguf/DeepSeek-V4-Flash-DSpark-support-0731.gguf" \
+	sh tests/dspark_acceptance_fixture.sh
+dspark-fixture: skipped, missing DSpark support model gguf/DeepSeek-V4-Flash-DSpark-support-0731.gguf

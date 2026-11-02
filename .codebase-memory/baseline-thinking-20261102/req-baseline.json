@@ -1,0 +1,9 @@
+{
+  "model": "deepseek-v4-flash",
+  "messages": [
+    {"role": "user", "content": "A farmer needs to transport a wolf, a goat, and a cabbage across a river. The boat can only carry the farmer plus one item. If left alone unattended, the wolf will eat the goat, and the goat will eat the cabbage. Prove rigorously, with an explicit state-space argument and invariant analysis, that the farmer's solution requires at least seven crossings, and enumerate every valid minimal strategy."}
+  ],
+  "max_tokens": 1536,
+  "temperature": 0,
+  "seed": 42
+}

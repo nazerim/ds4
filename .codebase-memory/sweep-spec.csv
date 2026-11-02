@@ -1,0 +1,5 @@
+model,concurrency,ctx,status,prefill_tps,last_ttft_s,decode_agg_tps,decode_stream_tps,decode_wall_tps,step_ms_mean,step_ms_p50,step_ms_p95,step_ms_max,mixed_step_ms_p50,mixed_step_ms_p95,mixed_decode_tps,mixed_prefill_tps,estimate_gib,predicted_gib,footprint_gib
+Qwen3.8 Flash Next,1,16384,ok,1580.79,10.364,62.65,62.65,62.49,23.944,23.964,24.236,24.412,0.000,0.000,0.00,0.00,8.02,8.82,8.82
+Qwen3.8 Flash Next,2,16384,ok,1525.48,21.480,83.39,41.69,83.17,24.921,23.852,35.827,38.403,0.000,0.000,0.00,0.00,16.04,9.40,9.40
+Qwen3.8 Flash Next,4,16384,ok,1418.86,46.189,106.79,26.70,106.43,38.628,36.765,57.728,58.766,0.000,0.000,0.00,0.00,32.08,10.56,10.56
+Qwen3.8 Flash Next,8,16384,ok,1408.15,93.081,134.29,16.79,133.86,87.499,88.310,90.177,91.121,0.000,0.000,0.00,0.00,64.17,12.87,12.87
