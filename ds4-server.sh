@@ -127,6 +127,16 @@ export DS4_VISION_KEEP_IMAGES
 DS4_THINKING_BUDGET_TOKENS="${DS4_THINKING_BUDGET_TOKENS:-8192}"
 export DS4_THINKING_BUDGET_TOKENS
 
+# Thinking-loop tripwire (server default ON; ds4_server.c): force-closes a
+# thinking span once exact token-level repetition sustains >=2400 tokens
+# (per-request: thinking_tripwire / tripwire_min_tokens; named false opts
+# out). CAPTURE ERA LABEL: from starts using this script onward, thinking
+# spans may close early on loops -> trainer loops.py needs the tripwire
+# regex (span geometry same as budget chop lines). Details:
+# .codebase-memory/PLAN-TRIPWIRE-20261102.md + TRIPWIRE-RESULTS-20261102.md
+DS4_THINK_TRIPWIRE="${DS4_THINK_TRIPWIRE:-1}"
+export DS4_THINK_TRIPWIRE
+
 # Alternative model map: short name -> full GGUF path
 # Add entries here for each model variant. Use `start-<name>` / `restart-<name>`.
 # Uses parallel indexed arrays (bash 3.2 compatible — macOS default).
@@ -841,6 +851,9 @@ case "${1:-}" in
     echo "  DS4_VISION_KEEP_IMAGES - Auto-reduce over-budget image histories to"
     echo "                        the last N images (default: 128; 0 = reject"
     echo "                        requests over 16 images instead)."
+    echo "  DS4_THINK_TRIPWIRE  - '1' enables the thinking-loop tripwire server-wide"
+    echo "                        (default: 1). DS4_TRIPWIRE_MIN_TOKENS sets the"
+    echo "                        repetition-volume (default 2400, range 600-2560)."
     echo "  KV_SMALL_DENSE      - Keep ALL KV anchors ≤ this token count sticky"
     echo "                        (default: 49152). Raise to bound head-divergence rebuilds."
     exit 1

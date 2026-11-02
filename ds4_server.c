@@ -839,6 +839,16 @@ typedef struct {
      * injected wrap-up included); surfaced as completion_tokens_details.
      * reasoning_tokens.  Stays 0 when no budget was set. */
     int thinking_budget_reported;
+    /* Thinking-loop tripwire (PLAN-TRIPWIRE-20261102): force-close the
+     * CURRENT span once sustained exact token-level repetition passes the
+     * volume threshold. Independent of the budget; whichever fires first
+     * wins. Off everywhere = zero new code paths execute at decode time. */
+    bool thinking_tripwire;
+    int tripwire_min_tokens;
+    /* Set when a span was tripwire-closed: the span's token count and the
+     * detected period; 0 period = never fired (usage field absent). */
+    int tripwire_report_tokens;
+    int tripwire_report_period;
     bool has_tools;
     bool prompt_preserves_reasoning;
     /* For /v1/responses: emit reasoning_summary_* events / fields only when the
@@ -1184,6 +1194,54 @@ static int resolve_thinking_budget(int obj_budget, int field_budget,
     if (field_budget >= 0) return field_budget;
     if (alias_budget >= 0) return alias_budget;
     return server_thinking_budget_env();
+}
+
+/* Loop tripwire knobs (PLAN-TRIPWIRE-20261102).  DS4_THINK_TRIPWIRE=1 is
+ * the only enabling env value (anything else = off); DS4_TRIPWIRE_MIN_TOKENS
+ * is the sustained-repetition VOLUME default (strict integer; below the
+ * floor is clamped, garbage falls back to the corpus-studied default 2400).
+ * An explicitly named request false always beats env-on — the per-request
+ * kill switch, mirroring the budget's named-0 doctrine.  Both env reads are
+ * fresh per request (no stale caches, operators can flip live). */
+#define TW_MIN_VOLUME_FLOOR 600
+#define TW_VOLUME_DEFAULT 2400
+/* Ring-feasible ceiling: the detector compares need*p <= ring (3072)
+ * tokens; above this the tripwire could be named "on" yet never fire.
+ * Volumes are clamped here (with a parse-time warning for named request
+ * values) rather than silently dead-eyeing the feature. */
+#define TW_VOLUME_RING_MAX 2560
+static bool server_tripwire_env_enabled(void) {
+    const char *e = getenv("DS4_THINK_TRIPWIRE");
+    return e && !strcmp(e, "1");
+}
+static int server_tripwire_env_volume(void) {
+    const char *e = getenv("DS4_TRIPWIRE_MIN_TOKENS");
+    if (!e || !*e) return TW_VOLUME_DEFAULT;
+    char *end = NULL;
+    long v = strtol(e, &end, 10);
+    if (end == e || *end != '\0' || v < TW_MIN_VOLUME_FLOOR) {
+        return TW_VOLUME_DEFAULT;
+    }
+    if (v > TW_VOLUME_RING_MAX) v = TW_VOLUME_RING_MAX;
+    return (int)v;
+}
+static int resolve_tripwire_volume(int request_volume) {
+    int v = request_volume > 0 ? request_volume : server_tripwire_env_volume();
+    if (v < TW_MIN_VOLUME_FLOOR) v = TW_MIN_VOLUME_FLOOR;
+    if (v > TW_VOLUME_RING_MAX) v = TW_VOLUME_RING_MAX;
+    return v;
+}
+
+/* "thinking_tripwire": true|false; null = not named (same null-tolerance
+ * family as parse_thinking_budget_value, so option-serializing SDKs that
+ * send null for absent fields keep working). */
+static bool parse_thinking_tripwire_value(const char **p, bool *named,
+                                          bool *value) {
+    json_ws(p);
+    if (json_lit(p, "null")) return true;
+    if (!json_bool(p, value)) return false;
+    *named = true;
+    return true;
 }
 
 /* chat_template_kwargs as the Qwen3.8 model card documents them: enable_thinking
@@ -4375,6 +4433,8 @@ static bool parse_chat_request(ds4_engine *e, server *s, const char *body, int d
     bool thinking_enabled = true;
     ds4_think_mode reasoning_effort = DS4_THINK_HIGH;
     int thinking_obj_budget = 0, budget_field = -1, budget_alias = -1;
+    bool tw_named = false, tw_value = false;
+    int tw_min = 0;
     chat_msgs msgs = {0};
     char *tool_schemas = NULL;
 
@@ -4509,6 +4569,16 @@ static bool parse_chat_request(ds4_engine *e, server *s, const char *body, int d
                 free(key);
                 goto bad;
             }
+        } else if (!strcmp(key, "thinking_tripwire")) {
+            if (!parse_thinking_tripwire_value(&p, &tw_named, &tw_value)) {
+                free(key);
+                goto bad;
+            }
+        } else if (!strcmp(key, "tripwire_min_tokens")) {
+            if (!parse_thinking_budget_value(&p, &tw_min)) {
+                free(key);
+                goto bad;
+            }
         } else if (!strcmp(key, "think")) {
             if (!json_bool(&p, &thinking_enabled)) {
                 free(key);
@@ -4555,6 +4625,14 @@ static bool parse_chat_request(ds4_engine *e, server *s, const char *body, int d
                                   budget_alias)
         : 0;
     thinking_budget_room_warning(r);
+    r->thinking_tripwire = thinking_enabled &&
+        (tw_named ? tw_value : server_tripwire_env_enabled());
+    r->tripwire_min_tokens = resolve_tripwire_volume(tw_min);
+    if (r->thinking_tripwire && tw_min > TW_VOLUME_RING_MAX) {
+        server_log(DS4_LOG_WARNING,
+                   "ds4-server: tripwire_min_tokens %d exceeds ring-feasible max %d; clamped (healthy spans may close early under the clamped volume)",
+                   tw_min, TW_VOLUME_RING_MAX);
+    }
     kv_cache_restore_tool_memory_for_messages(s, &msgs);
     tool_memory_attach_to_messages(s, &msgs, &r->tool_replay);
     log_structural_content_markers(&msgs);
@@ -4593,6 +4671,8 @@ static bool parse_anthropic_request(ds4_engine *e, server *s, const char *body, 
     bool thinking_enabled = true;
     ds4_think_mode reasoning_effort = DS4_THINK_HIGH;
     int thinking_obj_budget = 0, budget_field = -1, budget_alias = -1;
+    bool tw_named = false, tw_value = false;
+    int tw_min = 0;
     chat_msgs msgs = {0};
     char *system = NULL;
     char *tool_schemas = NULL;
@@ -4743,6 +4823,16 @@ static bool parse_anthropic_request(ds4_engine *e, server *s, const char *body, 
                 free(key);
                 goto bad;
             }
+        } else if (!strcmp(key, "thinking_tripwire")) {
+            if (!parse_thinking_tripwire_value(&p, &tw_named, &tw_value)) {
+                free(key);
+                goto bad;
+            }
+        } else if (!strcmp(key, "tripwire_min_tokens")) {
+            if (!parse_thinking_budget_value(&p, &tw_min)) {
+                free(key);
+                goto bad;
+            }
         } else if (!strcmp(key, "reasoning_effort")) {
             if (!parse_reasoning_effort_value(&p, &reasoning_effort)) {
                 free(key);
@@ -4791,6 +4881,14 @@ static bool parse_anthropic_request(ds4_engine *e, server *s, const char *body, 
                                   budget_alias)
         : 0;
     thinking_budget_room_warning(r);
+    r->thinking_tripwire = thinking_enabled &&
+        (tw_named ? tw_value : server_tripwire_env_enabled());
+    r->tripwire_min_tokens = resolve_tripwire_volume(tw_min);
+    if (r->thinking_tripwire && tw_min > TW_VOLUME_RING_MAX) {
+        server_log(DS4_LOG_WARNING,
+                   "ds4-server: tripwire_min_tokens %d exceeds ring-feasible max %d; clamped (healthy spans may close early under the clamped volume)",
+                   tw_min, TW_VOLUME_RING_MAX);
+    }
     if (!anthropic_validate_tool_results(s, &msgs,
                                          &r->anthropic_requires_live_tool_state,
                                          err, errlen))
@@ -5602,6 +5700,8 @@ static bool parse_responses_request(ds4_engine *e, server *s, const char *body, 
     bool thinking_enabled = true;
     ds4_think_mode reasoning_effort = DS4_THINK_HIGH;
     int thinking_obj_budget = 0, budget_field = -1, budget_alias = -1;
+    bool tw_named = false, tw_value = false;
+    int tw_min = 0;
     chat_msgs msgs = {0};
     buf loaded_tool_schemas = {0};
     char *instructions = NULL;
@@ -5756,6 +5856,16 @@ static bool parse_responses_request(ds4_engine *e, server *s, const char *body, 
                 free(key);
                 goto bad;
             }
+        } else if (!strcmp(key, "thinking_tripwire")) {
+            if (!parse_thinking_tripwire_value(&p, &tw_named, &tw_value)) {
+                free(key);
+                goto bad;
+            }
+        } else if (!strcmp(key, "tripwire_min_tokens")) {
+            if (!parse_thinking_budget_value(&p, &tw_min)) {
+                free(key);
+                goto bad;
+            }
         } else if (!strcmp(key, "previous_response_id") ||
                    !strcmp(key, "conversation"))
         {
@@ -5839,6 +5949,14 @@ static bool parse_responses_request(ds4_engine *e, server *s, const char *body, 
                                   budget_alias)
         : 0;
     thinking_budget_room_warning(r);
+    r->thinking_tripwire = thinking_enabled &&
+        (tw_named ? tw_value : server_tripwire_env_enabled());
+    r->tripwire_min_tokens = resolve_tripwire_volume(tw_min);
+    if (r->thinking_tripwire && tw_min > TW_VOLUME_RING_MAX) {
+        server_log(DS4_LOG_WARNING,
+                   "ds4-server: tripwire_min_tokens %d exceeds ring-feasible max %d; clamped (healthy spans may close early under the clamped volume)",
+                   tw_min, TW_VOLUME_RING_MAX);
+    }
     if (!responses_validate_tool_outputs(s, &msgs, r->think_mode,
                                          &r->responses_requires_live_tool_state,
                                          &r->responses_requires_live_reasoning,
@@ -5925,6 +6043,8 @@ static bool parse_completion_request(ds4_engine *e, const char *body, int def_to
     bool thinking_enabled = true;
     ds4_think_mode reasoning_effort = DS4_THINK_HIGH;
     int thinking_obj_budget = 0, budget_field = -1, budget_alias = -1;
+    bool tw_named = false, tw_value = false;
+    int tw_min = 0;
 
     json_ws(&p);
     if (*p != '{') goto bad;
@@ -6039,6 +6159,16 @@ static bool parse_completion_request(ds4_engine *e, const char *body, int def_to
                 free(key);
                 goto bad;
             }
+        } else if (!strcmp(key, "thinking_tripwire")) {
+            if (!parse_thinking_tripwire_value(&p, &tw_named, &tw_value)) {
+                free(key);
+                goto bad;
+            }
+        } else if (!strcmp(key, "tripwire_min_tokens")) {
+            if (!parse_thinking_budget_value(&p, &tw_min)) {
+                free(key);
+                goto bad;
+            }
         } else if (!json_skip_value(&p)) {
             free(key);
             goto bad;
@@ -6065,6 +6195,14 @@ static bool parse_completion_request(ds4_engine *e, const char *body, int def_to
                                   budget_alias)
         : 0;
     thinking_budget_room_warning(r);
+    r->thinking_tripwire = thinking_enabled &&
+        (tw_named ? tw_value : server_tripwire_env_enabled());
+    r->tripwire_min_tokens = resolve_tripwire_volume(tw_min);
+    if (r->thinking_tripwire && tw_min > TW_VOLUME_RING_MAX) {
+        server_log(DS4_LOG_WARNING,
+                   "ds4-server: tripwire_min_tokens %d exceeds ring-feasible max %d; clamped (healthy spans may close early under the clamped volume)",
+                   tw_min, TW_VOLUME_RING_MAX);
+    }
     chat_msgs msgs = {0};
     chat_msg sys = {0};
     sys.role = xstrdup("system");
@@ -7560,11 +7698,25 @@ static void append_openai_usage_json(buf *b, const request *r,
         buf_printf(b, ",\"perf_time_ms\":%lld", (long long)r->decode_time_ms);
     }
     buf_puts(b, "}");
-    /* Only appears when a hard thinking budget was active, keeping the
-     * no-budget usage object byte-for-byte unchanged. */
-    if (r && r->thinking_budget_reported > 0) {
-        buf_printf(b, ",\"completion_tokens_details\":{\"reasoning_tokens\":%d}",
-                   r->thinking_budget_reported);
+    /* Budget/tripwire details appear only when those features were ACTIVE
+     * and produced numbers, keeping no-feature usage byte-identical. */
+    const bool have_details = r && (r->thinking_budget_reported > 0 ||
+                                    r->tripwire_report_period > 0);
+    if (have_details) {
+        buf_puts(b, ",\"completion_tokens_details\":{");
+        bool need_comma = false;
+        if (r->thinking_budget_reported > 0) {
+            buf_printf(b, "\"reasoning_tokens\":%d",
+                       r->thinking_budget_reported);
+            need_comma = true;
+        }
+        if (r->tripwire_report_period > 0) {
+            buf_printf(b, "%s\"thinking_tripwire\":{\"tokens_in_span\":%d,"
+                       "\"period\":%d}",
+                       need_comma ? "," : "",
+                       r->tripwire_report_tokens, r->tripwire_report_period);
+        }
+        buf_puts(b, "}");
     }
     buf_puts(b, "}");
 }
@@ -9146,11 +9298,14 @@ static void append_responses_usage_json(buf *b, const request *r,
     cache_write_tokens = clamp_usage_tokens(cache_write_tokens, input_tokens - cached_tokens);
     buf_printf(b,
         "{\"input_tokens\":%d,\"input_tokens_details\":{\"cached_tokens\":%d,\"cache_write_tokens\":%d},"
-        "\"output_tokens\":%d,\"output_tokens_details\":{\"reasoning_tokens\":%d},"
-        "\"total_tokens\":%d}",
+        "\"output_tokens\":%d,\"output_tokens_details\":{\"reasoning_tokens\":%d",
         input_tokens, cached_tokens, cache_write_tokens,
-        output_tokens, r ? r->thinking_budget_reported : 0,
-        input_tokens + output_tokens);
+        output_tokens, r ? r->thinking_budget_reported : 0);
+    if (r && r->tripwire_report_period > 0) {
+        buf_printf(b, ",\"thinking_tripwire\":{\"tokens_in_span\":%d,\"period\":%d}",
+                   r->tripwire_report_tokens, r->tripwire_report_period);
+    }
+    buf_printf(b, "},\"total_tokens\":%d}", input_tokens + output_tokens);
 }
 
 static bool responses_sse_completed(int fd, const request *r,
@@ -14056,6 +14211,34 @@ static const int *thinking_close_tokens(ds4_engine *e, int *n_out) {
     return ret;
 }
 
+/* Thinking-loop tripwire detector (PLAN-TRIPWIRE-20261102).  Given the
+ * contiguous ring of strictly-inside-span sampled token ids (newest at
+ * index len-1), return the smallest period p in [16,512] whose exact
+ * repetition sustains at least min_loop_tokens in the ring's suffix, else 0.
+ * Volume form: need = max(4, ceil(min_loop_tokens/p)) cycles, so the last
+ * (need-1)*p entries must equal their p-back counterparts.  Both constants
+ * and the volume shape come from the 2026-11-02 corpus study: true loops
+ * sustain (trips land ~2.7k), healthy finite repetition (table rows, short
+ * stutters) never reaches the volume.  The 600-token arm gate is baked in. */
+static int tripwire_period(const int *ring, int len, int min_loop_tokens) {
+    if (len < 600) return 0;
+    const int pmax = len / 2 < 512 ? len / 2 : 512;
+    for (int p = 16; p <= pmax; p++) {
+        long need = ((long)min_loop_tokens + p - 1) / p;
+        if (need < 4) need = 4;
+        if (need * p > len) continue;
+        bool ok = true;
+        for (int i = 0; i < (int)((need - 1) * p); i++) {
+            if (ring[len - 1 - i] != ring[len - 1 - i - p]) {
+                ok = false;
+                break;
+            }
+        }
+        if (ok) return p;
+    }
+    return 0;
+}
+
 static void thinking_state_feed(thinking_state *st, const char *p, size_t len) {
     if (!st || !p) return;
     for (size_t i = 0; i < len; i++) {
@@ -15955,6 +16138,22 @@ decode_again:
     int budget_close_n = 0;
     size_t budget_close_pos = 0;
     int budget_force_count = 0;
+    /* Tripwire state (PLAN-TRIPWIRE-20261102).  tw_on flips to false on any
+     * shared disable path (vocab lacks close, valve, no-fit) because closing
+     * is exactly what those paths cannot do. */
+    bool tw_on = j->req.thinking_tripwire;
+    const int tw_volume = j->req.tripwire_min_tokens > 0
+                          ? j->req.tripwire_min_tokens : TW_VOLUME_DEFAULT;
+    int tw_ring[3072];
+    int tw_len = 0, tw_since = 0;
+    int tw_total = 0;     /* uncapped in-span sampled count for reporting */
+    bool tw_tripped = false, tw_exhaust = false;
+    int tw_period = 0;
+    /* Reporting resets with each decode pass (goto decode_again re-entry):
+     * a discarded attempt must not leave a half-true sidecar behind.  Within
+     * one pass a second span's trip overwrites the first (last-wins). */
+    j->req.tripwire_report_tokens = 0;
+    j->req.tripwire_report_period = 0;
     const bool thinking_gates_tool_markers = ds4_think_mode_enabled(j->req.think_mode);
     bool tool_scan_waiting_for_think_close =
         thinking_gates_tool_markers && thinking.inside;
@@ -15995,53 +16194,104 @@ decode_again:
         const int eos_token = ds4_token_eos(s->engine);
         int token;
         bool budget_injected = false;
-        if (thinking_budget > 0 && thinking.inside &&
-            thinking_span_tokens >= thinking_budget &&
-            budget_close_pos >= (size_t)budget_close_n) {
-            /* Budget exhausted inside an open span: queue the wrap-up +
-             * close sequence for injection, one token per loop iteration. */
+        bool close_wanted = thinking.inside &&
+            budget_close_pos >= (size_t)budget_close_n &&
+            ((thinking_budget > 0 && thinking_span_tokens >= thinking_budget) ||
+             (tw_on && tw_exhaust && !tw_tripped));
+        if (close_wanted) {
+            /* Budget exhausted or tripwire hit inside an open span: queue
+             * the wrap-up + close sequence for injection, one token per loop
+             * iteration. */
+            const bool by_tripwire = tw_on && tw_exhaust && !tw_tripped;
             if (++budget_force_count > 3) {
-                server_log(DS4_LOG_WARNING,
-                           "ds4-server: thinking budget %d enforced %d times without closing the span; budget disabled for this request",
-                           thinking_budget, budget_force_count - 1);
+                if (tw_on && thinking_budget > 0) {
+                    server_log(DS4_LOG_WARNING,
+                               "ds4-server: thinking budget %d attempted close %d times without effect; budget and tripwire disabled for this request",
+                               thinking_budget, budget_force_count - 1);
+                } else if (tw_on) {
+                    server_log(DS4_LOG_WARNING,
+                               "ds4-server: tripwire attempted close %d times without effect; tripwire disabled for this request",
+                               budget_force_count - 1);
+                } else {
+                    server_log(DS4_LOG_WARNING,
+                               "ds4-server: thinking budget %d enforced %d times without closing the span; budget disabled for this request",
+                               thinking_budget, budget_force_count - 1);
+                }
                 thinking_budget = 0;
+                tw_on = false;
             } else {
                 const int *ids = thinking_close_tokens(s->engine,
                                                        &budget_close_n);
                 if (!ids) {
-                    server_log(DS4_LOG_WARNING,
-                               "ds4-server: thinking budget %d set but vocab lacks a thinking-close special; budget disabled",
-                               thinking_budget);
+                    if (tw_on && thinking_budget > 0) {
+                        server_log(DS4_LOG_WARNING,
+                                   "ds4-server: thinking budget %d + tripwire set but vocab lacks a thinking-close special; both disabled",
+                                   thinking_budget);
+                    } else if (tw_on) {
+                        server_log(DS4_LOG_WARNING,
+                                   "ds4-server: tripwire set but vocab lacks a thinking-close special; tripwire disabled");
+                    } else {
+                        server_log(DS4_LOG_WARNING,
+                                   "ds4-server: thinking budget %d set but vocab lacks a thinking-close special; budget disabled",
+                                   thinking_budget);
+                    }
                     thinking_budget = 0;
+                    tw_on = false;
                     budget_close_n = 0;
                 } else if (max_tokens - completion < budget_close_n) {
                     /* Injecting now would run out of output room mid
                      * sequence and truncate the wrap-up with the span
                      * still open; leave the span to the existing
                      * unterminated-reasoning path instead. */
-                    server_log(DS4_LOG_WARNING,
-                               "ds4-server: thinking budget %d reached with only %d token(s) of output room left; close sequence (%d tokens) would not fit, span left as-is",
-                               thinking_budget, max_tokens - completion,
-                               budget_close_n);
+                    if (tw_on && thinking_budget > 0) {
+                        server_log(DS4_LOG_WARNING,
+                                   "ds4-server: thinking budget %d / tripwire close requested with only %d token(s) of output room left; close sequence (%d tokens) would not fit, span left as-is",
+                                   thinking_budget, max_tokens - completion,
+                                   budget_close_n);
+                    } else if (tw_on) {
+                        server_log(DS4_LOG_WARNING,
+                                   "ds4-server: thinking tripwire close requested with only %d token(s) of output room left; close sequence (%d tokens) would not fit, span left as-is",
+                                   max_tokens - completion, budget_close_n);
+                    } else {
+                        server_log(DS4_LOG_WARNING,
+                                   "ds4-server: thinking budget %d reached with only %d token(s) of output room left; close sequence (%d tokens) would not fit, span left as-is",
+                                   thinking_budget, max_tokens - completion,
+                                   budget_close_n);
+                    }
                     thinking_budget = 0;
+                    tw_on = false;
                     budget_close_n = 0;
                 } else {
                     for (int i = 0; i < budget_close_n; i++) {
                         budget_close_ids[i] = ids[i];
                     }
                     budget_close_pos = 0;
-                    server_log(DS4_LOG_DEFAULT,
-                               "ds4-server: %s ctx=%s thinking budget %d enforced after %d in-span tokens (gen=%d), injecting wrap-up + close",
-                               j->req.kind == REQ_CHAT ? "chat" : "completion",
-                               ctx_span, thinking_budget,
-                               thinking_span_tokens, completion);
-                    trace_event(s, trace_id,
-                                "thinking budget %d reached after %d in-span tokens; injecting wrap-up + close",
-                                thinking_budget, thinking_span_tokens);
+                    if (by_tripwire) {
+                        tw_tripped = true;
+                        tw_exhaust = false;
+                        j->req.tripwire_report_tokens = tw_total;
+                        j->req.tripwire_report_period = tw_period;
+                        server_log(DS4_LOG_DEFAULT,
+                                   "ds4-server: %s ctx=%s thinking loop tripwire: closed span at %d tokens (period %d), injecting wrap-up + close",
+                                   j->req.kind == REQ_CHAT ? "chat" : "completion",
+                                   ctx_span, tw_total, tw_period);
+                        trace_event(s, trace_id,
+                                    "thinking loop tripwire: period %d at %d in-span tokens; injecting wrap-up + close",
+                                    tw_period, tw_total);
+                    } else {
+                        server_log(DS4_LOG_DEFAULT,
+                                   "ds4-server: %s ctx=%s thinking budget %d enforced after %d in-span tokens (gen=%d), injecting wrap-up + close",
+                                   j->req.kind == REQ_CHAT ? "chat" : "completion",
+                                   ctx_span, thinking_budget,
+                                   thinking_span_tokens, completion);
+                        trace_event(s, trace_id,
+                                    "thinking budget %d reached after %d in-span tokens; injecting wrap-up + close",
+                                    thinking_budget, thinking_span_tokens);
+                    }
                 }
             }
         }
-        if (thinking_budget > 0 && budget_close_n > 0 &&
+        if ((thinking_budget > 0 || tw_on) && budget_close_n > 0 &&
             budget_close_pos < (size_t)budget_close_n) {
             token = budget_close_ids[budget_close_pos++];
             budget_injected = true;
@@ -16176,6 +16426,34 @@ decode_again:
                 if (!budget_injected) {
                     if (was_thinking && thinking.inside) thinking_span_tokens++;
                     else if (!was_thinking) thinking_span_tokens = 0;
+                }
+            }
+            if (tw_on) {
+                if (!was_thinking && thinking.inside) {
+                    /* (re-)opened span: fresh arming, per the per-span
+                     * semantics agreed for the budget (decision 1). */
+                    tw_len = 0;
+                    tw_total = 0;
+                    tw_tripped = false;
+                    tw_exhaust = false;
+                    tw_since = 0;
+                } else if (was_thinking && thinking.inside && !budget_injected) {
+                    tw_total++;
+                    if (tw_len == (int)(sizeof(tw_ring) / sizeof(tw_ring[0]))) {
+                        memmove(tw_ring, tw_ring + 1,
+                                (size_t)(tw_len - 1) * sizeof(tw_ring[0]));
+                        tw_len--;
+                    }
+                    tw_ring[tw_len++] = token;
+                    if (!tw_tripped && !tw_exhaust && ++tw_since >= 32 &&
+                        tw_len >= 600) {
+                        tw_since = 0;
+                        int p = tripwire_period(tw_ring, tw_len, tw_volume);
+                        if (p > 0) {
+                            tw_period = p;
+                            tw_exhaust = true;
+                        }
+                    }
                 }
             }
             if (j->req.kind == REQ_CHAT && j->req.has_tools) {
@@ -20567,6 +20845,139 @@ static void test_model_alias_thinking_controls(void) {
     TEST_ASSERT(server_model_alias_known("glm-5.3-flash"));
     TEST_ASSERT(server_model_alias_known("glm-5.3-flash-chat"));
     TEST_ASSERT(server_model_alias_known("glm-5.3-flash-reasoner"));
+}
+
+static void test_tripwire_detector(void) {
+    /* synthetic stream helper: fill ring with an aperiodic-ish base, then
+     * append `cycles` exact copies of a `period`-sized random-block tail. */
+    static int ring[8192];
+    unsigned int s = 20261102u;
+    int len = 0;
+    for (int i = 0; i < 300; i++) {
+        s = s * 1103515245u + 12345u;
+        ring[len++] = (int)((s >> 16) % 100000) + 1000;
+    }
+    /* golden 1 (study day1): p=388, need=ceil(2400/388)=7 cycles */
+    int block[388];
+    for (int i = 0; i < 388; i++) {
+        s = s * 1103515245u + 12345u;
+        block[i] = (int)((s >> 16) % 100000) + 200000;
+    }
+    for (int c = 0; c < 8; c++)
+        for (int i = 0; i < 388; i++) ring[len++] = block[i];
+    TEST_ASSERT(tripwire_period(ring, len, 2400) == 388);
+    /* one token short of the volume window (6 full cycles = 2328 < 2400):
+     * rebuild with 6 cycles from the same base */
+    len = 300;
+    for (int c = 0; c < 6; c++)
+        for (int i = 0; i < 388; i++) ring[len++] = block[i];
+    TEST_ASSERT(tripwire_period(ring, len, 2400) == 0);
+    /* drift: 8 cycles of p=422 with one token differing inside the last
+     * (need-1)*p window must not trip */
+    int block2[422];
+    len = 300;
+    for (int i = 0; i < 422; i++) {
+        s = s * 1103515245u + 12345u;
+        block2[i] = (int)((s >> 16) % 100000) + 400000;
+    }
+    for (int c = 0; c < 6; c++)
+        for (int i = 0; i < 422; i++) ring[len++] = block2[i];
+    ring[len - 50] = block2[372] + 777777;
+    TEST_ASSERT(tripwire_period(ring, len, 2400) == 0);
+    /* clean golden: same block without the drift trips at 422 */
+    len = 300;
+    for (int c = 0; c < 6; c++)
+        for (int i = 0; i < 422; i++) ring[len++] = block2[i];
+    TEST_ASSERT(tripwire_period(ring, len, 2400) == 422);
+    /* short-cycle volume test: p=18 requires ceil(2400/18)=134 cycles;
+     * 800 tokens of exact 18-stutter must NOT trip (study @48538 case) */
+    len = 300;
+    int block3[18];
+    for (int i = 0; i < 18; i++) block3[i] = 600000 + i * 13 + 5;
+    for (int c = 0; c < 45; c++)
+        for (int i = 0; i < 18; i++) ring[len++] = block3[i];
+    TEST_ASSERT(tripwire_period(ring, len, 2400) == 0);   /* 810 < volume */
+    for (int c = 45; c < 140; c++)
+        for (int i = 0; i < 18; i++) ring[len++] = block3[i];
+    TEST_ASSERT(tripwire_period(ring, len, 2400) == 18);  /* past 2412 */
+    /* p below the floor (12) never trips even with volume */
+    len = 0;
+    for (int i = 0; i < 300; i++) ring[len++] = 700000 + (i % 7);
+    for (int c = 0; c < 300; c++) ring[len++] = 0xC0FFE;
+    TEST_ASSERT(tripwire_period(ring, len, 2400) == 0);
+    /* under-arm: 599 periodic tokens -> no trip regardless */
+    len = 0;
+    for (int c = 0; c < 599; c++) ring[len++] = 1000 + (c % 100);
+    TEST_ASSERT(tripwire_period(ring, len, 2400) == 0);
+    /* resolver: request 0 -> env -> default; floor 600; ring-feasible max */
+    unsetenv("DS4_TRIPWIRE_MIN_TOKENS");
+    TEST_ASSERT(resolve_tripwire_volume(0) == 2400);
+    TEST_ASSERT(resolve_tripwire_volume(500) == 600);
+    TEST_ASSERT(resolve_tripwire_volume(2560) == 2560);
+    TEST_ASSERT(resolve_tripwire_volume(5000) == 2560);   /* clamped */
+    TEST_ASSERT(resolve_tripwire_volume(INT_MAX) == 2560);
+    setenv("DS4_TRIPWIRE_MIN_TOKENS", "1500", 1);
+    TEST_ASSERT(resolve_tripwire_volume(0) == 1500);
+    TEST_ASSERT(resolve_tripwire_volume(900) == 900);     /* request wins */
+    setenv("DS4_TRIPWIRE_MIN_TOKENS", "99999", 1);
+    TEST_ASSERT(resolve_tripwire_volume(0) == 2560);      /* env clamped too */
+    setenv("DS4_TRIPWIRE_MIN_TOKENS", "1500x", 1);
+    TEST_ASSERT(resolve_tripwire_volume(0) == 2400);      /* strict parse */
+    unsetenv("DS4_TRIPWIRE_MIN_TOKENS");
+    /* bool field: true/false named, null = not named (sibling-field family) */
+    {
+        const char *v = "true";
+        bool named = false, val = false;
+        TEST_ASSERT(parse_thinking_tripwire_value(&v, &named, &val));
+        TEST_ASSERT(named && val);
+        v = "false"; named = false; val = true;
+        TEST_ASSERT(parse_thinking_tripwire_value(&v, &named, &val));
+        TEST_ASSERT(named && !val);
+        v = "null"; named = true; val = true;
+        TEST_ASSERT(parse_thinking_tripwire_value(&v, &named, &val));
+        TEST_ASSERT(named && val);     /* null leaves both untouched: the
+                                        * routes init named=false, so null
+                                        * means "not named" */
+        v = "\"true\""; named = false;
+        TEST_ASSERT(!parse_thinking_tripwire_value(&v, &named, &val));
+    }
+    /* usage byte-shapes: neither / budget-only / tw-only / both */
+    {
+        request r = {0};
+        buf b = {0};
+        append_openai_usage_json(&b, &r, 100, 50);
+        TEST_ASSERT(strstr(b.ptr, "completion_tokens_details") == NULL);
+        buf_free(&b);
+        r.thinking_budget_reported = 138;
+        buf b2 = {0};
+        append_openai_usage_json(&b2, &r, 100, 50);
+        TEST_ASSERT(strstr(b2.ptr,
+            "\"completion_tokens_details\":{\"reasoning_tokens\":138}") &&
+            strstr(b2.ptr, "thinking_tripwire") == NULL);
+        buf_free(&b2);
+        r.thinking_budget_reported = 0;
+        r.tripwire_report_tokens = 2720;
+        r.tripwire_report_period = 388;
+        buf b3 = {0};
+        append_openai_usage_json(&b3, &r, 100, 50);
+        TEST_ASSERT(strstr(b3.ptr, "reasoning_tokens") == NULL &&
+            strstr(b3.ptr,
+              "\"completion_tokens_details\":{\"thinking_tripwire\":"
+              "{\"tokens_in_span\":2720,\"period\":388}}") != NULL);
+        buf_free(&b3);
+        r.thinking_budget_reported = 138;
+        buf b4 = {0};
+        append_openai_usage_json(&b4, &r, 100, 50);
+        TEST_ASSERT(strstr(b4.ptr,
+            "{\"reasoning_tokens\":138,\"thinking_tripwire\":") != NULL);
+        buf_free(&b4);
+    }
+    setenv("DS4_THINK_TRIPWIRE", "1", 1);
+    TEST_ASSERT(server_tripwire_env_enabled());
+    setenv("DS4_THINK_TRIPWIRE", "true", 1);
+    TEST_ASSERT(!server_tripwire_env_enabled());        /* "1" only */
+    unsetenv("DS4_THINK_TRIPWIRE");
+    TEST_ASSERT(!server_tripwire_env_enabled());
 }
 
 static void test_api_thinking_controls_parse(void) {
@@ -28016,6 +28427,7 @@ static void ds4_server_unit_tests_run(void) {
     test_reasoning_effort_mapping();
     test_model_alias_thinking_controls();
     test_api_thinking_controls_parse();
+    test_tripwire_detector();
     test_render_think_max_prompt_prefix();
     test_render_non_thinking_prompt_closes_think();
     test_render_drops_old_reasoning_without_tools();
