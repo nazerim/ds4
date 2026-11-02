@@ -79,6 +79,11 @@ simulation of the IDENTICAL algorithm on the real captured loop streams
 (day1 p388 trip@2720, day9 p422 trip@2912, active 21/21 true), (2) unit
 goldens replaying those geometries, (3) 9 live near-miss non-fires.
 
+- Room-warning fix (post-commit patch, live-verified): fires only when the
+  REQUEST named a budget (env-default 8192 vs the 1536 default max_tokens
+  no longer spams every short request), and the message no longer prints
+  negative room ("leaves no room for the answer").
+
 ## Files
 - ds4_server.c: +~120 lines on top of budget (detector fn, tw state/push/
   scan, close_wanted merge, usage sidecar, parser wiring x4 routes, tests).

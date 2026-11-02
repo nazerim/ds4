@@ -835,6 +835,11 @@ typedef struct {
      * every budget code path is gated on this value, so a request that does
      * not name a budget is byte-for-byte identical to the pre-budget server. */
     int thinking_budget_tokens;
+    /* True when the REQUEST named a budget (field/alias/object). The
+     * room warning fires only for named budgets: an env-default budget
+     * vs the server's own default max_tokens is operator config, not a
+     * client mistake worth a per-request WARNING. */
+    bool thinking_budget_named;
     /* Reasoning-side tokens generated under an active budget (markers and
      * injected wrap-up included); surfaced as completion_tokens_details.
      * reasoning_tokens.  Stays 0 when no budget was set. */
@@ -3786,10 +3791,8 @@ static void thinking_budget_room_warning(const request *r) {
      * saturate to it), max_tokens - 16 cannot. */
     if (r->thinking_budget_tokens > r->max_tokens - 16) {
         server_log(DS4_LOG_WARNING,
-                   "ds4-server: thinking budget %d leaves <=%d token(s) for the answer under max_tokens %d",
-                   r->thinking_budget_tokens,
-                   r->max_tokens - r->thinking_budget_tokens,
-                   r->max_tokens);
+                   "ds4-server: request thinking budget %d leaves no room for the answer under max_tokens %d",
+                   r->thinking_budget_tokens, r->max_tokens);
     }
 }
 
@@ -4624,7 +4627,9 @@ static bool parse_chat_request(ds4_engine *e, server *s, const char *body, int d
         ? resolve_thinking_budget(thinking_obj_budget, budget_field,
                                   budget_alias)
         : 0;
-    thinking_budget_room_warning(r);
+    r->thinking_budget_named = thinking_enabled &&
+        (thinking_obj_budget > 0 || budget_field >= 0 || budget_alias >= 0);
+    if (r->thinking_budget_named) thinking_budget_room_warning(r);
     r->thinking_tripwire = thinking_enabled &&
         (tw_named ? tw_value : server_tripwire_env_enabled());
     r->tripwire_min_tokens = resolve_tripwire_volume(tw_min);
@@ -4880,7 +4885,9 @@ static bool parse_anthropic_request(ds4_engine *e, server *s, const char *body, 
         ? resolve_thinking_budget(thinking_obj_budget, budget_field,
                                   budget_alias)
         : 0;
-    thinking_budget_room_warning(r);
+    r->thinking_budget_named = thinking_enabled &&
+        (thinking_obj_budget > 0 || budget_field >= 0 || budget_alias >= 0);
+    if (r->thinking_budget_named) thinking_budget_room_warning(r);
     r->thinking_tripwire = thinking_enabled &&
         (tw_named ? tw_value : server_tripwire_env_enabled());
     r->tripwire_min_tokens = resolve_tripwire_volume(tw_min);
@@ -5948,7 +5955,9 @@ static bool parse_responses_request(ds4_engine *e, server *s, const char *body, 
         ? resolve_thinking_budget(thinking_obj_budget, budget_field,
                                   budget_alias)
         : 0;
-    thinking_budget_room_warning(r);
+    r->thinking_budget_named = thinking_enabled &&
+        (thinking_obj_budget > 0 || budget_field >= 0 || budget_alias >= 0);
+    if (r->thinking_budget_named) thinking_budget_room_warning(r);
     r->thinking_tripwire = thinking_enabled &&
         (tw_named ? tw_value : server_tripwire_env_enabled());
     r->tripwire_min_tokens = resolve_tripwire_volume(tw_min);
@@ -6194,7 +6203,9 @@ static bool parse_completion_request(ds4_engine *e, const char *body, int def_to
         ? resolve_thinking_budget(thinking_obj_budget, budget_field,
                                   budget_alias)
         : 0;
-    thinking_budget_room_warning(r);
+    r->thinking_budget_named = thinking_enabled &&
+        (thinking_obj_budget > 0 || budget_field >= 0 || budget_alias >= 0);
+    if (r->thinking_budget_named) thinking_budget_room_warning(r);
     r->thinking_tripwire = thinking_enabled &&
         (tw_named ? tw_value : server_tripwire_env_enabled());
     r->tripwire_min_tokens = resolve_tripwire_volume(tw_min);
