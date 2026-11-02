@@ -124,7 +124,7 @@ export DS4_VISION_KEEP_IMAGES
 # no cap. Per-request overrides: reasoning_budget_tokens / thinking_budget_tokens
 # (alias) / Anthropic thinking.budget_tokens; a named 0 opts that request out.
 # Details: .codebase-memory/THINKING-BUDGET-RESULTS-20261102.md
-DS4_THINKING_BUDGET_TOKENS="${DS4_THINKING_BUDGET_TOKENS:-8196}"
+DS4_THINKING_BUDGET_TOKENS="${DS4_THINKING_BUDGET_TOKENS:-8192}"
 export DS4_THINKING_BUDGET_TOKENS
 
 # Alternative model map: short name -> full GGUF path
