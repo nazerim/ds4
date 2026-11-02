@@ -19,15 +19,20 @@ PROXY_HOST="${PROXY_HOST:-0.0.0.0}"
 # Bind address. Default 127.0.0.1 (loopback). Override with HOST env, e.g.
 # HOST=0.0.0.0 or HOST=192.168.1.20 to expose the server on the LAN.
 HOST="${HOST:-127.0.0.1}"   # loopback by design; LAN clients go through auth_proxy (start-proxy)
-KV_DIR="/tmp/ds4-kv"
-# KV disk budget in MiB. Default 131072 (128 GiB): a single ultra-long conversation
-# (328k+ tokens, e.g. ctx=512000) holds a ~50-70 GiB continued-anchor ladder, and
-# two such conversations must coexist without one retiring the other's KV.  The
-# retire-grace policy (KV_CACHE_RETIRE_GRACE) protects recently-live lineages, but
-# the budget must still fit both ladders.  SSD endurance is a non-issue at the
-# observed ~0.3 TiB/day write rate on a 2 TB drive.  See DS4FORK.md "KVCACHE —
+# KV store lives on the external FireCuda520 blade, mirroring the qwen profile
+# (QWEN_KV_DIR) — separate dirs keep budgets honest and the engine's fingerprint
+# gate would reject foreign-model checkpoints anyway.  Budget default 262144
+# (256 GiB, same scale as qwen; halved from 512 GiB per operator 2026-11-02):
+# a single ultra-long conversation
+# (328k+ tokens; the DeepSeek ctx default is 1048576, where ladders run
+# ~100-140 GiB) holds a continued-anchor ladder, and two such conversations
+# should coexist — worst-case twin 140s run tight against 256, the
+# retire-grace policy (KV_CACHE_RETIRE_GRACE) protects recently-live
+# lineages while the trim settles.  SSD endurance is a non-issue at the observed
+# ~0.3 TiB/day write rate on a 2 TB drive.  See DS4FORK.md "KVCACHE —
 # Deep Divergence Investigation" and PLAN-KV-REWRITE.md.
-KV_SIZE="${KV_SIZE:-131072}"
+KV_DIR="${KV_DIR:-/Volumes/FireCuda520/ds4-kv-deepseek}"
+KV_SIZE="${KV_SIZE:-262144}"
 # KV anchor retention: small_dense keeps ALL anchors ≤ this token count sticky
 # (default 16384).  Raising it bounds head divergences (e.g. opencode re-renders
 # an edited AGENTS.md near the head) to restart from a deeper anchor instead of
@@ -150,9 +155,10 @@ MODEL_PATHS=(
 # Alternative DSpark (draft) model map: short name -> full GGUF path.
 # Used by start-<model>-dspark / restart-<model>-dspark. If a key has no
 # entry, the default DSPARK_MODEL above is used instead.
-DSPARK_KEYS=("0731")
+DSPARK_KEYS=("0731" "vision")
 DSPARK_PATHS=(
     "/Users/naz/Projects/ds4/gguf/DeepSeek-V4-Flash-DSpark-support-0731.gguf"
+    "gguf/DeepSeek-V4-Flash-Vision-Exp-DSpark-support.gguf"
 )
 # Per-model legacy MTP drafter map (start-<model>-mtp).
 MTP_KEYS=()
@@ -209,7 +215,15 @@ MTP_DRAFT="${MTP_DRAFT:-2}"
 MTP_MARGIN="${MTP_MARGIN:-3}"
 # 0.6 balances speculation acceptance vs verification cost; 0.9 was too
 # conservative, rejecting most drafts and negating MTP throughput gains.
-DSPARK_CONFIDENCE="${DSPARK_CONFIDENCE:-0.6}"
+# 0.45 (2026-10-29 bounding pass): Vision-Exp drafter + real traffic => +1.2%
+# temp0 / +3.6% temp1 (6/6 probes) vs 0.6, model_fp UNCHANGED (no ladder-
+# rebuild tax; only the dspark on/off toggle changes fp).  Re-baseline if the
+# drafter head is ever retrained (PLAN-CAPTURE-PIPELINE-20261029.md).
+DSPARK_CONFIDENCE="${DSPARK_CONFIDENCE:-0.45}"
+# DSpark scheduler engagement window: Mac default is 4 probe-cycles (noisy per
+# ds4.c comment; TP/ROCm fast-paths already use 16).  12 = measured smoother
+# re-engage without losing the low-acceptance escape.  Runtime env read.
+DSPARK_SCHED_WINDOW="${DS4_DSPARK_SCHEDULER_WINDOW:-12}"
 # DSPARK_EXACT=1 adds --mtp-exact-sampling: at non-zero temperature the drafts
 # follow the ordinary target distribution instead of opportunistic greedy-suffix
 # matching (default confidence 0.8 when unset explicitly).
@@ -266,7 +280,7 @@ start_server() {
       PORT="${PORT:-$QWEN_PORT}"
       PID_FILE="$QWEN_PID_FILE"
       KV_DIR="$QWEN_KV_DIR"
-      KV_SIZE="${QWEN_KV_SIZE:-524288}"   # qwen ladder store lives on the external blade
+      KV_SIZE="${QWEN_KV_SIZE:-262144}"   # qwen ladder store lives on the external blade
       LOG_FILE="$LOG_DIR/ds4-qwen.log"
       # Cache-miss trace is opt-in for the qwen runtime too: start-qwen no
       # longer pins a default path. Set TRACE_PATH to enable (the value is
@@ -304,6 +318,26 @@ start_server() {
       rm -f "$PID_FILE"
     fi
   fi
+
+  # Blade guard: a /Volumes KV path whose mount is gone must NOT mkdir onto
+  # the internal SSD (silent fallback that bit us on 2026-10-03 - the store
+  # was "empty" because it had been created under an unmounted volume root).
+  # Compare the device id of the volume root against the SSD's root device:
+  # an unmounted-but-present /Volumes/<name> dir resolves to disk3s1s1, not
+  # the blade, so a plain -d check would wrongly pass.
+  case "$KV_DIR" in
+    /Volumes/*)
+      local kv_vol="${KV_DIR#/Volumes/}"
+      kv_vol="/Volumes/${kv_vol%%/*}"
+      if [ ! -d "$kv_vol" ] || \
+         [ "$(df -P "$kv_vol" 2>/dev/null | awk 'NR==2{print $1}')" = \
+           "$(df -P / | awk 'NR==2{print $1}')" ]; then
+        echo "Error: KV volume not mounted: $kv_vol (KV_DIR=$KV_DIR)."
+        echo "       Mount the blade or point KV_DIR/QWEN_KV_DIR at a live path."
+        return 1
+      fi
+      ;;
+  esac
 
   # Ensure KV cache and log directories exist
   mkdir -p "$KV_DIR" "$LOG_DIR"
@@ -420,6 +454,9 @@ start_server() {
     # DSpark: block size comes from the support model metadata; --mtp-draft /
     # --mtp-margin are legacy flags and are NOT passed here.
     MTP_ARGS+=(--mtp-model "$spec_used" --dspark)
+    # Propagate the measured scheduler window (12) so a plain
+    # restart-vision-dspark reproduces the tuned config; ds4 reads it via getenv.
+    export DS4_DSPARK_SCHEDULER_WINDOW="$DSPARK_SCHED_WINDOW"
     if [ "$DSPARK_EXACT" = "1" ]; then
       MTP_ARGS+=(--mtp-exact-sampling)
     fi
@@ -834,7 +871,8 @@ case "${1:-}" in
     echo "  MTP_DRAFT           - Legacy MTP only: max draft tokens (default: 2; server"
     echo "                        gate requires > 1 for speculation to fire)"
     echo "  MTP_MARGIN          - Legacy MTP verifier confidence margin (default: 3)"
-    echo "  DSPARK_CONFIDENCE   - DSpark confidence threshold 0..1 (default: 0.6)"
+    echo "  DSPARK_CONFIDENCE   - DSpark confidence threshold 0..1 (default: 0.45, 2026-10-29 tuned)"
+    echo "  DS4_DSPARK_SCHEDULER_WINDOW - engagement probe window (default: 12)"
     echo "  DSPARK_EXACT        - 1 = --mtp-exact-sampling (target distribution at"
     echo "                        non-zero temperature; default 0 = opportunistic)"
     echo ""
@@ -851,6 +889,9 @@ case "${1:-}" in
     echo "  DS4_VISION_KEEP_IMAGES - Auto-reduce over-budget image histories to"
     echo "                        the last N images (default: 128; 0 = reject"
     echo "                        requests over 16 images instead)."
+    echo "  KV_DIR / KV_SIZE    - DeepSeek KV store dir + disk budget MiB (defaults:"
+    echo "                        /Volumes/FireCuda520/ds4-kv-deepseek, 262144 = 256 GiB;"
+    echo "                        QWEN_KV_DIR/QWEN_KV_SIZE mirror it per profile)"
     echo "  DS4_THINK_TRIPWIRE  - '1' enables the thinking-loop tripwire server-wide"
     echo "                        (default: 1). DS4_TRIPWIRE_MIN_TOKENS sets the"
     echo "                        repetition-volume (default 2400, range 600-2560)."
