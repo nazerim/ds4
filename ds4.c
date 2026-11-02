@@ -3298,13 +3298,36 @@ static bool support_model_checkpoint_compatible(const ds4_model *m) {
 
     if (g_ds4_flash_vision_exp) {
         ds4_str revision = {0};
-        if (!has_variant || !ds4_streq(variant, "vision-exp") ||
-            !model_get_string(m, "general.source.revision", &revision) ||
-            !ds4_streq(revision, vision_exp_revision)) {
+        const bool pinned_match =
+            has_variant && ds4_streq(variant, "vision-exp") &&
+            model_get_string(m, "general.source.revision", &revision) &&
+            ds4_streq(revision, vision_exp_revision);
+        if (!pinned_match) {
+            /* Stage-4 escape: retrained/repacked support heads legitimately
+             * carry a new revision string. The FAMILY checks above remain
+             * enforced (those guard against architecturally incompatible
+             * graphs); only the exact-pin bypasses here, loudly, and only
+             * by explicit operator opt-in. */
+            if (!getenv("DS4_DSPARK_ALLOW_CUSTOM_SUPPORT")) {
+                fprintf(stderr,
+                        "ds4: DSpark support model does not match the pinned "
+                        "DeepSeek V4 Flash Vision-Exp checkpoint\n");
+                return false;
+            }
+            const char *rptr = "(none)";
+            int rlen = 6;
+            if (model_get_string(m, "general.source.revision", &revision)) {
+                rptr = revision.ptr;
+                rlen = (int)revision.len;
+            }
             fprintf(stderr,
-                    "ds4: DSpark support model does not match the pinned "
-                    "DeepSeek V4 Flash Vision-Exp checkpoint\n");
-            return false;
+                    "ds4: WARNING: Vision-Exp support revision pin BYPASSED "
+                    "via DS4_DSPARK_ALLOW_CUSTOM_SUPPORT (variant=%.*s, "
+                    "revision=%.*s) — custom repack acceptance is the "
+                    "operator's responsibility\n",
+                    has_variant ? (int)variant.len : 6,
+                    has_variant ? variant.ptr : "(none)",
+                    rlen, rptr);
         }
     } else if (has_variant && ds4_streq(variant, "vision-exp")) {
         fprintf(stderr,
@@ -61836,6 +61859,11 @@ struct ds4_session {
     ds4_dist_session *distributed;
     uint64_t tp_session_id;
     uint64_t glm_reserved_graph_bytes;
+    uint32_t qwen4_depth_window;
+    uint32_t qwen4_depth_accepted;
+    uint32_t qwen4_depth_cycles;
+    uint32_t qwen4_reject2_streak;   /* consecutive 3-row cycles whose second draft rejected */
+    bool qwen4_depth3_engaged;
 #ifndef DS4_NO_GPU
 #ifdef DS4_HAS_DEEPSEEK41_GPU
     ds41_gpu_graph ds41_graph;
@@ -61863,11 +61891,8 @@ struct ds4_session {
     int glm_mtp_parent;
     int glm_mtp_have;
     /* rolling first-draft acceptance window for the adaptive draft depth */
-    uint32_t qwen4_depth_window;
-    uint32_t qwen4_depth_accepted;
-    uint32_t qwen4_depth_cycles;
-    uint32_t qwen4_reject2_streak;   /* consecutive 3-row cycles whose second draft rejected */
-    bool qwen4_depth3_engaged;
+    /* Policy counters moved out of the GPU-guarded region: plain ints
+     * reset from shared session paths, must exist under DS4_NO_GPU. */
     bool glm_mtp_rollback_valid;
     uint32_t glm_mtp_rollback_pos;
     uint32_t glm_mtp_rollback_dense_len;
@@ -61886,6 +61911,7 @@ struct ds4_session {
     ds4_kv_cache cpu_cache;
     ds4_cpu_decode_scratch cpu_scratch;
     token_vec checkpoint;
+    void *td_capture;   /* DS4_TRAIN_DUMP pending records (see ds4_td_* below) */
     ds4_vision_identity *checkpoint_images;
     size_t checkpoint_image_count;
     const ds4_vision_span *sync_images;
@@ -61950,6 +61976,8 @@ struct ds4_session {
     bool mtp_draft_valid;
     bool greedy_splitkv_anchor_valid;
 };
+static void ds4_td_segment_end(ds4_session *s);   /* v1.3 capture hook (defined in ds4_td module) */
+
 
 static bool ds4_session_tp_leader(const ds4_session *s);
 
@@ -64943,6 +64971,7 @@ static int qwen4_session_load_payload_span(ds4_session *s, FILE *fp, const uint3
          * the terminal link, whose whole token array is the survivor. */
         token_vec_free(&new_checkpoint);
     } else {
+        ds4_td_segment_end(s);   /* v1.3 capture: adopt = lineage boundary, flush while old tokens alive */
         token_vec_free(&s->checkpoint);
         s->checkpoint = new_checkpoint;
         s->checkpoint_valid = true;
@@ -65642,6 +65671,7 @@ int ds4_session_load_payload_span(ds4_session *s, FILE *fp, uint64_t payload_byt
             return 1;
         }
 
+        ds4_td_segment_end(s);   /* v1.3 capture: adopt = lineage boundary, flush while old tokens alive */
         token_vec_free(&s->checkpoint);
         s->checkpoint = new_checkpoint;
         s->checkpoint_valid = true;
@@ -65782,6 +65812,7 @@ int ds4_session_load_payload_span(ds4_session *s, FILE *fp, uint64_t payload_byt
             payload_set_err(err, errlen, "KV checkpoint has trailing payload bytes");
             return 1;
         }
+        ds4_td_segment_end(s);   /* v1.3 capture: adopt = lineage boundary, flush while old tokens alive */
         token_vec_free(&s->checkpoint);
         s->checkpoint = new_checkpoint;
         s->checkpoint_valid = true;
@@ -65991,6 +66022,7 @@ int ds4_session_load_payload_span(ds4_session *s, FILE *fp, uint64_t payload_byt
         return 1;
     }
 
+    ds4_td_segment_end(s);   /* v1.3 capture: adopt = lineage boundary */
     token_vec_free(&s->checkpoint);
     s->checkpoint = new_checkpoint;
     for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
@@ -75868,8 +75900,448 @@ int ds4_session_create(ds4_session **out, ds4_engine *e, int ctx_size) {
 #endif
 }
 
+/* =========================================================================
+ * DS4_TRAIN_DUMP — drafter-training feature capture (Stage 1, v1; plan:
+ * .codebase-memory/PLAN-CAPTURE-PIPELINE-20261029.md, schema: CAPTURE-SCHEMA.md).
+ *
+ * OFF unless env DS4_TRAIN_DUMP=<dir> is set before the first dspark prepare;
+ * unset => one cached-bool check per cycle, no other hot-path effect.
+ *
+ * Per speculative cycle (ds4_session_prepare_dspark_draft success) we read
+ * back the staged h[pos-1] feature block (target_layer_count x DS4_N_EMBD
+ * floats in graph.dspark_target_hidden) into a session-local ring. Labels
+ * (next-5 committed tokens) and per-cycle committed streaks are completed at
+ * flush from the session checkpoint itself (pos is monotonic per session, so
+ * streak = next_rec.pos - rec.pos - 1 across request boundaries included).
+ *
+ * Flush triggers: ring full (keeps the trailing record for its streak),
+ * ds4_session_free. Output: <dir>/train_pid<pid>.recs (fixed-size records,
+ * fp8_e4m3 features, satfinite+RZ) + train_pid<pid>.idx.jsonl (provenance).
+ * ========================================================================= */
+#define DS4_TD_CAP 128u
+#define DS4_TD_LABELS 5
+/* 3 taps x hidden 4096 for the DeepSeek V4 family; DS4_N_EMBD is not a
+ * compile-time constant here, so the ring uses a literal ceiling and a
+ * runtime guard on the actual capture width. */
+#define DS4_TD_FEAT_MAX 12288
+#define DS4_TD_STREAK_UNKNOWN 255u
+
+typedef struct {
+    uint32_t pos;           /* checkpoint.len at prepare (seed index) */
+    int32_t  seed;          /* token fed at this cycle */
+    uint8_t  streak;        /* tokens committed beyond seed (255 unknown) */
+    uint8_t  n_feat;        /* target layers captured (0 = feature-less) */
+    uint8_t  flags;         /* bit0 first-of-conv segment */
+    uint8_t  rsvd;
+    int32_t  labels[DS4_TD_LABELS]; /* v1.2: snapshotted as checkpoint grows */
+    uint8_t  n_label;
+    uint8_t  rsvd2[3];
+    float    feat[DS4_TD_FEAT_MAX];
+} ds4_td_rec;
+
+typedef struct {
+    uint32_t conv_id;
+    uint32_t len;
+    uint32_t flushed_first; /* records already emitted for this conv */
+    ds4_td_rec *v;
+    ds4_td_rec stage;       /* v1.1: grabbed pre-prepare-impl, committed on ok */
+    bool     staged;        /* stage holds pos/seed for the current cycle */
+    bool     stage_valid;   /* stage holds a real feature row */
+    bool     conv_start_pending; /* v1.2: next record starts a new segment */
+    uint32_t last_pos;      /* v1.3: last committed record pos */
+    const int *last_v;      /* v1.3: checkpoint token array identity */
+} ds4_td_buf;
+
+static bool ds4_session_dspark_capture_current(const ds4_session *s);
+
+static const char *g_ds4_td_dir;
+static bool g_ds4_td_checked;
+static bool g_ds4_td_enabled;
+static bool g_ds4_td_io_failed;
+static uint32_t g_ds4_td_conv_ctr;
+static pthread_mutex_t g_ds4_td_mtx = PTHREAD_MUTEX_INITIALIZER;
+
+static bool ds4_td_enabled(void) {
+    if (!g_ds4_td_checked) {
+        pthread_mutex_lock(&g_ds4_td_mtx);
+        if (!g_ds4_td_checked) {
+            const char *d = getenv("DS4_TRAIN_DUMP");
+            if (d && d[0]) {
+                g_ds4_td_dir = d;
+                g_ds4_td_enabled = true;
+                fprintf(stderr, "ds4: DS4_TRAIN_DUMP capture ACTIVE -> %s\n", d);
+            }
+            g_ds4_td_checked = true;
+        }
+        pthread_mutex_unlock(&g_ds4_td_mtx);
+    }
+    return g_ds4_td_enabled;
+}
+
+/* satfinite, round-toward-zero e4m3 (v1 documented precision). */
+static uint8_t ds4_td_f32_to_fp8_e4m3(float x) {
+    uint8_t s = 0;
+    if (!(x == x)) return 0x7F;
+    if (x < 0.0f) { s = 0x80; x = -x; }
+    if (x >= 464.0f) return s | 0x7E;           /* saturate 448 */
+    if (x >= 0.015625f) {                        /* normal min 2^-6 */
+        int e;
+        const float m = frexpf(x, &e);           /* x = m*2^e, m in [0.5,1) */
+        int st = (((e - 1) + 7) << 3) | ((int)ldexpf(m, 4) & 7);
+        if (st > 126) st = 126;
+        if (st < 8) st = 8;
+        return s | (uint8_t)st;
+    }
+    {   /* subnormal: steps of 2^-9 */
+        int q = (int)(x / 0.001953125f);         /* RZ */
+        if (q > 7) return s | 0x08;
+        return s | (uint8_t)q;
+    }
+}
+
+#pragma pack(push, 1)
+typedef struct {
+    uint32_t pos;
+    int32_t  seed;
+    uint8_t  streak;
+    uint8_t  n_label;
+    uint8_t  n_feat;
+    uint8_t  flags;
+    int32_t  labels[DS4_TD_LABELS];
+    uint8_t  feat[DS4_TD_FEAT_MAX];              /* fp8 bytes */
+} ds4_td_diskrec;
+#pragma pack(pop)
+
+static void ds4_td_emit(const ds4_td_rec *r) {
+    ds4_td_diskrec dr;
+    memset(&dr, 0, sizeof(dr));
+    dr.pos = r->pos;
+    dr.seed = r->seed;
+    dr.streak = r->streak;
+    dr.n_feat = r->n_feat;
+    dr.flags = r->flags;
+    /* v1.2: labels were snapshotted while the owning checkpoint was alive;
+     * resolving at flush time corrupted records across conv invalidations. */
+    dr.n_label = r->n_label;
+    for (uint8_t i = 0; i < dr.n_label; i++)
+        dr.labels[i] = r->labels[i];
+    const uint64_t nf32 = (uint64_t)r->n_feat * DS4_N_EMBD;
+    for (uint64_t i = 0; i < nf32; i++)
+        dr.feat[i] = ds4_td_f32_to_fp8_e4m3(r->feat[i]);
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/train_pid%ld.recs",
+             g_ds4_td_dir, (long)getpid());
+    FILE *f = fopen(path, "ab");
+    if (!f) { g_ds4_td_io_failed = true; return; }
+    const bool ok = fwrite(&dr, sizeof(dr), 1, f) == 1;
+    fclose(f);
+    if (!ok) g_ds4_td_io_failed = true;
+}
+
+/* Flush completed records (all but the newest, whose streak is still open).
+ * final=1 flushes everything with streak=UNKNOWN on the last record. */
+static void ds4_td_flush_ring(ds4_session *s, bool final) {
+    ds4_td_buf *td = s ? (ds4_td_buf *)s->td_capture : NULL;
+    if (!td || td->len == 0) return;
+    /* v1.3: pure emit. Labels were resolved per-cycle in ds4_td_close while
+     * the owning checkpoint was alive; flush never reads the checkpoint
+     * (adoption swaps replace it wholesale mid-ring). */
+    uint32_t keep = final ? 0 : 1;
+    uint32_t n = td->len - keep;
+    for (uint32_t i = 0; i < n; i++) {
+        ds4_td_emit(&td->v[i]);
+    }
+    if (final) {
+        td->len = 0;
+    } else {
+        memmove(td->v, &td->v[n], keep * sizeof(td->v[0]));
+        td->len = keep;
+    }
+    /* idx sidecar: one line per flush batch (provenance / seek index) */
+    if (n > 0 && !g_ds4_td_io_failed) {
+        char path[4096];
+        snprintf(path, sizeof(path), "%s/train_pid%ld.idx.jsonl",
+                 g_ds4_td_dir, (long)getpid());
+        FILE *f = fopen(path, "ab");
+        if (f) {
+            fprintf(f, "{\"conv\":%u,\"pid\":%ld,\"flushed\":%u,\"kept\":%u,"
+                       "\"ck_len\":%u,\"final\":%d,\"rec_b\":%zu}\n",
+                    td->conv_id, (long)getpid(), n, keep,
+                    (unsigned)s->checkpoint.len, final ? 1 : 0,
+                    sizeof(ds4_td_diskrec));
+            fclose(f);
+        }
+    }
+}
+
+static void ds4_td_flush_ring(ds4_session *s, bool final);
+
+/* v1.2 conversation/lineage boundary hook — called from ds4_session_invalidate
+ * and the rewind entry points BEFORE they mutate the checkpoint, so the
+ * pending segment's labels resolve against its own token array. Server slots
+ * reuse one session object across conversations; without this hook a later
+ * flush would relabel the previous conversation's records with the NEXT
+ * conversation's tokens (corruption observed in the 2026-10-29 smoke). */
+static void ds4_td_segment_end(ds4_session *s) {
+    if (!s || !g_ds4_td_enabled || g_ds4_td_io_failed) return;
+    ds4_td_buf *td = (ds4_td_buf *)s->td_capture;
+    if (!td || td->len == 0) return;
+    ds4_td_flush_ring(s, true);
+    pthread_mutex_lock(&g_ds4_td_mtx);
+    td->conv_id = ++g_ds4_td_conv_ctr;
+    pthread_mutex_unlock(&g_ds4_td_mtx);
+    td->conv_start_pending = true;
+}
+
+/* v1.1: capture h[pos-1] BEFORE prepare-impl runs the draft forward (that
+ * forward invalidates the single-row capture; the batch kernel copies the
+ * last verified row into it, so pre-impl it is exactly the feature the
+ * drafter will condition on). Staging only — ds4_td_close commits. */
+/* ---- DS4_DSPARK_FP8_JITTER=1 (experiment harness, never for serving) ----
+ * Round-trips the drafter's conditioning hidden h[pos-1] through the SAME
+ * fp8-e4m3 encode used by DS4_TRAIN_DUMP capture, in-engine, right before
+ * prepare_impl consumes it. A/B of dspark acceptance stats with/without
+ * answers: does the capture format's quantization degrade drafting? If the
+ * deltas are within noise, fp8 capture fidelity is settled. */
+static float ds4_e4m3_roundtrip(float x) {
+    /* decode-table mirror of ds4_td_f32_to_fp8_e4m3's RZ/satfinite encoder */
+    static const float scale[16] = {
+        0.0f, 0.015625f, 0.03125f, 0.0625f, 0.125f, 0.25f, 0.5f, 1.0f,
+        2.0f, 4.0f, 8.0f, 16.0f, 32.0f, 64.0f, 128.0f, 256.0f,
+    };
+    const float sgn = x < 0.0f ? -1.0f : 1.0f;
+    float ax = fabsf(x);
+    if (ax > 448.0f) ax = 448.0f;
+    int e = 0;
+    while (e < 15 && scale[e + 1] <= ax) e++;
+    if (e == 0) return sgn * floorf(ax / 0.001953125f) * 0.001953125f;
+    if (ax < scale[e]) e--;                    /* clamp into band */
+    const float step = scale[e] * 0.125f;
+    return sgn * (scale[e] + floorf((ax - scale[e]) / step) * step);
+}
+
+#ifndef DS4_NO_GPU
+static void ds4_td_jitter_hidden(ds4_session *s) {
+    static int state = -1;                        /* -1 unknown, 0 off, 1 on */
+    if (state < 0) state = getenv("DS4_DSPARK_FP8_JITTER") ? 1 : 0;
+    if (!state) return;
+    ds4_gpu_graph *g = &s->graph;
+    if (!g->dspark_target_hidden || !g->dspark_capture_valid) return;
+    const uint32_t taps = g->dspark_target_layer_count;
+    const uint64_t bytes = (uint64_t)taps * DS4_N_EMBD * sizeof(float);
+    static float scratch[3 * 4096];
+    if (taps == 0 || bytes > sizeof(scratch)) return;
+    if (ds4_gpu_tensor_read(g->dspark_target_hidden, 0, scratch, bytes) == 0)
+        return;
+    for (uint64_t i = 0; i < bytes / sizeof(float); i++)
+        scratch[i] = ds4_e4m3_roundtrip(scratch[i]);
+    (void)ds4_gpu_tensor_write(g->dspark_target_hidden, 0, scratch, bytes);
+}
+
+#else
+static void ds4_td_jitter_hidden(ds4_session *s) { (void)s; }
+#endif
+
+/* ---- DS4_TD_PARITY=<dir>: draft-parity dump for mirror validation ------
+ * Per prepared cycle (first DS4_TD_PARITY_MAX, default 4096, per process)
+ * snapshots the engine's OWN proposal so the offline torch mirror can be
+ * validated token-by-token without re-deriving the draft graph:
+ *   pos, seed, draft_len, stages,
+ *   tokens[draft_len] i32            (CPU mirror s->dspark_draft_tokens,
+ *                                     full stage-collapsed proposal)
+ *   conf_hidden[5][4096] f32         (per-draft confidence-input rows; the
+ *                                     markov-256 half of the engine's conf
+ *                                     input is reconstructable offline from
+ *                                     the captured seed chain x extracted
+ *                                     markov_w1)
+ * Fixed record stride 12 + 20 + 81920 = 81,952 B (zero-pad beyond
+ * draft_len). Independent of DS4_TRAIN_DUMP; own banner; never enabled for
+ * normal serving. */
+static FILE *g_td_parity_f = NULL;
+static uint32_t g_td_parity_n = 0;
+static bool g_td_parity_off = false;
+static uint32_t g_td_parity_max = 0;
+
+#ifndef DS4_NO_GPU
+static void ds4_td_parity_note(ds4_session *s) {
+    if (g_td_parity_off) return;
+    if (!g_td_parity_f) {
+        const char *dir = getenv("DS4_TD_PARITY");
+        if (!dir) { g_td_parity_off = true; return; }
+        const char *m = getenv("DS4_TD_PARITY_MAX");
+        g_td_parity_max = m ? (uint32_t)atol(m) : 4096u;
+        if (g_td_parity_max == 0) g_td_parity_max = 4096u;
+        char path[4096];
+        snprintf(path, sizeof(path), "%s/parity_pid%ld.bin", dir, (long)getpid());
+        g_td_parity_f = fopen(path, "ab");
+        if (!g_td_parity_f) { g_td_parity_off = true; return; }
+        fprintf(stderr, "ds4: DS4_TD_PARITY draft dump ACTIVE -> %s (max %u cycles)\n",
+                path, g_td_parity_max);
+    }
+    if (g_td_parity_n >= g_td_parity_max) return;
+    if (!s->dspark_draft_valid || !s->dspark_draft_len) return;
+    const ds4_dspark_weights *dw = &s->engine->dspark_weights;
+    ds4_gpu_graph *g = &s->graph;
+    const uint32_t dl = s->dspark_draft_len > DS4_TD_LABELS ?
+                        DS4_TD_LABELS : s->dspark_draft_len;
+    if (DS4_N_EMBD != 4096) return;
+    const ds4_gpu_tensor *confh = metal_graph_dspark_confidence_hidden(g);
+    if (!confh) return;
+    int32_t props[DS4_TD_LABELS] = {0, 0, 0, 0, 0};
+    for (uint32_t i = 0; i < dl; i++) props[i] = s->dspark_draft_tokens[i];
+    static float hidden_rows[DS4_TD_LABELS][4096];
+    for (uint32_t d = 0; d < DS4_TD_LABELS; d++) {
+        if (d < dl &&
+            ds4_gpu_tensor_read(confh, (uint64_t)d * 4096 * sizeof(float),
+                                hidden_rows[d],
+                                4096 * sizeof(float)) == 0)
+            return;
+    }
+    struct { uint32_t pos; int32_t seed; uint8_t dlen, stages; uint16_t rsvd; }
+        hdr;
+    hdr.pos = s->checkpoint.len;
+    hdr.seed = props[0];   /* stage-1 proposal head (== first drafted id) */
+    hdr.dlen = (uint8_t)dl;
+    hdr.stages = (uint8_t)dw->n_stages;
+    hdr.rsvd = 0;
+    if (fwrite(&hdr, sizeof(hdr), 1, g_td_parity_f) != 1 ||
+        fwrite(props, sizeof(int32_t), DS4_TD_LABELS, g_td_parity_f)
+            != DS4_TD_LABELS)
+        { g_td_parity_off = true; return; }
+    for (uint32_t d = 0; d < DS4_TD_LABELS; d++)
+        if (fwrite(hidden_rows[d], sizeof(float), 4096, g_td_parity_f) != 4096)
+            { g_td_parity_off = true; return; }
+    fflush(g_td_parity_f);
+    g_td_parity_n++;
+}
+
+#else
+static void ds4_td_parity_note(ds4_session *s) { (void)s; }
+#endif
+
+#ifndef DS4_NO_GPU
+static void ds4_td_grab(ds4_session *s, int token, uint32_t pos) {    if (!ds4_td_enabled() || g_ds4_td_io_failed) return;
+    ds4_td_buf *td = (ds4_td_buf *)s->td_capture;
+    if (!td) {
+        td = calloc(1, sizeof(*td));
+        if (!td) return;
+        td->v = calloc(DS4_TD_CAP, sizeof(td->v[0]));
+        if (!td->v) { free(td); return; }
+        pthread_mutex_lock(&g_ds4_td_mtx);
+        td->conv_id = ++g_ds4_td_conv_ctr;
+        pthread_mutex_unlock(&g_ds4_td_mtx);
+        s->td_capture = td;
+    }
+    td->staged = false;
+    td->stage_valid = false;
+    memset(&td->stage, 0, sizeof(td->stage));
+    td->stage.pos = pos;
+    td->stage.seed = token;
+    td->stage.streak = DS4_TD_STREAK_UNKNOWN;
+    td->staged = true;
+    const ds4_dspark_weights *dw = &s->engine->dspark_weights;
+    const uint8_t nf = dw->target_layer_count <= 3 ?
+                       (uint8_t)dw->target_layer_count : 0;
+    if (nf && s->graph.dspark_target_hidden &&
+        ds4_session_dspark_capture_current(s)) {
+        const uint64_t bytes = (uint64_t)nf * DS4_N_EMBD * sizeof(float);
+        if (bytes <= sizeof(td->stage.feat) &&
+            ds4_gpu_tensor_read(s->graph.dspark_target_hidden, 0,
+                                td->stage.feat, bytes) != 0) {
+            td->stage.n_feat = nf;
+            td->stage_valid = true;
+        }
+    }
+    if (getenv("DS4_TD_DEBUG") && td->conv_id <= 1 && pos < 25 + 8) {
+        fprintf(stderr,
+            "ds4: TDDBG pos=%u len=%d en=%d valid=%d cclen=%u "
+            "bvalid=%d bstart=%u btok=%u row=%d\n",
+            pos, (int)s->checkpoint.len,
+            (int)s->graph.dspark_capture_enabled,
+            (int)s->graph.dspark_capture_valid,
+            s->graph.dspark_capture_checkpoint_len,
+            (int)s->graph.dspark_capture_batch_valid,
+            s->graph.dspark_capture_batch_start,
+            s->graph.dspark_capture_batch_tokens,
+            s->graph.dspark_target_hidden ? 1 : 0);
+    }
+}
+
+#else
+static void ds4_td_grab(ds4_session *s, int token, uint32_t pos) { (void)s; (void)token; (void)pos; }
+#endif
+
+static void ds4_td_close(ds4_session *s) {
+    if (!g_ds4_td_enabled || g_ds4_td_io_failed) return;
+    ds4_td_buf *td = (ds4_td_buf *)s->td_capture;
+    if (!td || !td->staged) return;
+    td->staged = false;
+    const uint32_t pos = td->stage.pos;
+    /* v1.3 backstop: an unhooked lineage change surfaces as a position
+     * reset (adoption/rewind that skipped the hooks always restarts or
+     * truncates the frontier). The v-pointer clause was REMOVED same-day:
+     * checkpoint-vector REALLOCATION during normal growth moves the pointer
+     * in CLI mode, splitting one conversation into fragments (measured:
+     * 3 segments / 1 CLI run) while server-mode adoption sites are already
+     * hooked directly. Any future missed swap still trips
+     * tools/td_validate.py labels[0]==seed, so detection is not lost. */
+    const bool lineage_shift = td->len > 0 && td->last_pos &&
+        pos <= td->last_pos;
+    if (lineage_shift) {
+        ds4_td_flush_ring(s, true);
+        pthread_mutex_lock(&g_ds4_td_mtx);
+        td->conv_id = ++g_ds4_td_conv_ctr;
+        pthread_mutex_unlock(&g_ds4_td_mtx);
+        td->conv_start_pending = true;
+    }
+    /* v1.3: resolve pending labels against the live (same-lineage)
+     * checkpoint every cycle as lookahead tokens commit. */
+    if (!lineage_shift) {
+        const uint32_t cklen = (uint32_t)s->checkpoint.len;
+        for (uint32_t i = 0; i < td->len; i++) {
+            ds4_td_rec *r = &td->v[i];
+            if (cklen > r->pos) {
+                const uint32_t av = cklen - r->pos;
+                const uint8_t want = av > DS4_TD_LABELS ? DS4_TD_LABELS
+                                                        : (uint8_t)av;
+                while (r->n_label < want) {
+                    r->labels[r->n_label] =
+                        s->checkpoint.v[r->pos + r->n_label];
+                    r->n_label++;
+                }
+            }
+        }
+    }
+    if (td->len >= DS4_TD_CAP)
+        ds4_td_flush_ring(s, false);
+    /* close the streak of the previous pending record */
+    if (td->len > 0) {
+        ds4_td_rec *prev = &td->v[td->len - 1];
+        if (pos > prev->pos) {
+            uint32_t st = pos - prev->pos - 1;
+            prev->streak = st > DS4_TD_STREAK_UNKNOWN - 1 ?
+                           (uint8_t)(DS4_TD_STREAK_UNKNOWN - 1) : (uint8_t)st;
+        }
+    }
+    td->stage.flags = (td->len == 0 && td->flushed_first == 0) ||
+                      td->conv_start_pending ? 1 : 0;
+    td->conv_start_pending = false;
+    td->v[td->len] = td->stage;
+    td->flushed_first++;
+    td->len++;
+    td->last_pos = pos;
+    td->last_v = s->checkpoint.v;
+}
+
 void ds4_session_free(ds4_session *s) {
     if (!s) return;
+    if (s->td_capture) {
+        ds4_td_flush_ring(s, true);
+        ds4_td_buf *td = (ds4_td_buf *)s->td_capture;
+        free(td->v);
+        free(td);
+        s->td_capture = NULL;
+    }
     if (s->glm_reserved_graph_bytes && s->engine) {
         s->engine->glm_session_graph_bytes -= s->glm_reserved_graph_bytes;
         s->engine->glm_session_count--;
@@ -80203,7 +80675,13 @@ static bool ds4_session_prepare_dspark_draft(ds4_session *s,
         if (ds4_gpu_set_current_device(exec_tier) != 0) return false;
         g->active_tier = exec_tier;
     }
+    ds4_td_jitter_hidden(s);   /* DS4_DSPARK_FP8_JITTER experiment (no-op off) */
+    ds4_td_grab(s, token, pos);   /* DS4_TRAIN_DUMP: read features while alive */
     const bool ok = ds4_session_prepare_dspark_draft_impl(s, token, pos);
+    if (ok) {
+        ds4_td_parity_note(s);   /* DS4_TD_PARITY dump (inert off) */
+        ds4_td_close(s);   /* DS4_TRAIN_DUMP: commit staged record (inert off) */
+    }
     if (exec_tier != saved_tier) {
         g->active_tier = saved_tier;
         if (ds4_gpu_set_current_device(saved_tier) != 0) return false;
@@ -88558,6 +89036,9 @@ int ds4_session_eval_speculative(ds4_session *s, int first_token,
 
 void ds4_session_invalidate(ds4_session *s) {
     if (!s) return;
+    /* DS4_TRAIN_DUMP v1.2: conversation segments end here (flush before the
+     * checkpoint is cleared). */
+    ds4_td_segment_end(s);
     if (ds4_session_tp_leader(s) &&
         !ds4_tp_failed(s->engine->tp.ctx)) {
         (void)ds4_tp_send_invalidate(s->engine->tp.ctx, s->tp_session_id);
@@ -88687,6 +89168,7 @@ bool ds4_session_rewind_speculative(ds4_session *s, int pos) {
     (void)s; (void)pos;
     return false;
 #else
+    ds4_td_segment_end(s);   /* v1.2 capture (also covers direct resample callers) */
 #ifdef DS4_HAS_DEEPSEEK41_GPU
     if (s && ds4_session_is_ds41(s)) {
         ds41_gpu_graph *g = &s->ds41_graph;
@@ -88720,6 +89202,7 @@ void ds4_session_rewind(ds4_session *s, int pos) {
     if (!s) return;
     if (pos < 0) pos = 0;
     if (pos >= s->checkpoint.len) return;
+    ds4_td_segment_end(s);   /* v1.2 capture: true lineage truncation */
     if (ds4_session_rewind_speculative(s, pos)) return;
     if (ds4_session_tp_leader(s) &&
         !ds4_tp_failed(s->engine->tp.ctx)) {
