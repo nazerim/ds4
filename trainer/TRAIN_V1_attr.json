@@ -1,0 +1,35 @@
+{
+ "protocol": {
+  "rank": 256,
+  "epochs": 6,
+  "lr": 0.0003,
+  "conf_w": 0.2,
+  "phase1_frozen": 3,
+  "train_days": [
+   "20261029-day1",
+   "20261029-day2",
+   "20261101-day4"
+  ],
+  "holdout": [
+   "20261029-day3"
+  ],
+  "note": "z = (w1[seed] + x@A) @ w2.T; A init 0; no_h eval zeros A post-training"
+ },
+ "v0_reference_top1": 0.179,
+ "v0_reference_top3": 0.28,
+ "with_h_top1": 0.2956,
+ "with_h_top3": 0.3975,
+ "with_h_auc_ge1": 0.7331,
+ "with_h_auc_ge3": 0.7833,
+ "no_h_top1": 0.1309,
+ "no_h_top3": 0.1901,
+ "no_h_auc_ge1": 0.7331,
+ "no_h_auc_ge3": 0.7833,
+ "delta_top1_from_h": 0.1647,
+ "holdout_boundary_top1": 0.7612,
+ "holdout_boundary_n": 134,
+ "holdout_boundary_ci95": [
+  0.6824,
+  0.8255
+ ]
+}

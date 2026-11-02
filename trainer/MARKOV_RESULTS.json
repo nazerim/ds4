@@ -1,0 +1,64 @@
+{
+ "protocol": {
+  "holdout": "frozen day-3; subsets nested-prefix randperm seed=0; each subset re-inits from OFFICIAL (fair curve); 2 epochs per subset point (gradient budget rises with size \u2014 knee is a joint size+epochs statement)",
+  "train_days": [
+   "20261029-day1",
+   "20261029-day2",
+   "20261101-day4"
+  ],
+  "holdout_days": [
+   "20261029-day3"
+  ]
+ },
+ "official": {
+  "train_top1": 0.128,
+  "train_top3": 0.212,
+  "holdout_top1": 0.1204,
+  "holdout_top3": 0.1824,
+  "holdout_boundary_top1": 0.4741,
+  "holdout_boundary_n": 135,
+  "holdout_plain_top1": 0.1139
+ },
+ "scaling": [
+  {
+   "frac": 0.0625,
+   "pairs": 12197,
+   "top1": 0.1228,
+   "top3": 0.1899
+  },
+  {
+   "frac": 0.125,
+   "pairs": 24395,
+   "top1": 0.1245,
+   "top3": 0.1911
+  },
+  {
+   "frac": 0.25,
+   "pairs": 48791,
+   "top1": 0.1331,
+   "top3": 0.1999
+  },
+  {
+   "frac": 0.5,
+   "pairs": 97582,
+   "top1": 0.1524,
+   "top3": 0.2337
+  },
+  {
+   "frac": 1.0,
+   "pairs": 195165,
+   "top1": 0.1742,
+   "top3": 0.2529
+  }
+ ],
+ "finetune": {
+  "holdout_top1": 0.179,
+  "holdout_top3": 0.28,
+  "holdout_boundary_top1": 0.5185,
+  "holdout_boundary_ci95": [
+   0.4349,
+   0.6011
+  ],
+  "holdout_plain_top1": 0.1727
+ }
+}

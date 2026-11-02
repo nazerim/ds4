@@ -1,0 +1,99 @@
+{
+ "protocol": {
+  "rank": 256,
+  "epochs": 12,
+  "lr": 0.0001,
+  "conf_w": 0.2,
+  "phase1_frozen": 3,
+  "wd": 0.01,
+  "logit_scale_init": 0.2,
+  "train_days": [
+   "20261029-day1",
+   "20261029-day2",
+   "20261101-day4"
+  ],
+  "holdout": [
+   "20261029-day3"
+  ],
+  "note": "z = (w1[seed] + x@A) @ w2.T * exp(log_s); A init 0; no_h eval zeros A post-training"
+ },
+ "v0_reference_top1": 0.179,
+ "v0_reference_top3": 0.28,
+ "holdout_curve": [
+  {
+   "epoch": 0,
+   "holdout_top1": 0.2835,
+   "holdout_top3": 0.398
+  },
+  {
+   "epoch": 1,
+   "holdout_top1": 0.3195,
+   "holdout_top3": 0.4337
+  },
+  {
+   "epoch": 2,
+   "holdout_top1": 0.333,
+   "holdout_top3": 0.4548
+  },
+  {
+   "epoch": 3,
+   "holdout_top1": 0.3542,
+   "holdout_top3": 0.4825
+  },
+  {
+   "epoch": 4,
+   "holdout_top1": 0.3676,
+   "holdout_top3": 0.4995
+  },
+  {
+   "epoch": 5,
+   "holdout_top1": 0.3675,
+   "holdout_top3": 0.5019
+  },
+  {
+   "epoch": 6,
+   "holdout_top1": 0.3828,
+   "holdout_top3": 0.514
+  },
+  {
+   "epoch": 7,
+   "holdout_top1": 0.3819,
+   "holdout_top3": 0.5187
+  },
+  {
+   "epoch": 8,
+   "holdout_top1": 0.3821,
+   "holdout_top3": 0.5172
+  },
+  {
+   "epoch": 9,
+   "holdout_top1": 0.3871,
+   "holdout_top3": 0.5215
+  },
+  {
+   "epoch": 10,
+   "holdout_top1": 0.3932,
+   "holdout_top3": 0.5266
+  },
+  {
+   "epoch": 11,
+   "holdout_top1": 0.3877,
+   "holdout_top3": 0.5232
+  }
+ ],
+ "with_h_top1": 0.3877,
+ "with_h_top3": 0.5232,
+ "with_h_auc_ge1": 0.7357,
+ "with_h_auc_ge3": 0.7837,
+ "no_h_top1": 0.1347,
+ "no_h_top3": 0.2025,
+ "no_h_auc_ge1": 0.7357,
+ "no_h_auc_ge3": 0.7837,
+ "delta_top1_from_h": 0.2531,
+ "holdout_boundary_top1": 0.8358,
+ "holdout_boundary_n": 134,
+ "holdout_boundary_ci95": [
+  0.7639,
+  0.889
+ ]
+}

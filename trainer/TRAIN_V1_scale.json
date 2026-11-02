@@ -1,0 +1,69 @@
+{
+ "protocol": {
+  "rank": 256,
+  "epochs": 6,
+  "lr": 0.0003,
+  "conf_w": 0.2,
+  "phase1_frozen": 3,
+  "wd": 0.01,
+  "logit_scale_init": 0.2,
+  "train_days": [
+   "20261029-day1",
+   "20261029-day2",
+   "20261101-day4"
+  ],
+  "holdout": [
+   "20261029-day3"
+  ],
+  "note": "z = (w1[seed] + x@A) @ w2.T * exp(log_s); A init 0; no_h eval zeros A post-training"
+ },
+ "v0_reference_top1": 0.179,
+ "v0_reference_top3": 0.28,
+ "holdout_curve": [
+  {
+   "epoch": 0,
+   "holdout_top1": 0.2966,
+   "holdout_top3": 0.4212
+  },
+  {
+   "epoch": 1,
+   "holdout_top1": 0.3083,
+   "holdout_top3": 0.4317
+  },
+  {
+   "epoch": 2,
+   "holdout_top1": 0.3361,
+   "holdout_top3": 0.4533
+  },
+  {
+   "epoch": 3,
+   "holdout_top1": 0.3428,
+   "holdout_top3": 0.4668
+  },
+  {
+   "epoch": 4,
+   "holdout_top1": 0.3532,
+   "holdout_top3": 0.492
+  },
+  {
+   "epoch": 5,
+   "holdout_top1": 0.3476,
+   "holdout_top3": 0.4863
+  }
+ ],
+ "with_h_top1": 0.3476,
+ "with_h_top3": 0.4863,
+ "with_h_auc_ge1": 0.7331,
+ "with_h_auc_ge3": 0.7833,
+ "no_h_top1": 0.1335,
+ "no_h_top3": 0.1998,
+ "no_h_auc_ge1": 0.7331,
+ "no_h_auc_ge3": 0.7833,
+ "delta_top1_from_h": 0.2141,
+ "holdout_boundary_top1": 0.8134,
+ "holdout_boundary_n": 134,
+ "holdout_boundary_ci95": [
+  0.7391,
+  0.8703
+ ]
+}

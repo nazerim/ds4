@@ -1,0 +1,9 @@
+{
+ "train_pos_rates": [
+  0.908466637134552,
+  0.6279333233833313
+ ],
+ "holdout_auc_ge1": 0.7398,
+ "holdout_auc_ge3": 0.7782,
+ "holdout_auc_ge1_plain": 0.7352
+}

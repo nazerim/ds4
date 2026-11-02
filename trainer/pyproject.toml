@@ -1,0 +1,11 @@
+[project]
+name = "dspark-trainer"
+version = "0.1.0"
+description = "Stage-3 trainer for DSpark Vision-Exp drafter head (fine-tune from official support GGUF on DS4_TRAIN_DUMP corpora)"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy",
+    "torch",
+    "pyarrow",
+    "pytest",
+]

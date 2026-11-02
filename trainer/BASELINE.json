@@ -1,0 +1,149 @@
+{
+ "note": "pos-gap proxies (skip-merged); engine battery = truth",
+ "rows": {
+  "20261029-day1|0-16k": {
+   "cycles": 5406,
+   "p_ge1": 0.872,
+   "p_ge3": 0.5425,
+   "tokens_per_cycle": 4.049
+  },
+  "20261029-day1|16-64k": {
+   "cycles": 13745,
+   "p_ge1": 0.9169,
+   "p_ge3": 0.642,
+   "tokens_per_cycle": 4.32
+  },
+  "20261029-day1|64-128k": {
+   "cycles": 8021,
+   "p_ge1": 1.0,
+   "p_ge3": 0.9183,
+   "tokens_per_cycle": 4.937
+  },
+  "20261029-day2|0-16k": {
+   "cycles": 4127,
+   "p_ge1": 0.827,
+   "p_ge3": 0.411,
+   "tokens_per_cycle": 4.007
+  },
+  "20261029-day2|128k+": {
+   "cycles": 29046,
+   "p_ge1": 0.9968,
+   "p_ge3": 0.8794,
+   "tokens_per_cycle": 4.734
+  },
+  "20261029-day2|16-64k": {
+   "cycles": 22034,
+   "p_ge1": 0.8847,
+   "p_ge3": 0.5654,
+   "tokens_per_cycle": 4.162
+  },
+  "20261029-day2|64-128k": {
+   "cycles": 27231,
+   "p_ge1": 0.9947,
+   "p_ge3": 0.8907,
+   "tokens_per_cycle": 4.811
+  },
+  "20261029-day3|0-16k": {
+   "cycles": 2504,
+   "p_ge1": 0.8047,
+   "p_ge3": 0.3862,
+   "tokens_per_cycle": 3.848
+  },
+  "20261029-day3|16-64k": {
+   "cycles": 4989,
+   "p_ge1": 0.8505,
+   "p_ge3": 0.4618,
+   "tokens_per_cycle": 4.097
+  },
+  "20261101-day4|0-16k": {
+   "cycles": 2523,
+   "p_ge1": 0.8228,
+   "p_ge3": 0.4332,
+   "tokens_per_cycle": 3.924
+  },
+  "20261101-day4|128k+": {
+   "cycles": 65485,
+   "p_ge1": 0.8636,
+   "p_ge3": 0.4816,
+   "tokens_per_cycle": 3.95
+  },
+  "20261101-day4|16-64k": {
+   "cycles": 12917,
+   "p_ge1": 0.8382,
+   "p_ge3": 0.4121,
+   "tokens_per_cycle": 3.758
+  },
+  "20261101-day4|64-128k": {
+   "cycles": 4571,
+   "p_ge1": 0.8291,
+   "p_ge3": 0.3999,
+   "tokens_per_cycle": 3.879
+  },
+  "20261101-day5|0-16k": {
+   "cycles": 56,
+   "p_ge1": 0.8571,
+   "p_ge3": 0.6429,
+   "tokens_per_cycle": 4.304
+  },
+  "20261101-day5|128k+": {
+   "cycles": 1547,
+   "p_ge1": 0.8908,
+   "p_ge3": 0.521,
+   "tokens_per_cycle": 4.206
+  },
+  "20261101-day6|0-16k": {
+   "cycles": 1772,
+   "p_ge1": 0.8335,
+   "p_ge3": 0.4436,
+   "tokens_per_cycle": 3.9
+  },
+  "20261101-day6|128k+": {
+   "cycles": 4410,
+   "p_ge1": 0.8451,
+   "p_ge3": 0.3964,
+   "tokens_per_cycle": 4.171
+  },
+  "20261101-day7|0-16k": {
+   "cycles": 47,
+   "p_ge1": 0.8298,
+   "p_ge3": 0.5106,
+   "tokens_per_cycle": 3.787
+  },
+  "20261101-day7|128k+": {
+   "cycles": 777,
+   "p_ge1": 0.8649,
+   "p_ge3": 0.4685,
+   "tokens_per_cycle": 4.17
+  },
+  "20261102-day8|0-16k": {
+   "cycles": 2013,
+   "p_ge1": 0.8296,
+   "p_ge3": 0.3815,
+   "tokens_per_cycle": 3.723
+  },
+  "20261102-day8|128k+": {
+   "cycles": 74933,
+   "p_ge1": 0.8927,
+   "p_ge3": 0.5422,
+   "tokens_per_cycle": 4.011
+  },
+  "20261102-day8|16-64k": {
+   "cycles": 11004,
+   "p_ge1": 0.8374,
+   "p_ge3": 0.4054,
+   "tokens_per_cycle": 3.716
+  },
+  "20261102-day8|64-128k": {
+   "cycles": 12454,
+   "p_ge1": 0.8517,
+   "p_ge3": 0.4608,
+   "tokens_per_cycle": 3.856
+  }
+ },
+ "engagement_density": {
+  "prepared_cycles": 311611,
+  "tokens_in_segments": 1377092,
+  "cycle_per_token": 0.2263,
+  "caveat": "span includes prefill jumps at segment starts (first cycle pos only); treat as upper-bound density"
+ }
+}
