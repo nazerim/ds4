@@ -48,9 +48,17 @@ Preemption under time slip: 4 early start -> 1b -> NEVER 0/2.5/3/2.
       GATE: written decision in §DECISIONS below; script = dspark/probe_labels3c.py
 - [x] S1a 22:50-23:55 CONF-ERA LABELS — DONE ~23:5x (review PASS_WITH_MINORS,
       minors fixed+slab rebuilt identical) conf slab day-13/pid53508 only.
-- [ ] S2.5 23:55-00:40 ACCEPT-PROXY EVAL HARNESS (dspark/eval3c.py):
-      conf>=.45 precision/recall + AUC vs observed accepts.
-      GATE: reproduces milestone-1 anchors AUC .7418/.7933 +- .005 on frozen replay.
+- [x] S2.5 23:55-00:40 ACCEPT-PROXY EVAL HARNESS (dspark/eval3c.py) — DONE.
+      GATE REDEFINED (defect found): original "reproduce .7418/.7933 +- .005"
+      NOT reproducible - those are TRAINED V1Head conf AUCs on stale streak
+      labels; weights/scores never persisted; official head proj needs
+      [h4096|markov256] but parity stores h only. New honest gate: (a) auc()
+      == confidence_probe.auc bit-exact incl ties [PASS 4/4], (b) trainer-seen
+      rates re-derived from slab + uncond chain reconciled [PASS:
+      .802/.744/.728/.735 + .802/.744/.568/.521], (c) per-slot gate-stats +
+      positional-prior baseline for S3. "Beat milestone-1 .7418/.7933" lives
+      on as S3's aspirational ceiling note; S3's REAL bar = beat per-slot
+      positional-prior AUC (computed in same run).
 - [ ] S3 00:40-02:45 CONF-ONLY CALIBRATION RUN: BCE on accept labels, trainable
       confidence proj (parity conf rows in, NO trunk). Tag confcal1.
       GATE: held-out AUC >= .7418/.7933. (Agent builds S5 repack tool during run.)
@@ -111,14 +119,19 @@ Preemption under time slip: 4 early start -> 1b -> NEVER 0/2.5/3/2.
 3. MARKOV LABELS era-AGNOSTIC: writer dumps checkpoint.v[pos+k] = committed
    stream (ds4.c:76298-76311, lineage-rewind guard); seed==labels[0]=1.0,
    chain 100% both eras. Era rule (pid>=53508) for CONF labels only.
-4. EXACT-ERA PER-SLOT RATES (S1a review FINAL, index-join kept n=30,205,
-   byte-recomputed two-pass): masked-BCE positive rate (prior init / class
-   weights) = .802/.744/.568/.521 (slots 0-3); stored-row positive density
-   = .802/.597/.494/.430; uncond chain P(>=d accepts) = .802/.597/.339/.176
-   -> E[depth]~2.9 incl bonus. The reviewer's earlier .465/.238 set =
-   off-by-one artifact (cap-match cohorts dropped), SUPERSEDED. Marginals
-   .807/.641/.556/.512 remain contaminated-by-design - do not use. Seed-era
-   marginals .978/.955/.934/.920 = opportunistic era, conf labels NOT used.
+4. EXACT-ERA PER-SLOT RATES (S2.5 RECONCILED - one dataset, TWO stats, do
+   not mix): (i) TRAINER-SEEN BCE row rate = P(commit | stored row at slot
+   d) = .802/.744/.728/.735 (dens 30205/24217/14059/7254) <- use THIS for
+   class weights / bias init, it is what gradients actually see (deep slots
+   exist only in long windows -> over-represent acceptance); (ii)
+   UNCONDITIONAL accept-chain P(a>=d+1 | a>=d) = .802/.744/.568/.521
+   (pool-wide, from k_lab) <- headline accept-quality stat. Eval harness
+   selftest derives BOTH from the slab and matches. Stored-row positive
+   density .802/.597/.494/.430; uncond chain P(>=d) .802/.597/.339/.176.
+   Historical: reviewer's S0-review .465/.238 set was an off-by-one
+   artifact (superseded in S1a review); marginals .807/.641/.556/.512
+   contaminated-by-design. Seed-era .978/.955/.934/.920 = opportunistic era,
+   conf labels NOT used.
 5. ENGINE QUIRK keep (mechanism verified): full-window commit = accepts+1
    (87-90% at kl=4); reject replays replacement + successor sample =
    accepts+2 (74% at kl=0) - verify2-always alternative falsified (it would
