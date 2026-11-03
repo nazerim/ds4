@@ -7,6 +7,10 @@ with w = official confidence_proj (1,4352) = [w_h 4096 | w_m 256], and
     prev_tok_0 = seed token (labels[0]; engine `first_prev_token` = the
                  committed token at pos, ds4.c:80320-80324),
     prev_tok_d = props[d-1] (engine prev_token = proposal[draft-1]).
+TRAP (S4b review): the PARITY file's hdr.seed is NOT this seed —
+ds4.c:~76204 writes hdr.seed = props[0], the first DRAFT token. Joining
+prev-token reconstruction on the parity seed field gives a silent
+off-by-one; the seed must come from the RECS header (kept_cycles does).
 Official weights: mtp_nonexpert_f32.npz (dequant bit-identity to the
 support GGUF proven in S5). Labels/features: conf_s1a_20261103.npz.
 

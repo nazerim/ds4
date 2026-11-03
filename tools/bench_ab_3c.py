@@ -53,11 +53,37 @@ TOOL_PROMPTS = [
 STATS_RE = re.compile(
     r"ds4: DSpark stats cycles=(\d+) first_tokens=(\d+) proposed=(\d+) "
     r"accepted_draft=(\d+) accept_rate=([\d.]+)% avg_accept=([\d.]+)")
-# ds4_format_len_hist prints e.g. "accepted_len_hist=0,900,450,12,1" -
-# capture the line's accepted_len_hist specifically (draft_len_hist must
-# NOT match: the [^=] class cannot cross the '=' of the other field).
-ACCEPT_HIST_RE = re.compile(r"accepted_len_hist=([0-9,]+)")
-DRAFT_HIST_RE = re.compile(r"draft_len_hist=([0-9,]+)")
+# REAL engine format (ds4_format_len_hist, ds4.c:75285-75300): "k:count"
+# PAIRS with zero bins skipped, e.g. accepted_len_hist=1:900,2:450,3:120,
+# 4:40,5:12 - a [0-9,] class truncates at the first ':' and captures bin
+# INDICES (S6 re-check MAJOR; v1 synthetic comma-only exemplar hid it).
+# Bins 0..16 (DS4_DSPARK_MAX_BLOCK_SIZE=16).
+ACCEPT_HIST_RE = re.compile(r"accepted_len_hist=([0-9:,\s]+)")
+DRAFT_HIST_RE = re.compile(r"draft_len_hist=([0-9:,\s]+)")
+N_HIST_BINS = 17
+
+
+def parse_len_hist(s):
+    """'k:v,...' pair format -> 17-bin list; tolerates legacy comma-only
+    positional lists. Unparseable garbage returns None (loud upstream)."""
+    bins = [0] * N_HIST_BINS
+    seen = False
+    for j, part in enumerate(s.strip().split(",")):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            if ":" in part:
+                k, v = part.split(":", 1)
+                ki, vi = int(k), int(v)
+            else:                       # legacy positional
+                ki, vi = j, int(part)
+        except ValueError:
+            return None
+        if 0 <= ki < N_HIST_BINS:
+            bins[ki] += vi
+            seen = True
+    return bins if seen else None
 
 
 def http_json(port, path, body=None, timeout=600):
@@ -118,14 +144,20 @@ def parse_stats(log_path, start_offset):
             cy, _ft, prop, accd, arate, aacc = m.groups()
             ah = ACCEPT_HIST_RE.search(line)
             dh = DRAFT_HIST_RE.search(line)
+            alh = parse_len_hist(ah.group(1)) if ah else None
+            dlh = parse_len_hist(dh.group(1)) if dh else None
+            if ah and alh is None:
+                raise SystemExit(f"unparseable accepted_len_hist: "
+                                 f"{ah.group(1)!r} - check engine format")
+            if dh and dlh is None:
+                raise SystemExit(f"unparseable draft_len_hist: "
+                                 f"{dh.group(1)!r} - check engine format")
             out.append({"cycles": int(cy), "proposed": int(prop),
                         "accepted_draft": int(accd),
                         "accept_rate_pct": float(arate),
                         "avg_accept": float(aacc),
-                        "accept_len_hist": [int(v) for v in ah.group(1).split(",")]
-                        if ah else None,
-                        "draft_len_hist": [int(v) for v in dh.group(1).split(",")]
-                        if dh else None})
+                        "accept_len_hist": alh,
+                        "draft_len_hist": dlh})
     if not out:
         raise SystemExit(
             "ZERO 'ds4: DSpark stats' lines in window: is the engine "
@@ -140,10 +172,10 @@ def parse_stats(log_path, start_offset):
 
 
 def hist_add(hists):
-    tot = [0] * 5
+    tot = [0] * N_HIST_BINS
     for h in hists:
         if h:
-            for i, v in enumerate(h[:5]):
+            for i, v in enumerate(h[:N_HIST_BINS]):
                 tot[i] += v
     return tot
 

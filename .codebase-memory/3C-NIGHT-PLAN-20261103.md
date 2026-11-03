@@ -108,18 +108,18 @@ Preemption under time slip: 4 early start -> 1b -> NEVER 0/2.5/3/2.
 - [x] S6  (gap filler) AB-PROTOCOL doc + bench script (no execution) —
       v1 REWORKED ~04:4x after independent review (BLOCKER: DSPARK_MODEL
       lever dead; port 8001; byte-offset windowing; stats env mandatory;
-      probe gate; tool prompt; tok/s directional). v2 in
-      .codebase-memory/AB-PROTOCOL-3C-20261104.md. RE-REVIEW PENDING.
-      MUST encode (from S5 review): (1) swap strictly copy-based, record
-      output sha next to official sha in ledger; (2) engine binds
-      confidence_proj AT BOOT -> swap requires restart: quiesce collector
-      before restart, re-anchor comparison window post-boot (no mid-run
-      paired stats across swap); (3) heads keep deployable form: linear-
-      4096, NO bias, zero markov half until S4 features land; (4) gate
-      semantics = sigmoid(logit) >= .45 (not logit); (5) judge live A/B on
-      acceptance-length histogram + coverage, not AUC alone (gate-region
-      under-prediction ~1.6pp); (6) q8_0 golden tests must stay green
-      before any repack tool change.
+      probe gate; tool prompt; tok/s directional). v3 in
+      .codebase-memory/AB-PROTOCOL-3C-20261104.md. RE-REVIEW CLOSED
+      ~06:5x PASS_WITH_MINORS: all REWORK blockers confirmed genuinely
+      closed (lever chain -> DSPARK_PATHS[1] line 204, repo-root, banner
+      guard, rollback); ONE new MAJOR found + FIXED (bench hist parse vs
+      REAL 'k:count' pair format, 17 bins - E2E-tested vs engine-shaped
+      line); doc updated to arm B = confcal2 (sha 5c0286dd..) + coverage
+      redefined as DSpark engagement + conservative-gate watch item.
+      MUST-encode checklist from S5 review: all 6 items present in v3
+      (copy-based swap + dual shas; boot-bind restart rule; deployable
+      form (now confcal2 engine form); sigmoid>=.45 semantics; judge on
+      accept-LEN hist + engagement not AUC; q8_0 goldens green).
 - [ ] R   07:15 ENGINE RESTORE (see policy) + night report section below.
 
 ## SLOTS: RESULTS (fill live)
@@ -175,10 +175,13 @@ Preemption under time slip: 4 early start -> 1b -> NEVER 0/2.5/3/2.
   "+1.60pp top3" mixed plateau-vs-FINAL bases, corrected here; paired
   W/L 238/140 exact; CI [+.0080,+.0183]; codes8 bit-identity extended to
   day-8+day-12; pool 427,162+30,209=457,371 exact).
-  NOT claimable: "beyond SEED noise" (paired CI bounds HOLDOUT-SAMPLING
-  noise between two frozen heads; run-to-run replication untested ->
-  s4full2 second-seed run dispatched); boundary-strata superiority
-  (.8582 [.789,.907] vs anchor .8657 [.798,.913], n=134 = noise).
+  NOT claimable: boundary-strata superiority (.8582 [.789,.907] vs
+  anchor .8657 [.798,.913], n=134 = noise). "beyond SEED noise" WAS
+  unclaimable at s4full1 (paired CI bounds holdout-sampling noise only)
+  -> NOW EARNED via s4full2 replication (see SEED REPLICATION below +
+  review S7 item 4: "two independent seed runs both beat the .4524
+  anchor, statistically indistinguishable from each other (-0.13pp,
+  p=0.28), run-to-run noise ~0.1pp << 1.3pp lift").
   LEAK-BOUND: day3<->train exact-tuple leak 6 rows (.08%); differential
   vs anchor <= 8 day-13 context rows = <=.107pp absurd-worst-case ->
   does not threaten the delta. Protocol note: cos32clean3 is NOT a
@@ -227,9 +230,18 @@ Preemption under time slip: 4 early start -> 1b -> NEVER 0/2.5/3/2.
   (under-prediction now 2.5pp - watch item for the AB gate). Export:
   w_full_1x4352 (1,4352) b=0, markov half ALL 256 nonzero (norm .64);
   saved scores == engine-form recompute to 5.3e-5 (f16 feature storage).
-  ARM-B CANDIDATE pending review: repack would regenerate
-  support_AB.gguf from confcal2 weights (current sha 3365e6b4 =
-  confcal1b).
+  Review CLOSED ~06:5x PASS (all claims reproduced: independent pairing
+  re-derivation from raw parity bytes incl. hdr.seed=props[0] trap
+  observed; repack proof on the arm-B build 4,563 changed bytes in the
+  4,624 B window, dequant max|delta| 6.37e-4, AUC through DEQUANT bytes
+  .8523 with 6/8992 gate flips - quote deployed eval from dequant; CIs
+  cover val-sampling noise only, single-pid single-day slab -> cross-era
+  claim is provisional-pending-live). AB-GATE-RULING: ARM B = confcal2,
+  blade file /Volumes/FireCuda520/ds4-train/repack_test/
+  support_AB_confcal2.gguf sha 5c0286dd..701013 (reviewer-built,
+  deterministic repack confirmed bit-identical to /tmp build); fallback
+  confcal1b sha 3365e6b4..72adc6cf; official 0807a67f.. unchanged
+  re-verified after proof runs.
 - S5: tools/repack_dspark_tensor.py (in-place size-preserving q8_0->q8_0 /
   f32->f32 swap on COPY; refuses --out==--in). Proofs on official support
   gguf (sha 0807a67f..., NEVER written): (1) roundtrip read+rewrite orig
@@ -242,7 +254,14 @@ Preemption under time slip: 4 early start -> 1b -> NEVER 0/2.5/3/2.
   8992 (.02%), max|score delta| .0027 -> q8_0 requant calibration-silent,
   no f32 offset-rewrite needed. Artifact: /Volumes/FireCuda520/ds4-train/
   repack_test/support_confcal1b.gguf (blade-local, NOT committed).
-- S6:
+- S6: AB-PROTOCOL v3 CLOSED (review PASS_WITH_MINORS ~06:5x). Arms: A =
+  official (boot via pristine script), B = confcal2 (patched-script copy,
+  DSPARK_PATHS[1] -> support_AB_confcal2.gguf sha 5c0286dd..701013);
+  order A->B->A->B, 2nd cycle scored; P0 probe gate (>=1 stats line,
+  cycles>0, tool prompt) BEFORE scoring; hist parse fixed vs real
+  k:count format (17 bins); decision rule v2 + coverage = DSpark
+  ENGAGEMENT definition + keep-.45 conservative-gate watch. bench script
+  E2E-parse-tested offline; NEVER executed against live engine tonight.
 - R:
 
 ## DECISIONS
@@ -384,6 +403,17 @@ pos-unique. Probe A4 gap_accept column formulaic at d=0 (annotated in code).
   val .8523 > official .8360 (+1.63pp) > confcal1b .8453 (+0.70pp),
   beats official on ALL 4 slots, ECE .0115. See SLOTS:RESULTS S4b.
   Review + S6 v2 re-check dispatched together.
+- 06:5x S4b + S6 RE-CHECK REVIEW: S4b PASS (every number reproduced,
+  pairing byte-verified, repack end-to-end proven); S6 PASS_WITH_MINORS
+  (new MAJOR: bench hist parse vs real k:count format -> FIXED inline:
+  pair regex + parse_len_hist 17 bins + hist_add widened + loud garbage
+  error; E2E test vs engine-shaped fprintf line PASS). AB-GATE-RULING:
+  arm B = confcal2 (blade support_AB_confcal2.gguf sha 5c0286dd..701013,
+  deterministic-repack confirmed), confcal1b fallback; keep .45,
+  conservative-gate watch wording -> protocol doc v3. Doc folds done:
+  AB-PROTOCOL v3 (arms, shas, engagement-coverage, watch item, hist
+  format), official3c.py parity-seed trap comment, ledger S4b/S6 CLOSED,
+  S4 claim upgraded to two-seed wording.
 - 05:5x S4 SEED REPLICATION (s4full2, seed 1): plateau .4646/.6103,
   paired vs anchor +1.17pp CI [+0.67,+1.71] p=9.2e-6; vs s4full1
   -0.13pp p=0.28. Two seeds both beat anchor; seed band ~0.1pp.
