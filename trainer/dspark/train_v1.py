@@ -35,6 +35,7 @@ import json
 import os
 import struct
 import sys
+import time
 
 import numpy as np
 import torch
@@ -52,10 +53,13 @@ CTL = {128806, 128807, 128808, 128809, 128810, 128811, 128812, 128813,
        128814, 128825, 128829}
 
 
-def load_day(day, quarantine=None):
+def load_day(day, quarantine=None, codes8=False):
     """Return (X fp8-decoded f32 [N,12288], seed, y, ctl, streak) for the
     day's usable records (nfeat=3, n_label>=2, streak<clamp, pos-known).
-    quarantine: loaded dspark.loops json -> excluded records are skipped."""
+    quarantine: loaded dspark.loops json -> excluded records are skipped.
+    codes8 (S4 night patch): keep X as raw e4m3 uint8 codes [N,12288]
+    (4x smaller slab; decode_e4m3 applied per batch - pure function of
+    the bytes, so batches are BIT-IDENTICAL to load-time decoding)."""
     from .loops import file_exclusions
     xs, seeds, ys, ctls, sts = [], [], [], [], []
     for rp in sorted(glob.glob(os.path.join(CORPUS, day, "train_pid*.recs"))):
@@ -75,7 +79,10 @@ def load_day(day, quarantine=None):
                 continue
             feats = bytes(mm[i * RECORD_BYTES + HEADER_BYTES:
                              (i + 1) * RECORD_BYTES])
-            xs.append(np.asarray(decode_e4m3(feats), dtype=np.float32))
+            if codes8:
+                xs.append(np.frombuffer(feats, dtype=np.uint8))
+            else:
+                xs.append(np.asarray(decode_e4m3(feats), dtype=np.float32))
             seeds.append(seed)
             ys.append(r[7])                       # labels[1] = next token
             ctls.append(any(t in CTL for t in r[6:11]) or seed in CTL)
@@ -120,11 +127,14 @@ def main():
         if "--hold-days" in sys.argv else HOLD_DAYS
     trunk = sys.argv[sys.argv.index("--trunk") + 1] \
         if "--trunk" in sys.argv else "lin"
+    codes8 = "--codes8" in sys.argv     # S4 night: uint8 e4m3 slab (4x RAM)
+    ckpt = "--ckpt" in sys.argv         # S4 night: per-epoch checkpoint
     src = np.load(os.path.join(TENSORS, "mtp_nonexpert_f32.npz"))
     print(f"loading corpora (peak ~2x slab)... dev={dev} smoke={smoke} "
           f"trunk={trunk} train={train_days} hold={hold_days}")
     Xtr, Str, Ytr, Ctr, Ltr = load_day_days(train_days, cap=3000 if smoke else 0,
-                                            quarantine=quarantine)
+                                            quarantine=quarantine,
+                                            codes8=codes8)
     Xho, Sho, Yho, Cho, Lho = load_day_days(hold_days, cap=1500 if smoke else 0,
                                             quarantine=quarantine)
     if smoke:
@@ -134,6 +144,15 @@ def main():
     xtr = torch.from_numpy(Xtr)              # CPU slab; batches move to dev
     slabs_ho = torch.from_numpy(Xho)
     del Xtr, Xho
+
+    def to_f32(xb):
+        """Per-batch e4m3 decode when the slab stores uint8 codes; no-op
+        otherwise. decode_e4m3 is a pure function of the bytes, so decoded
+        batches are BIT-IDENTICAL to load-time decoding (anchor path)."""
+        if xb.dtype != torch.uint8:
+            return xb
+        flat = decode_e4m3(memoryview(xb.numpy().reshape(-1)))
+        return torch.from_numpy(flat.reshape(xb.shape))
     W1 = torch.from_numpy(
         src["mtp.2.markov_head.markov_w1.weight"])          # [V,256]
     W2 = torch.from_numpy(
@@ -161,7 +180,7 @@ def main():
         c_scores = []
         with torch.no_grad():
             for i in range(0, len(slabs_ho), bs):
-                xb = slabs_ho[i:i + bs].to(dev)
+                xb = to_f32(slabs_ho[i:i + bs]).to(dev)
                 z, c1, c3 = model(xb, torch.from_numpy(Sho[i:i + bs]).to(dev))
                 yb = torch.from_numpy(Yho[i:i + bs]).to(dev)
                 m3 = z.topk(3, dim=-1).indices
@@ -183,6 +202,10 @@ def main():
 
     cosine = "--cosine" in sys.argv
     curve = []
+    ckpt_dir = os.path.dirname(os.path.dirname(__file__))
+    ckpt_json = os.path.join(ckpt_dir, f"TRAIN_V1{suffix}_PARTIAL.json")
+    ckpt_pt = os.path.join(ckpt_dir, f"v1_head{suffix}_PARTIAL.pt")
+    t_ep = time.time()
     for ep in range(epochs):
         if ep == phase1:                     # phase 2: unfreeze markov
             g_w["lr"] = lr
@@ -199,7 +222,7 @@ def main():
         tot = ce_tot = cf_tot = 0.0
         for i in range(0, N, bs):
             idx = perm[i:i + bs]
-            xb = xtr[idx].to(dev)
+            xb = to_f32(xtr[idx]).to(dev)
             sb = Str_[idx].to(dev)
             yb = Ytr_[idx].to(dev)
             t1b, t3b = T1_[idx].to(dev), T3_[idx].to(dev)
@@ -217,10 +240,28 @@ def main():
             cf_tot += float(bce.detach()) * m
         he = h_eval()
         curve.append({"epoch": ep, "holdout_top1": round(he["top1"], 4),
-                      "holdout_top3": round(he["top3"], 4)})
+                      "holdout_top3": round(he["top3"], 4),
+                      "epoch_s": round(time.time() - t_ep, 1)})
         print(f"  epoch {ep}: loss {tot/N:.4f} (ce {ce_tot/N:.4f}, "
               f"bce {cf_tot/N:.4f}) | holdout top1 {he['top1']:.4f} "
-              f"top3 {he['top3']:.4f}", flush=True)
+              f"top3 {he['top3']:.4f} ({time.time() - t_ep:.0f}s)",
+              flush=True)
+        t_ep = time.time()
+        if ckpt:
+            # atomic per-epoch checkpoint (hard-stop safety; the FINAL
+            # TRAIN_V1{suffix}.json below is still written only on
+            # completion, so partial curves are clearly labelled)
+            part = {"incomplete": True, "last_epoch": ep,
+                    "pool": int(N), "holdout_curve": curve,
+                    "note": "live checkpoint; see v1_head*_PARTIAL.pt"}
+            tmp = ckpt_json + ".tmp"
+            with open(tmp, "w") as fd:
+                json.dump(part, fd, indent=1)
+            os.replace(tmp, ckpt_json)
+            tmp = ckpt_pt + ".tmp"
+            torch.save({k: v.detach().cpu()
+                        for k, v in model.state_dict().items()}, tmp)
+            os.replace(tmp, ckpt_pt)
 
     # FINAL: ablation with the h-context (full model) and without (proj
     # zeroed post-training) — the DELTA is the tap-information content.
@@ -310,10 +351,10 @@ class V1Head(nn.Module):
         return z, c[:, 0], c[:, 1]
 
 
-def load_day_days(days, cap=0, quarantine=None):
+def load_day_days(days, cap=0, quarantine=None, codes8=False):
     acc = [[], [], [], [], []]
     for d in days:
-        parts = load_day(d, quarantine=quarantine)
+        parts = load_day(d, quarantine=quarantine, codes8=codes8)
         for a, p in zip(acc, parts):
             a.append(p[:cap] if cap else p)
         if cap and all(len(x) >= cap for x in acc):

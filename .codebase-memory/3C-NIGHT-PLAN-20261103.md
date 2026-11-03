@@ -82,8 +82,18 @@ Preemption under time slip: 4 early start -> 1b -> NEVER 0/2.5/3/2.
       nl<2 sentinels next=-1, mask by mk_valid), 264,932 quarantine-
       excluded (ledger initially said 266,952 - reviewer corrected);
       provenance cols mk_file/mk_ridx; spot audit 6/6 vs raw.
-- [ ] S4  06:45-07:15 JOINT RUN START — ONLY if S2 all green AND S3 green.
+- [~] S4  06:45-07:15 JOINT RUN START — ONLY if S2 all green AND S3 green.
       Checkpointed/epoch, hard 07:15 stop, morning = partial epoch curve vs .4529.
+      STARTED EARLY ~04:0x (S4 does NOT need the trunk: anchor trainer
+      train_v1 = recs taps + markov bilinear; S2 numeric gates green; the
+      gradable-path fixes under re-verify do not gate S4). Run s4full1:
+      train_v1 anchor recipe VERBATIM (phase1 4, 32 ep, lr 3e-5 cosine,
+      wd .01, trunk lin, rank 256, conf_w .2) on pool = all sealed days
+      ex day-3 (457,371 pairs, quarantine 20261103) vs frozen day-3
+      holdout. New flags: --codes8 (uint8 e4m3 slab 5.23 GB vs 20.9 GB
+      f32, BIT-IDENTICAL decode proven on day-5 full; L0 coexist with
+      engine) + --ckpt (atomic per-epoch TRAIN_V1_s4full1_PARTIAL.json +
+      v1_head_s4full1_PARTIAL.pt; hard-stop safe). Log /tmp/s4full1.log.
 - [x] S5  (inside S3/S4 compute windows) REPACK TOOL on COPY of support gguf:
       extract -> re-insert -> file sha256-identical proof; layout ds4.c:6113.
       DONE ~00:5x tools/repack_dspark_tensor.py: roundtrip sha256 identity
