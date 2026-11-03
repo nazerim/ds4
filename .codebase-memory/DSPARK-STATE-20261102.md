@@ -267,6 +267,10 @@ Extraction: /Volumes/FireCuda520/ds4-train/tensors-20261101/
 1. DONE: cos32x15 -> data-bound confirmed (§3, w-loop caveat). Next scaling point at
    ~600k pairs (2x of x15; ~4-6 heavy workdays at 100k/day soak) - one
    command when pool is there: same protocol, --out-tag cos32x2.
+1M. NEXT LANE = 3c TRAINING: read .codebase-memory/3C-HANDOFF-20261103.md
+    (sole cold-start guide: hard-won facts, era rule, label pipeline ->
+    torch port -> conf-only calibration first -> joint run -> Stage 4).
+    Gates A+B closed evidence: MILESTONE2-GATEA-RESULTS-20261103.md.
 1M. MILESTONE-2 GATES CLOSED (Nov-03 ~20:00): GATE A + GATE B both
     CONDITIONAL PASS - see MILESTONE2-GATEA-RESULTS-20261103.md (mirror_
     trunk.py full trunk forward verified: slot0 conf cos 0.990; proposal

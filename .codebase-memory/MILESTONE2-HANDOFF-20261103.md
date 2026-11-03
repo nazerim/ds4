@@ -1,7 +1,8 @@
 # MILESTONE-2-HANDOFF-20261103 (rev2, code-review folded) — trunk replay knowledge + plan
->>> STATUS 20:00: GATE A + GATE B CONDITIONAL PASS; mirror_trunk.py is the
-    live verified forward; next lane = 3c torch port. Results + all
-    semantics: MILESTONE2-GATEA-RESULTS-20261103.md (authoritative).
+>>> STATUS 21:50: GATES A+B CLOSED; this file remains the FORWARD-MATH
+    spec (§7/§8/§8b/§9) for the torch port. Mission next lane + everything
+    else: 3C-HANDOFF-20261103.md (cold-start guide). Gate evidence:
+    MILESTONE2-GATEA-RESULTS-20261103.md.
 Cold-start read order: THIS FILE -> DSPARK-STATE-20261102.md (live state/
 ledger/gotchas) -> PLAN-TRAINER-20261101.md (milestone-1 result + sessions
 1/2) -> CAPTURE-SCHEMA.md -> this file's rev1 was independently reviewed
