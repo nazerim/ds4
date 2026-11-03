@@ -82,18 +82,21 @@ Preemption under time slip: 4 early start -> 1b -> NEVER 0/2.5/3/2.
       nl<2 sentinels next=-1, mask by mk_valid), 264,932 quarantine-
       excluded (ledger initially said 266,952 - reviewer corrected);
       provenance cols mk_file/mk_ridx; spot audit 6/6 vs raw.
-- [~] S4  06:45-07:15 JOINT RUN START — ONLY if S2 all green AND S3 green.
+- [x] S4  06:45-07:15 JOINT RUN START — ONLY if S2 all green AND S3 green.
       Checkpointed/epoch, hard 07:15 stop, morning = partial epoch curve vs .4529.
-      STARTED EARLY ~04:0x (S4 does NOT need the trunk: anchor trainer
-      train_v1 = recs taps + markov bilinear; S2 numeric gates green; the
-      gradable-path fixes under re-verify do not gate S4). Run s4full1:
-      train_v1 anchor recipe VERBATIM (phase1 4, 32 ep, lr 3e-5 cosine,
-      wd .01, trunk lin, rank 256, conf_w .2) on pool = all sealed days
-      ex day-3 (457,371 pairs, quarantine 20261103) vs frozen day-3
-      holdout. New flags: --codes8 (uint8 e4m3 slab 5.23 GB vs 20.9 GB
-      f32, BIT-IDENTICAL decode proven on day-5 full; L0 coexist with
-      engine) + --ckpt (atomic per-epoch TRAIN_V1_s4full1_PARTIAL.json +
-      v1_head_s4full1_PARTIAL.pt; hard-stop safe). Log /tmp/s4full1.log.
+      COMPLETE ~04:2x (started early ~04:0x; S4 does NOT need the trunk:
+      anchor trainer train_v1 = recs taps + markov bilinear; S2 numeric
+      gates green; the gradable-path fixes under re-verify do not gate
+      S4). Run s4full1: train_v1 anchor recipe VERBATIM (phase1 4, 32 ep,
+      lr 3e-5 cosine, wd .01, trunk lin, rank 256, conf_w .2) on pool =
+      all sealed days ex day-3 (457,371 pairs, quarantine 20261103) vs
+      frozen day-3 holdout. New flags: --codes8 (uint8 e4m3 slab 5.23 GB
+      vs 20.9 GB f32, BIT-IDENTICAL decode proven on day-5 full; L0
+      coexist with engine) + --ckpt (atomic per-epoch PARTIALs; unused -
+      run finished). RESULT: plateau e24-31 top1 .4652 vs anchor .4524
+      (+1.28pp), top3 .6110 vs .5950; PAIRED vs anchor head on same 7,492
+      holdout: +1.31pp, boot CI [+0.80,+1.82], sign p<1e-5. See
+      SLOTS:RESULTS S4 + trainer/TRAIN_V1_s4full1.json.
 - [x] S5  (inside S3/S4 compute windows) REPACK TOOL on COPY of support gguf:
       extract -> re-insert -> file sha256-identical proof; layout ds4.c:6113.
       DONE ~00:5x tools/repack_dspark_tensor.py: roundtrip sha256 identity
@@ -101,10 +104,10 @@ Preemption under time slip: 4 early start -> 1b -> NEVER 0/2.5/3/2.
       independent review CLOSED PASS_WITH_MINORS ~01:1x (minors fixed,
       q8_0 goldens pinned).
 - [x] S6  (gap filler) AB-PROTOCOL doc + bench script (no execution) —
-      WRITTEN ~02:1x .codebase-memory/AB-PROTOCOL-3C-20261104.md (six S5-
-      review constraints encoded) + tools/bench_ab_3c.py (stdlib client,
-      tok/s + windowed DSpark-stats parse). NOT EXECUTED; independent
-      review PENDING (protocol soundness).
+      v1 REWORKED ~04:4x after independent review (BLOCKER: DSPARK_MODEL
+      lever dead; port 8001; byte-offset windowing; stats env mandatory;
+      probe gate; tool prompt; tok/s directional). v2 in
+      .codebase-memory/AB-PROTOCOL-3C-20261104.md. RE-REVIEW PENDING.
       MUST encode (from S5 review): (1) swap strictly copy-based, record
       output sha next to official sha in ledger; (2) engine binds
       confidence_proj AT BOOT -> swap requires restart: quiesce collector
@@ -159,7 +162,17 @@ Preemption under time slip: 4 early start -> 1b -> NEVER 0/2.5/3/2.
   33 nl1; S4 rules: mask mk_valid==1; split keys (mk_file, conv) with conv
   via mk_ridx->idx.jsonl join (bare conv ids COLLIDE across pids); 422
   rows (0.09%) cross-file conversation-continuity residue accepted+noted.
-- S4:
+- S4: s4full1 DONE ~04:2x (32 epochs, 48 s/epoch avg, /tmp/s4full1.log):
+  plateau e24-31 top1 mean .4652 (range .4628-.4666) vs anchor cos32clean2
+  plateau .4524 -> +1.28pp; top3 .6110 vs .5950 -> +1.60pp; zero plateau
+  overlap. PAIRED per-pair eval vs the ANCHOR HEAD (v1_head_cos32clean2.pt
+  reproduces .4529 on the same 7,492-pair day-3 holdout): s4full1 .4660,
+  delta +1.31pp, bootstrap 95% CI [+0.80,+1.82]pp, 238W/140L, sign p<1e-5
+  (/tmp/s4_paired.json) -> beyond seed noise. delta_from_h .3275 NEW MAX
+  (prev .3185); no_h .1384 (co-adaptation, not deployed); boundary .8582
+  n=134 CI .789-.907 (anchor .8657 max, consistent); conf proxies
+  .7319/.7785 vs anchor .742/.793 (streak-proxy heads, NOT deployable;
+  deploy conf = confcal1b). Review pending.
 - S3b: OFFICIAL-HEAD REPLAY (dspark/official3c.py, run_officialreplay1/):
   engine-faithful replay of the official conf head on the S1a slab
   ([h_d | markov_w1(prev_tok_d)], prev_0=seed, prev_d=props[d-1], code
@@ -302,3 +315,18 @@ pos-unique. Probe A4 gap_accept column formulaic at d=0 (annotated in code).
   ledger corrected 266,952->264,932; era-agnostic claim holds empirically
   incl. seed-batch pids. S4 consumption rules pinned (see SLOTS:RESULTS).
   S1b DONE.
+- 04:0x-04:2x S4 JOINT RUN s4full1 COMPLETE in 26 min (48 s/epoch, full
+  32-epoch curve): plateau top1 .4652 / top3 .6110 vs anchor .4524/.5950;
+  PAIRED vs anchor head on same day-3 holdout +1.31pp CI [+0.80,+1.82]
+  p<1e-5 -> beats .4529 BAR with proper stats. delta_from_h .3275 new max.
+- 04:4x S6 INDEPENDENT REVIEW: REWORK - BLOCKER DSPARK_MODEL lever dead
+  (ds4-server.sh:59 clobber + start_server override: arms would be
+  identical); --since windowing silently dead (log ts has no year);
+  bench hit wrong port (8002=qwen no-DSpark; collect=8001); stats env
+  never set in history. ALL FOLDED into v2 (patched-script-copy boot
+  lever, byte-offset windowing, 8001 + /v1/models discovery, stats env
+  both arms, P0 probe gate, tool prompt, tok/s demoted, offline
+  re-baseline). Re-review dispatched.
+- 04:4x S2 FIX RE-VERIFY GREEN: gradable smoke PASS (T3/T4 grads nonzero,
+  RSS 6.99 GB), selfcheck PASS (gradcheck 8/8), GATE A rerun 6-dp
+  IDENTICAL to frozen baseline. S2 DONE.
