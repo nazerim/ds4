@@ -127,6 +127,8 @@ def main():
         if "--hold-days" in sys.argv else HOLD_DAYS
     trunk = sys.argv[sys.argv.index("--trunk") + 1] \
         if "--trunk" in sys.argv else "lin"
+    seed = int(sys.argv[sys.argv.index("--seed") + 1]) \
+        if "--seed" in sys.argv else 0     # 0 = anchor-identical trajectory
     codes8 = "--codes8" in sys.argv     # S4 night: uint8 e4m3 slab (4x RAM)
     ckpt = "--ckpt" in sys.argv         # S4 night: per-epoch checkpoint
     src = np.load(os.path.join(TENSORS, "mtp_nonexpert_f32.npz"))
@@ -200,6 +202,7 @@ def main():
             d["scores"] = torch.cat(c_scores).numpy()
         return d
 
+    torch.manual_seed(seed)                # after parse (0 = anchor path)
     cosine = "--cosine" in sys.argv
     curve = []
     ckpt_dir = os.path.dirname(os.path.dirname(__file__))
@@ -218,7 +221,8 @@ def main():
                 g_w["lr"] = lr * f
             elif phase1:
                 g_w["lr"] = 0.0
-        perm = torch.randperm(N, generator=torch.Generator().manual_seed(ep))
+        perm = torch.randperm(N, generator=torch.Generator().manual_seed(
+            seed * 100000 + ep))           # seed=0 => anchor's manual_seed(ep)
         tot = ce_tot = cf_tot = 0.0
         for i in range(0, N, bs):
             idx = perm[i:i + bs]
@@ -282,6 +286,7 @@ def main():
     cy = np.stack([(Lho >= 1).astype(float), (Lho >= 3).astype(float)], 1)
     r = {"protocol": dict(rank=rank, epochs=epochs, lr=lr, conf_w=conf_w,
                           phase1_frozen=phase1, wd=wd, cosine=cosine,
+                          seed=seed,
                           trunk=trunk,
                           cli=list(sys.argv[1:]),
                           logit_scale_init=0.2,

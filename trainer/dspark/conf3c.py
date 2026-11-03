@@ -8,16 +8,26 @@ ZERO - a zero block is layout-valid and provably immune to any
 engine-side markov-feature uncertainty. The markov half can be retrained
 in S4 once the slab stores per-slot prev-token features.
 
-Split: conv-disjoint (conv % 10 == 0 -> val; ~10%), never per-row.
+S4b (--markov): JOINT head = linear over the FULL engine feature vector
+[h_d | markov_w1[prev_d]] with the S3b-CONFIRMED engine pairing
+(prev_0 = seed, prev_d = props[d-1]; ds4.c:37033-37064/80320), trained on
+BOTH halves, no bias (deploy-faithful). markov_w1 = OFFICIAL f32 npz =
+bit-identical dequant of the deployed q8_0 (S5) -> features match the
+engine EXACTLY. prev tokens rebuilt via official3c.kept_cycles and
+cross-asserted cycle-by-cycle against slab meta before any training.
+
+Split: hashed conv % 10 == 0 -> val (creation-order skew fixed S3).
 Gate (from plan, S2.5-reviewed): val AUC must BEAT positional-prior
 baseline (per-slot .5 / pooled ~.546) and be calibrated (ECE reported;
-target small, esp. near the .45 gate). Milestone .7418/.7933 = ceiling
-note only. Eval through eval3c.gate_stats/auc (shared machinery).
+target small, esp. near the .45 gate). S4b bar additionally: beat the
+OFFICIAL head on the same val rows (.8360 replay, S3b) - and confcal1b
+(.8453) as the h-only reference. Eval through eval3c.gate_stats/auc.
 
 Memory: conf rows f16 -> MPS ~800 MB; batches f32. Well under L0 cap.
 
 Usage: uv run python -m dspark.conf3c --slab conf_s1a_20261103.npz
        --out-dir DIR [--epochs N] [--lr F] [--seed S]
+       [--markov --recs R --parity P [--tensors NPZ]]
 """
 from __future__ import annotations
 
@@ -65,6 +75,21 @@ def main():
                     help="train a bias term (NOT deployable: engine conf is "
                          "a pure matvec, validator pins [4352,1] - S3 review "
                          "MAJOR; default off = deploy-faithful)")
+    ap.add_argument("--markov", action="store_true",
+                    help="S4b joint head: features [h | markov_w1[prev_d]] "
+                         "(engine pairing prev_0=seed, prev_d=props[d-1]); "
+                         "needs --recs/--parity")
+    ap.add_argument("--recs", default=None)
+    ap.add_argument("--parity", default=None)
+    ap.add_argument("--tensors",
+                    default="/Volumes/FireCuda520/ds4-train/tensors-20261101/"
+                    "mtp_nonexpert_f32.npz")
+    ap.add_argument("--cmp-official-npy",
+                    default="/Volumes/FireCuda520/ds4-train/labels3c/"
+                    "run_officialreplay1/official_h1_scores.npy")
+    ap.add_argument("--cmp-h-npy",
+                    default="/Volumes/FireCuda520/ds4-train/labels3c/"
+                    "run_confcal1b/confcal1_val_scores.npy")
     a = ap.parse_args()
     os.makedirs(a.out_dir, exist_ok=True)
     torch.manual_seed(a.seed)
@@ -74,6 +99,31 @@ def main():
     slab = np.load(a.slab, allow_pickle=True)
     slot_idx, commit, valid, meta = masked_views(slab)
     rows = slab["conf_rows"]                      # f16 (total_slots, 4096)
+    if a.markov:
+        if not (a.recs and a.parity):
+            raise SystemExit("--markov needs --recs and --parity")
+        from .official3c import kept_cycles
+        (idx, cpos, seed_c, dlen, w_c, klab, nl, props) = kept_cycles(
+            a.recs, a.parity)
+        # cross-assert rebuilt keep-pass vs slab meta (official3c pattern)
+        for col, ours, name in ((0, cpos, "pos"), (1, dlen, "dlen"),
+                                (3, klab, "klab"), (4, w_c, "w"),
+                                (5, nl, "nl")):
+            if not np.array_equal(meta[:, col].astype(np.int64), ours):
+                raise SystemExit(f"slab meta {name} mismatch vs rebuild")
+        if int(dlen.sum()) != rows.shape[0]:
+            raise SystemExit("row count mismatch vs rebuilt dlen sum")
+        prev = np.zeros(rows.shape[0], np.int64)
+        off = 0
+        for c in range(len(idx)):
+            k = int(dlen[c])
+            prev[off] = seed_c[c]
+            if k > 1:
+                prev[off + 1:off + k] = props[c, :k - 1]
+            off += k
+        w1 = np.load(a.tensors)["mtp.2.markov_head.markov_w1.weight"]
+        rows = np.concatenate(
+            [rows, w1[prev].astype(np.float16)], axis=1)  # (R,4352)
     is_val_cycle = split(meta[:, 2])
     # row-level masks: cycle membership + unmasked label
     valc = is_val_cycle[slab["slot_cycle"].astype(np.int64)]
@@ -82,7 +132,8 @@ def main():
     y = torch.from_numpy(commit.astype(np.float32))
 
     x = torch.from_numpy(rows).to(dev)            # f16 on device
-    w = torch.zeros(4096, 1, device=dev, requires_grad=True)
+    D = x.shape[1]
+    w = torch.zeros(D, 1, device=dev, requires_grad=True)
     params = [w]
     b = None
     if a.bias:
@@ -120,9 +171,10 @@ def main():
                    commit.astype(float)[row_val])
     report = {"protocol": dict(epochs=a.epochs, lr=a.lr, wd=a.wd,
                                seed=a.seed, split="hash(conv)%10==0 val",
-                               bias=a.bias,
-                               model=("linear4096" + ("+bias" if a.bias
-                                                      else "")
+                               bias=a.bias, markov=a.markov,
+                               model=("linear4352 [h|markov_w1(prev)] "
+                                      "engine pairing, no bias" if a.markov
+                                      else "linear4096" + ("+bias" if a.bias else "")
                                       + ", markov-half zeros"),
                                slab=os.path.basename(a.slab)),
               "counts": {"train_rows": int(row_tr.sum()),
@@ -154,19 +206,43 @@ def main():
         round(float(allsc[g].mean()), 4) if g.sum() else None)
     report["val"]["gate_region_obs_rate"] = (
         round(float(yv[g].mean()), 4) if g.sum() else None)
+
+    # head-to-head on the IDENTICAL val rows vs the two reference heads
+    # (official replay S3b + confcal1b h-only) - same split, same mask
+    def _cmp(path):
+        if not path or not os.path.exists(path):
+            return None
+        ref = np.load(path).astype(np.float64)
+        if ref.shape[0] != allsc.shape[0]:
+            return None
+        a0 = auc(allsc[row_val], yv[row_val])
+        a1 = auc(ref[row_val], yv[row_val])
+        dis = int(((allsc[row_val] >= 0.45)
+                   != (ref[row_val] >= 0.45)).sum())
+        return {"auc_ref": round(a1, 4), "auc_mine": round(a0, 4),
+                "delta": round(a0 - a1, 4),
+                "coverage_mine": round(float((allsc[row_val]
+                                              >= 0.45).mean()), 4),
+                "coverage_ref": round(float((ref[row_val]
+                                             >= 0.45).mean()), 4),
+                "gate45_disagree_rows": dis}
+    report["val"]["vs_official_replay"] = _cmp(a.cmp_official_npy)
+    report["val"]["vs_confcal1b"] = _cmp(a.cmp_h_npy)
     report["PASS_auc"] = bool(val_eval["pooled"]["auc"] is not None
                               and val_eval["pooled"]["auc"] > base_val)
     print(json.dumps(report, indent=1))
     with open(os.path.join(a.out_dir, "confcal1_report.json"), "w") as f:
         json.dump(report, f, indent=1)
     np.save(os.path.join(a.out_dir, "confcal1_val_scores.npy"), allsc)
+    wv = w.detach().cpu().numpy().reshape(-1)
     np.savez(os.path.join(a.out_dir, "confcal1_weights.npz"),
-             w=w.detach().cpu().numpy().reshape(-1),
+             w=wv,
              b=(b.detach().cpu().numpy() if b is not None
                 else np.zeros(1, np.float32)),
-             w_full_1x4352=np.concatenate(
-                 [w.detach().cpu().numpy().reshape(-1),
-                  np.zeros(256, np.float32)]).reshape(1, 4352))
+             w_full_1x4352=(wv.reshape(1, 4352) if wv.size == 4352
+                            else np.concatenate(
+                                [wv, np.zeros(256, np.float32)]
+                            ).reshape(1, 4352)))
     print("wrote", a.out_dir)
     raise SystemExit(0 if report["PASS_auc"] else 1)
 

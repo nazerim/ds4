@@ -93,10 +93,12 @@ Preemption under time slip: 4 early start -> 1b -> NEVER 0/2.5/3/2.
       frozen day-3 holdout. New flags: --codes8 (uint8 e4m3 slab 5.23 GB
       vs 20.9 GB f32, BIT-IDENTICAL decode proven on day-5 full; L0
       coexist with engine) + --ckpt (atomic per-epoch PARTIALs; unused -
-      run finished). RESULT: plateau e24-31 top1 .4652 vs anchor .4524
-      (+1.28pp), top3 .6110 vs .5950; PAIRED vs anchor head on same 7,492
-      holdout: +1.31pp, boot CI [+0.80,+1.82], sign p<1e-5. See
-      SLOTS:RESULTS S4 + trainer/TRAIN_V1_s4full1.json.
+      run finished). RESULT (review-closed): plateau e24-31 top1 .4652 vs
+      anchor .4524 (+1.28pp), top3 .6110 vs .5944 (+1.66pp plateau-vs-
+      plateau); PAIRED vs anchor head on same 7,492 holdout: +1.31pp,
+      CI [+0.80,+1.82], sign p=5.3e-7 = beyond holdout-sampling noise;
+      seed replication via s4full2. See SLOTS:RESULTS S4 +
+      trainer/TRAIN_V1_s4full1.json.
 - [x] S5  (inside S3/S4 compute windows) REPACK TOOL on COPY of support gguf:
       extract -> re-insert -> file sha256-identical proof; layout ds4.c:6113.
       DONE ~00:5x tools/repack_dspark_tensor.py: roundtrip sha256 identity
@@ -162,17 +164,33 @@ Preemption under time slip: 4 early start -> 1b -> NEVER 0/2.5/3/2.
   33 nl1; S4 rules: mask mk_valid==1; split keys (mk_file, conv) with conv
   via mk_ridx->idx.jsonl join (bare conv ids COLLIDE across pids); 422
   rows (0.09%) cross-file conversation-continuity residue accepted+noted.
-- S4: s4full1 DONE ~04:2x (32 epochs, 48 s/epoch avg, /tmp/s4full1.log):
-  plateau e24-31 top1 mean .4652 (range .4628-.4666) vs anchor cos32clean2
-  plateau .4524 -> +1.28pp; top3 .6110 vs .5950 -> +1.60pp; zero plateau
-  overlap. PAIRED per-pair eval vs the ANCHOR HEAD (v1_head_cos32clean2.pt
-  reproduces .4529 on the same 7,492-pair day-3 holdout): s4full1 .4660,
-  delta +1.31pp, bootstrap 95% CI [+0.80,+1.82]pp, 238W/140L, sign p<1e-5
-  (/tmp/s4_paired.json) -> beyond seed noise. delta_from_h .3275 NEW MAX
-  (prev .3185); no_h .1384 (co-adaptation, not deployed); boundary .8582
-  n=134 CI .789-.907 (anchor .8657 max, consistent); conf proxies
-  .7319/.7785 vs anchor .742/.793 (streak-proxy heads, NOT deployable;
-  deploy conf = confcal1b). Review pending.
+- S4: s4full1 DONE ~04:2x (32 epochs, 48 s/epoch avg, /tmp/s4full1.log);
+  review CLOSED PASS_WITH_MINORS ~04:5x. CLAIMABLE (reviewer's exact
+  phrasing): "On the frozen day-3 holdout (7,492 pairs), s4full1 beats
+  the anchor HEAD by +1.31pp top1 (paired: 238W/140L, bootstrap 95% CI
+  [+0.80,+1.82]pp, exact sign p=5.3e-7); plateau-window means (e>=24,
+  protocol rule) .4652 vs .4524 = +1.28pp top1, .6110 vs .5944 = +1.66pp
+  top3; new max delta_from_h .3275." Reviewer reproduced EVERY number
+  (plateau from anchor's OWN json = .452412/.594400 - my earlier
+  "+1.60pp top3" mixed plateau-vs-FINAL bases, corrected here; paired
+  W/L 238/140 exact; CI [+.0080,+.0183]; codes8 bit-identity extended to
+  day-8+day-12; pool 427,162+30,209=457,371 exact).
+  NOT claimable: "beyond SEED noise" (paired CI bounds HOLDOUT-SAMPLING
+  noise between two frozen heads; run-to-run replication untested ->
+  s4full2 second-seed run dispatched); boundary-strata superiority
+  (.8582 [.789,.907] vs anchor .8657 [.798,.913], n=134 = noise).
+  LEAK-BOUND: day3<->train exact-tuple leak 6 rows (.08%); differential
+  vs anchor <= 8 day-13 context rows = <=.107pp absurd-worst-case ->
+  does not threaten the delta. Protocol note: cos32clean3 is NOT a
+  recipe control (no --cosine/--phase1/lr3e-4 -> its no_h .1819 + 23%
+  markov drift are artifacts; s4full1 no_h .1384 vs clean2 .1344 same
+  band; markov drift 1.5%/9.5% = clean2 class). Quarantine-1103 mtime
+  footnote: clean3 ran the 77-span version; final-file scan reproduces
+  the arithmetic exactly.
+  DEPLOY: s4full1 = milestone evidence ONLY (head form != engine head;
+  engine keeps OFFICIAL w1/w2; disk-KV/model_fp implications); deployed
+  conf path stays confcal1b; S5 repack sha 3365e6b4.. unchanged, arm-B
+  artifact needs no regeneration.
 - S3b: OFFICIAL-HEAD REPLAY (dspark/official3c.py, run_officialreplay1/):
   engine-faithful replay of the official conf head on the S1a slab
   ([h_d | markov_w1(prev_tok_d)], prev_0=seed, prev_d=props[d-1], code
@@ -187,6 +205,23 @@ Preemption under time slip: 4 early start -> 1b -> NEVER 0/2.5/3/2.
   head" = honest but modest AUC delta + the head actually engages at .45.
   Official replay scores saved (official_h1_scores.npy, all rows) - S4
   comparison baseline.
+- S4b: CONFCAL2 JOINT CONF HEAD (~05:2x, run_confcal2/): conf3c.py
+  --markov mode = linear(4352) over the FULL engine feature
+  [h_d | markov_w1[prev_d]] with S3b-confirmed pairing (prev_0=seed,
+  prev_d=props[d-1]); markov_w1 = OFFICIAL f32 (== bit-identical dequant
+  of deployed q8_0, S5) -> features match the engine EXACTLY; no bias;
+  rebuilt keep-pass cross-asserted vs slab meta before training. VAL
+  (identical hashed split, 8,992 rows): pooled AUC .8523 vs official
+  replay .8360 (+1.63pp) and confcal1b .8453 (+0.70pp); per-slot
+  .8841/.8493/.8245/.7812 BEATS OFFICIAL ON EVERY SLOT (.8775/.8352/
+  .8114/.7671); baseline .5448; ECE .0115; coverage .45-gate .8883
+  (11.2% of rows cut); gate-region n=1611 pred .4606 obs .4854
+  (under-prediction now 2.5pp - watch item for the AB gate). Export:
+  w_full_1x4352 (1,4352) b=0, markov half ALL 256 nonzero (norm .64);
+  saved scores == engine-form recompute to 5.3e-5 (f16 feature storage).
+  ARM-B CANDIDATE pending review: repack would regenerate
+  support_AB.gguf from confcal2 weights (current sha 3365e6b4 =
+  confcal1b).
 - S5: tools/repack_dspark_tensor.py (in-place size-preserving q8_0->q8_0 /
   f32->f32 swap on COPY; refuses --out==--in). Proofs on official support
   gguf (sha 0807a67f..., NEVER written): (1) roundtrip read+rewrite orig
@@ -330,3 +365,14 @@ pos-unique. Probe A4 gap_accept column formulaic at d=0 (annotated in code).
 - 04:4x S2 FIX RE-VERIFY GREEN: gradable smoke PASS (T3/T4 grads nonzero,
   RSS 6.99 GB), selfcheck PASS (gradcheck 8/8), GATE A rerun 6-dp
   IDENTICAL to frozen baseline. S2 DONE.
+- 04:5x S4 INDEPENDENT REVIEW: PASS_WITH_MINORS. Every number reproduced
+  (plateau from anchor's own json; paired 238/140 exact; sign p=5.3e-7;
+  leak-bound <=.107pp differential; codes8 extended to day-8/12).
+  Ledger MAJOR-for-text fixes applied (top3 basis .5944 plateau;
+  'holdout-sampling noise' wording; no boundary claim; cos32clean3
+  declassified as recipe control). Replication run s4full2 (seed 1)
+  launched to close the seed-variance minor.
+- 05:2x S4b CONFCAL2 joint conf head (engine-form 4352, markov features):
+  val .8523 > official .8360 (+1.63pp) > confcal1b .8453 (+0.70pp),
+  beats official on ALL 4 slots, ECE .0115. See SLOTS:RESULTS S4b.
+  Review + S6 v2 re-check dispatched together.
