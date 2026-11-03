@@ -89,7 +89,11 @@ Preemption under time slip: 4 early start -> 1b -> NEVER 0/2.5/3/2.
       PASS + in-place q8_0->q8_0 swap of confcal1b head proven on copy;
       independent review CLOSED PASS_WITH_MINORS ~01:1x (minors fixed,
       q8_0 goldens pinned).
-- [ ] S6  (gap filler) AB-PROTOCOL.md doc + bench script (no execution).
+- [x] S6  (gap filler) AB-PROTOCOL doc + bench script (no execution) —
+      WRITTEN ~02:1x .codebase-memory/AB-PROTOCOL-3C-20261104.md (six S5-
+      review constraints encoded) + tools/bench_ab_3c.py (stdlib client,
+      tok/s + windowed DSpark-stats parse). NOT EXECUTED; independent
+      review PENDING (protocol soundness).
       MUST encode (from S5 review): (1) swap strictly copy-based, record
       output sha next to official sha in ledger; (2) engine binds
       confidence_proj AT BOOT -> swap requires restart: quiesce collector
