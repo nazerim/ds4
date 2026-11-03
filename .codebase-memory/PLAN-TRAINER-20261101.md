@@ -182,3 +182,39 @@ attention cache state - milestone-2 should START with conf-row parity on
 ISOLATED first-cycles (cold-start conversations, cache depth 1) where history
 = just h[pos-1], then extend. s2/s3 era captures of SHORT new conversations
 are the ideal dev set (controlled C-session tonight gives exactly this).
+
+## Milestone-2 session 2 (Nov-03): MATERIALS COMPLETE
+- token_embd extracted from the 97GB base GGUF -> blade
+  tensors-20261101/token_embd_f16.npz (129280x4096 f16, 1.06 GB). Plain f16,
+  offset 88,794,335,232, alignment 32 (row-major [rows,4096]).
+- Support-file metadata confirmed: noise_token_id=128800-1? NO: 128799,
+  target_layer_ids=[40,41,42], stages=3, block=5, rank=256.
+- Gotcha: raw GGUF header walking needs the STANDARD size table
+  (0=u8,1=i8,2=u16,3=i16,4=u32,5=i32,6=f32,7=bool; 8=string{u64 len,bytes};
+  9=array{etype,u64 n}); a wrong table desyncs into 97GB of garbage (one
+  wild u64 read = MemoryError - guard array counts).
+- Input assembly confirmed from ds4.c 35000-35032: row0 = rmsnorm(main_proj
+  (taps)) replicated x HC streams; rows1..5 = token_embd[seed/noise...]
+  replicated; positions [pos-1, pos..pos+4]; stage0 path applies
+  stage0->main_proj+main_norm (ds4.c 35090+).
+NEXT (implementation session): read metal kernel semantics for (a) hc mixers
+(hc_*_fn (24,16384) parameterization: how 24 coeffs split across stream
+in/out/residual weights), (b) attention over stage cache for first cycles,
+(c) MoE top-3 routing incl exp_probs_b bias handling; then write
+dspark/mirror_trunk.py forward + validate conf rows (f32 exact) on s3
+first-cycle dev sample (pid43176 202 cycles + pid48230), join recs<->parity
+by (pid,pos). Expert tensors (128/layer x2) materialization = 26 GB f32 or
+on-demand dequant via gguf_dq (bit-exact, ports tested).
+
+## CORRECTIONS to session-1/2 notes (Nov-03, independent review ses_e607ce649)
+The notes above contain three WRONG facts, corrected here (rev1 handoff killed
+the same): (1) trunk = THREE full transformer stages (mtp.2 is complete
+attn+MoE + heads), not "2 + machinery"; (2) experts = **256 routed / top-6
++1 shared** for deepseek4-dspark (vision-exp) - the 128/top-3 guard at ds4.c
+~8844 is V4.1-only and INACTIVE for this model (npz gate [256,4096] agrees);
+(3) full f32 expert materialization ~= 77 GB (25.8/stage x3), not 26 GB -
+prefer on-demand top-6 dequant via gguf_dq. hc_head_* exists ONLY on mtp.2
+((4,16384)/(1,4)/(1,1)); n_hc=4 from ds4.c:626. Metadata validator is at
+ds4.c:6199. NEW CRITICAL: mtp stage cache is PREFILL-SEEDED (80157) - exact
+first-cycle replay may need capture extension; see
+MILESTONE2-HANDOFF-20261103.md §2 (resolution path a/b/c) before coding.

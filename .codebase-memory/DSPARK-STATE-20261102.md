@@ -217,6 +217,10 @@ Extraction: /Volumes/FireCuda520/ds4-train/tensors-20261101/
 1. DONE: cos32x15 -> data-bound confirmed (§3, w-loop caveat). Next scaling point at
    ~600k pairs (2x of x15; ~4-6 heavy workdays at 100k/day soak) - one
    command when pool is there: same protocol, --out-tag cos32x2.
+1M. MILESTONE-2 RESUMES AFTER COMPACTION: read
+    .codebase-memory/MILESTONE2-HANDOFF-20261103.md (full knowledge +
+    execution plan S2.1-S2.5; materials complete incl token_embd_f16.npz;
+    open issues = metal kernel reads for hc mixers/rope/MoE-256vs128).
 2. Engine-free, on ask: mirror forward build (parity dump unblocks it -
    validate stage0/1 offline vs parity-*.bin proposals + conf rows; anchor
    code: ds4.c prepare_impl 80060-80560, markov/conf helpers 36537-37100,
