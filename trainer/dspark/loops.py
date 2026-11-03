@@ -40,12 +40,14 @@ HDR = struct.Struct("<IiBBBB5i")
 DEPTH_CUT = 15.0
 MIN_PAIRS = 300
 SPAN_WINDOW_DEPTH = 8.0          # legacy unattributed windows only
+BUDGET_WIN_GUARD = 4.0             # attributed budget chops: need repetition
 ENFORCE_RE = re.compile(
     r"(?:chat|completion) ctx=\d+\.\.(\d+):\d+ thinking budget \d+ "
     r"enforced after (\d+) in-span tokens \(gen=(\d+)\)")
 TRIP_RE = re.compile(
     r"(?:chat|completion) ctx=\d+\.\.(\d+):\d+ thinking loop tripwire: "
-    r"closed span at (\d+) tokens")
+    r"closed span at (\d+) tokens(?: \(period \d+\))?"
+    r"(?:.*?\(gen=(\d+)\))?")
 PROGRESS_RE = re.compile(r"(?:chat|completion) ctx=\d+\.\.(\d+):\d+ gen=(\d+)")
 PID_RE = re.compile(r"parity_pid(\d+)\.bin")
 
@@ -115,7 +117,8 @@ def parse_spans(log_patterns):
                 m = TRIP_RE.search(line)
                 if m:
                     b, tok = int(m.group(1)), int(m.group(2))
-                    gen = last_gen.get(b, tok)
+                    gen = (int(m.group(3)) if m.group(3)
+                           else last_gen.get(b, tok))
                     hi = b + gen
                     spans.append([max(0, hi - tok), hi, "trip", pid])
                     last_gen[b] = gen
@@ -181,7 +184,19 @@ def file_exclusions(recs_path, q):
             if not win:
                 continue
             if sp_pid is not None:
-                # positive evidence + right era + right lineage: excise
+                if kind == "budget":
+                    # Budget chops fire for loops AND for legitimate long
+                    # thinking (measured Nov-03: day-10 windows split 1.9-3.8x
+                    # legit vs 4.1-11.6x soft-loop). Require repetition
+                    # evidence at load: excise window only when it measures
+                    # >= BUDGET_WIN_GUARD depth. Trip chops stay unconditional
+                    # (their firing IS cycle evidence).
+                    win = [r for r in recs if lo <= r[0] <= hi]
+                    if len(win) < 50:
+                        continue
+                    t, u = _depth_from(win)
+                    if not t or t / max(u, 1) < BUDGET_WIN_GUARD:
+                        continue
                 excl.update(start + j for j, r in enumerate(recs)
                             if lo <= r[0] <= hi)
             else:

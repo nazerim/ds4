@@ -143,3 +143,19 @@ def test_train_loader_skips_excluded(tmp_path, monkeypatch):
     assert len(S) == 1000
     X, S, Y, C, L = train_v1.load_day("20269999-dayY", quarantine=q)
     assert len(S) == 600
+
+
+
+def test_attributed_budget_needs_depth_evidence(tmp_path):
+    # depth-2 attributed budget window = legit long thinking -> KEPT now
+    # (policy Nov-03: legit 8k chops measured 1.9-3.8x, loops 4.1-11.6x)
+    rp = str(tmp_path / "train_pid555.recs")
+    _write(rp, _loop(1000, reps=2, uniq=40))           # 80 recs, depth 2
+    q = {"version": 3, "segments": {},
+         "spans": [[1000, 1079, "budget", 555]]}
+    assert file_exclusions(rp, q) == set()
+    rp2 = str(tmp_path / "train_pid556.recs")
+    _write(rp2, _loop(1000, reps=6, uniq=12))          # 72 recs, depth 6
+    q2 = {"version": 3, "segments": {},
+          "spans": [[1000, 1071, "budget", 556]]}
+    assert len(file_exclusions(rp2, q2)) == 72

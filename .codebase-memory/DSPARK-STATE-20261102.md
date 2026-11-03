@@ -4,8 +4,18 @@ remains valid for Oct-28/29 detail). Read order for full context: this file ->
 NIGHT-RUN-3-RESULTS.md -> NIGHT-RUN-2-RESULTS.md -> PLAN-TRAINER-20261101.md
 -> CAPTURE-SCHEMA.md -> DSPARK-VISION-EVAL-20261028.md (Oct eval ledger).
 
-## 1. LIVE SYSTEM STATE (Nov-03 ~00:30)
-- **TRIPWIRE ERA LIVE.** ds4-server PID 41277 (binary Nov-03 00:13 with
+## 1. LIVE SYSTEM STATE (Nov-03 ~08:20)
+- **ESCALATION ERA LIVE** (Nov-03 08:1x): commit 12cc181 (re-entry
+  escalation: suppress thinking after 2 same-request tripwire closes; valve
+  trap fixed; detector lines now carry gen=; sidecar closes/suppressed -
+  TRIPWIRE-FOLLOWUP-RESULTS-20261103.md; live trips x2 observed period-127
+  class; suppression path not yet fired live - daily grep watch). Server
+  PID 47769 = that binary (strings 18 tripwire, verified pre-deploy),
+  re-armed: TRAIN_DUMP=active (day-12 in progress, holds 1,726 pre-restart
+  + new) + PARITY s3 + budget 8192 + tripwire 1. BANK NOTE from now on:
+  era = 'tripwire-escalation'. Prior: PID 41277/43176/47339 lineages in
+  day-10/day-11/active.
+- TRIPWIRE ERA (pre-escalation): PIDs 41277 (binary Nov-03 00:13 with
   tripwire commits 2fd684d+e94d055, strings-verified pre-deploy): env =
   budget 8192 + DS4_THINK_TRIPWIRE=1 (script default now), TRAIN_DUMP=active
   (day-11) + PARITY /Volumes/FireCuda520/ds4-parity/20261103-s3 (MAX 200k).
@@ -174,7 +184,12 @@ Extraction: /Volumes/FireCuda520/ds4-train/tensors-20261101/
     ses_e62ad1309). v3 excisions: day10 53.5%, day11 69.6%, clean pool
     333,224. **cos32clean2 rerun with v3 json = the real anchor** (queued
     AFTER bounding battery - training load contaminates decode t/s).
-    Original anchor line kept for history:
+    Original anchor line kept for history.
+    cos32clean2 RAN Nov-03 (v3 geometry, 324,081-pair pool): **THE HONEST
+    ANCHOR = .4529/.5950** (delta_from_h .3185 max, boundary .8657 max,
+    AUC .742/.793; clean convergence epochs 24-31 plateau .4519-.4529).
+    All mirror/head targets now chase .4529 on clean pools; next clean
+    scaling point cos32x2clean at ~600k clean pairs.
     (311,029-pair clean pool vs .4369/.5769 on 304k contaminated pool of
     ~same size: CLEANING PAID +1.26pp top1 - loop rows were gradient
     hijackers, not easy wins; degenerate contexts actively hurt general
@@ -182,14 +197,23 @@ Extraction: /Volumes/FireCuda520/ds4-train/tensors-20261101/
     All future scaling claims vs .4495 on clean pools ONLY. Next clean
     scaling point ~600k clean pairs (tripwire-era healthy days keep ~100%,
     ~4-5 heavy days out; same cmd + --out-tag cos32x2clean).
-    NOTE (Nov-03): clean pool re-measured after span-ATTRIBUTION redesign
-    (spans=[lo,hi,kind,pid] via log parity-banner; attributed windows
-    excise outright - soft loops measure 1.6-6.3x depth == legit prose,
-    depth cannot see them; chop log = positive evidence; unattrib legacy
-    spans keep guard). Reality: day-10 70.4% excised, day-11 56.5%;
-    corpus clean ~320k of 594.6k. 19/19 tests. Tripwire re-entry
-    escalation still owed by that codeowner (2nd trip close => suppress
-    thinking for request; sibling of budget's disable-escalation ~16228).
+    POLICY (Nov-03 08:4x FINAL, superseding the 'excise outright' rule):
+    spans=[lo,hi,kind,pid] attributed via log parity-banner (per-line
+    tracking); TRIP chops excise unconditionally (firing == cycle evidence);
+    BUDGET chops require window depth >= 4.0 because legit long thinking
+    ALSO rides to 8192 (day-10 v3 windows split 8 legit 1.9-3.8x vs 16
+    soft-loops 4.1-11.6x; morning rebuild turns chopped at 1.8-2.5x).
+    Effect: day-10 excision 63.9k->38.6k (+25k legit pairs back); CLEAN
+    POOL 350,196. cos32clean2 .4529 trained under the over-cut => anchor is
+    a FLOOR (missing data, not poison); no rerun. Trip spans of day-11
+    unchanged (11,304). 21/21 tests (budget-needs-depth case added).
+    Trigger health 08:34: tripwire correctly SILENT on legit turns; budget
+    chopped exactly at 8192 twice; DSML tool blocks flowed post-chop;
+    capture chain 100% across chops. ONE 'kv cache discarded corrupt
+    text-prefix payload' (08:33:47) = self-heal guard (client replay of
+    post-chop history differs from stored prefix); token-mismatch ~40-tok
+    tails = normal churn. Watch: repeat discards on one lineage would
+    mean wrap-up text leaking into KV keys. Escalation SHIPPED (12cc181).
 1. DONE: cos32x15 -> data-bound confirmed (§3, w-loop caveat). Next scaling point at
    ~600k pairs (2x of x15; ~4-6 heavy workdays at 100k/day soak) - one
    command when pool is there: same protocol, --out-tag cos32x2.
