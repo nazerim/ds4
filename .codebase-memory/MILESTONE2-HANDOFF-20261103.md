@@ -46,31 +46,33 @@ holdout, TRAIN_V1_cos32clean2.json). Never compare across pool definitions.
   conf = proj . (hrow ++ w1[prev]); sigmoid_stable >= thr gate. Metal
   falls through to CPU proposal path (37070) -- proposals CPU-reproducible.
 
-## 2. CRITICAL OPEN ISSUE #1 (found by review; blocks the 'easy first win')
-The stage cache that mtp attention reads is SEEDED FROM PREFILL
-(metal_graph_seed_dspark_initial_cache_from_prefill, ds4.c 80157-80171,
-active when captured_batch_end == pos -- i.e. exactly the first cycles of
-fresh conversations). So the rev1 plan "first-cycle => history = just the 6
-rows" is LIKELY FALSE: attention on dev first-cycles sees prefill-seeded
-rows.
-But: our .recs capture stores taps ONLY at draft-cycle positions, NOT all
-prefill positions => EXACT conf-row replay on real traffic may be impossible
-without extension. RESOLVE FIRST, options:
-  (a) Read the seeding + stage-cache size/structure (grep dspark_stage_cache
-      ~34874 stage_cache_ready + the seed fn body): if the cache holds only
-      a WINDOW (last K rows) or aggregated state, the needed data shrinks --
-      maybe cycle-sampled taps suffice; MEASURE what rows attention reads.
-  (b) If full-prefill rows are needed: extend DS4_TD capture to dump
-      per-position prefill taps for SHORT scripted conversations only
-      (engine change -> window + rebuild + validation; storage 12,288B fp8
-      per position: a 2k-position dev conv = 24MB, trivial).
-  (c) Approximate mode: replay with available sampled taps -> measure
-      conf-row cosine vs parity; if ~0.99+ then grading uses RELATIVE gates
-      (same-architecture match delta), acceptable for 3c training purposes
-      even if byte-exact dies.
-Decision needed before writing the forward. Cheapest probe: implement the
-6-row-only interpretation on pid43176 dev cycles, diff conf rows vs parity
-record - the ERROR PATTERN itself tells you whether history rows matter.
+## 2. CRITICAL OPEN ISSUE #1 — **RESOLVED Nov-03 ~17:00 (code evidence below)**
+The stage cache is WINDOWED, cycle-granular, per stage (ds4.c read in full):
+- merge per draft cycle = ONE row, at feature_pos (36002: "Draft rows remain
+  temporary; only the committed target feature joins the history"). Ring
+  maintain on scheduler-skip also adds just h[pos] (36010+).
+- logical window <= DS4_N_SWA-1 = 127 rows by position order, ring of
+  dspark_cache_cap (=raw_cap 4352 rows, pos%cap); crop+cap via
+  cache_target_prefix (29691+), merge_target_range (29671+).
+- PREFILL SEED (35352): only <=128 trailing prefill rows projected+written
+  ("earlier rows would be hidden"), per stage, at batch eval when
+  captured_batch_end == pos (first cycle). Every later cycle merge evicts
+  one seeded row -> after ~127 cycles the window is PURE CYCLE FEATURES.
+=> REPLAY PLAN (no engine change): (i) EXACT mode on cycles >=128 of convs
+   >=128 cycles (long soak convs: day8/9/12 have 2k-5k-record convs; check
+   per-conv cycle counts in MANIFESTs / idx); window rows = the SAME conv's
+   previous records' taps in .recs (fp8->f32 dequant = same designed noise
+   as row0). (ii) EARLY cycles: run mirror seedless vs parity conf rows ->
+   the delta IS the quantified seed contribution (this replaces the old
+   ambiguous 'probe'); grade early cycles by RELATIVE gates only.
+   (iii) Optional later (window+tiny): dump <=128 prefill h-rows per conv
+   (~1.5MB) if byte-exact early-cycle replay is ever required.
+REMAINING TO READ for the forward (S2.1): attention context assembly over
+window rows + the 6 batch rows (metal_graph_eval_dspark_stage_block 35891+,
+noncausal probe 35900s, rope positions for cached rows, raw_cache layout
+cap x N_HEAD_DIM x f32 - confirm N_HEAD_DIM=512 = MLA compressed kv?),
+hc mixer math in batch encoder (35440-36100), per-stage q_a/q_b/kv projections
++ attn_sinks, stage0 batch eval (35384), final_hidden path.
 
 ## 3. MATERIALS (verified paths + the run book)
 /volumes paths on blade; trainer = uv project (python3.14, numpy/torch/
@@ -162,3 +164,73 @@ rev2 lands: doc bundle only (see commit below) - trainer/tools code all in.
   filter by pos). "props stale beyond dlen" -> props are ZEROS, conf ROWS
   are stale.
 - corpus glob 2026110* -> day1/2/3 are 20261029.
+
+## 7. S2.1 FORWARD MAP (Nov-03, read from ds4.c in-session; line refs current)
+Stage block per cycle (metal_graph_eval_dspark_stage_block ds4.c:35468):
+- feature_pos = pos-1; 6 rows (target ++ 5 drafts); visible = window(<=127)
+  + 6, contiguous ring slots [raw_start .. append_pos+6), cap=raw_cap=4352,
+  wrap via %cap. Chain invariant: cache ends_at(feature_pos) (35899).
+- shared front (all 6 rows): rms_norm(stage_input_hc) -> hc_attn_fn
+  (24,16384) -> 24 mix coefs = [2*n_hc | n_hc^2] -> sinkhorn(4x4, 20 iter,
+  hc_eps) + base(1,24)+scale(1,3) -> weighted stream sum -> attn_norm.
+  TARGET row's attn_norm = dspark_main_x (copied, computed once at stage0 -
+  "shared by all support stages", 35686).
+- q path (DRAFT rows only): attn_q_a (4096->1024) -> q_a_norm -> attn_q_b
+  (1024->64x512) -> per-head rmsnorm -> rope_tail(start pos, per-row +1).
+- kv path (6 rows): attn_kv (4096->512) -> attn_kv_a_norm -> rope_tail row0
+  @feature_pos / drafts @pos -> dsv4_fp8_kv_quantize (512-dim, N_ROT=64!)
+  -> store ring at append_pos. CACHED ROWS ARE FP8-QUANT K/V MLA ROWS -
+  mirror must replicate the quantizer exactly (kernel: dsv4_fp8_kv_quantize
+  in ds4_metal.m; also seed path 35287-35341 projects prefill rows the same
+  way -> first-cycle seed replay NEEDS prefill h-taps (absent from .recs);
+  cycles >=128 are seed-free => EXACT subset exists today).
+- attention: NONCAUSAL over visible_rows, 64 heads x 512 raw kv + per-head
+  attn_sinks(64 scalars); output rope_tail(inverse=true) to un-rope.
+- out proj: attn_output_a/b grouped lora (8x1024, q8_0 kernels), hc_expand_
+  split (44934 kernel) -> after_attn_hc streams (residual-mixed).
+- FFN (33078): hc_ffn mixer (same 24-coef sinkhorn) -> ffn_norm -> router:
+  ffn_gate_inp (256x4096) logits + ffn_exp_probs_b bias (1,256) ->
+  router_select kernel ds4_metal.m:40388 top-6, weights x
+  DS4_EXPERT_WEIGHT_SCALE=1.5 (shape .expert_weight_scale line 630) ->
+  experts gate/up/down (n_ff_exp 2048; q2_k/iq2_xxs in base gguf - dequant
+  via gguf_dq on-demand, 6/stage/cycle) + SHARED expert ALWAYS (gate/
+  up/down shexp q8_0, swiglu) -> sum -> next stage (5 draft rows).
+- final (after stage2, 36369): rms_norm -> hc_head_fn (4,16384) -> 4 coefs
+  -> sinkhorn/weights -> mix streams -> batch_ffn_cur = CONF ROWS (5x4096,
+  PRE-norm = milestone-1 binding confirmed) -> rms(final->norm) ->
+  spec_logits SOURCE STILL TO READ (grep spec_logits in 36xxx/80xxx).
+FLASH SHAPE CONSTANTS (ds4.c:601-640): embd 4096, head 64/1kv, head_dim
+512, rot 64, out_group 8, lora_q/o 1024, experts 256/6+1shared, ffexp
+2048, swa 128, hc 4 sinkhorn 20, eps fields rms_eps/hc_eps in table.
+OPEN KERNEL READS (next session, all in ds4_metal.m): sinkhorn+mix exact
+formula (ds4_gpu_hc_split_* 44934+), router_select softmax-vs-sigmoid +
+renorm (40388), dsv4_fp8_kv_quantize layout (which dims quantized: kv
+512-with-rot-64?), attention scaling (1/sqrt? sinks in softmax denom),
+rope_tail inverse semantics + yarn params (freq_base/betas from shape),
+hc_expand_split residual formula, spec_logits head path.
+
+## 8. KERNEL MATH BANKED (Nov-03 late session)
+ROUTER (batch, our model; ds4_metal.m 34330-34470 + dsv4_misc.metal
+kernel_dsv4_router_weights_batch @4838): probs = SQRT(SOFTPLUS(logits))
+(kernel_dsv4_softplus_sqrt_f32_4); scores = probs + exp_probs_b (bias
+affects SELECTION ONLY - ds4_gpu_indexer_topk over 256); weights[i] =
+probs_sel[i] / max(sum(probs_sel), 1/16384=6.1035e-5) * 1.5, and the
+denominator sum has a FIXED 6-lane reduction topology (do not reorder).
+NOT sigmoid-softmax, NOT plain softmax - this was the biggest mirror risk.
+HC MIXER (dsv4_hc.metal kernel_dsv4_hc_split_sinkhorn @113 +
+split_weighted_sum @288): mix row 24f = [pre4 | post4 | comb16]; per part
+scale_k = hc_*_scale[k] (3 floats) and base (1,24): pre = sigmoid(mix*scale
++ base) + eps; post = 2*sigmoid(...); comb rows: softmax over row max-exp
+(eps added AFTER normalize: r*(1/sum) + eps), then sinkhorn 20 iters:
+rownorm 1/(sum+eps) then colnorm 1/(sum_r+eps). Collapse: cur = SUM_i
+pre_i * stream_i (verified at 288-kernel tail). Expand/residual formula
+(comb x streams + post) lives in kernel_dsv4_hc_expand_split - READ at
+impl. SIGMOID FORM MATTERS: production boot log has drift flag
+hc_stable=ON -> tanh(z/2) form; fused decode sites historically use naive
+1/(1+exp(-z)) - mirror must match whichever the actual kernel compiles to
+(check DS4_METAL_HC_STABLE at build; cos-level probably immune, bit-level
+not).
+STILL OPEN kernel reads: hc_expand_split, dsv4_fp8_kv_quantize (dsv4_kv.
+metal), noncausal_raw_batch_heads scaling + sinks placement in softmax
+denom (flash_attn.metal), rope_tail inverse + yarn consts (dsv4_rope.metal),
+spec_logits head path (ds4.c 36xxx/80xxx), indexer_topk tie behavior.
