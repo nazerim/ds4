@@ -27,7 +27,19 @@ NIGHT-RUN-3-RESULTS.md -> NIGHT-RUN-2-RESULTS.md -> PLAN-TRAINER-20261101.md
   20261103.json regenerated w/ manual span); booted DSPARK_EXACT=1 per
   decision #10 - two termbench suites clean (0 trips / 1 legit 16k ride /
   depth<=1.9x), fp unchanged by flip, harness-teardown disconnect 16:06
-  normal. Collection cmd now includes DSPARK_EXACT=1.
+  normal. Collection cmd now includes DSPARK_EXACT=1; since Nov-03 night
+  it is BAKED: `./ds4-server.sh restart-collect` (or start-collect) arms
+  train-dump + parity s3 + EXACT with env-overridable defaults, refuses
+  to start if blade unmounted. Plain restart remains the forbidden path.
+- **EXACT ERA II LIVE** (Nov-03 20:3x, PID 60838): day-13 banked
+  (30,609 recs, 98.7% kept, chain 100%, backup 360M; zero trips/budget
+  all era - the gate-valid corpus). 53508 died by PERFORMANCE STALL
+  (0.27 t/s DSML chunks; 8%-free memory from mirror batch vs 93GB engine
+  mapping) -> user-call bank+restart; stop force-killed, flushes intact
+  (pend=0), KV self-heal guards expected on next loads. OPERATIONAL RULE
+  LEARNED: mirror batches must stay under MIRROR expert-cache cap ~8GB
+  (lower expert_cache_slices default or chunk runs) while engine serves.
+  Serving live now - DO NOT restart; bank only on user command.
 - TRIPWIRE ERA (pre-escalation): PIDs 41277 (binary Nov-03 00:13 with
   tripwire commits 2fd684d+e94d055, strings-verified pre-deploy): env =
   budget 8192 + DS4_THINK_TRIPWIRE=1 (script default now), TRAIN_DUMP=active

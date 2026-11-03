@@ -148,6 +148,42 @@ export DS4_THINK_TRIPWIRE
 DS4_TRIPWIRE_MIN_TOKENS="${DS4_TRIPWIRE_MIN_TOKENS:-1200}"
 export DS4_TRIPWIRE_MIN_TOKENS
 
+# --- Data collection mode (start-collect / restart-collect) ---
+# One-key arming of soak corpus + parity dumps for the Vision-Exp dspark
+# EXACT-sampling era (decision #10 + bank runbook in .codebase-memory/
+# DSPARK-STATE-20261102.md). Every value is overridable from the outside,
+# e.g. start a fresh parity experiment dir:
+#   DS4_TD_PARITY=/Volumes/FireCuda520/ds4-parity/20261104-s4 ./ds4-server.sh restart-collect
+# CRITICAL: a PLAIN start/restart runs with ZERO capture (no --dspark ->
+# no draft cycles) AND flips the model fingerprint, invalidating every
+# disk-KV file (deep sessions then re-prefill from token 0). Collection
+# restarts must go through this arm or the full 4-env incantation.
+COLLECT_TRAIN_DUMP="${DS4_TRAIN_DUMP:-/Volumes/FireCuda520/ds4-train/active}"
+COLLECT_PARITY_DIR="${DS4_TD_PARITY:-/Volumes/FireCuda520/ds4-parity/20261103-s3}"
+COLLECT_PARITY_MAX="${DS4_TD_PARITY_MAX:-200000}"
+COLLECT_EXACT="${DSPARK_EXACT:-1}"
+
+arm_collect_env() {
+    if [ ! -d /Volumes/FireCuda520 ]; then
+        echo "Error: /Volumes/FireCuda520 not mounted - refusing to start"
+        echo "       armed; capture would fail SILENTLY at first fopen." >&2
+        return 1
+    fi
+    mkdir -p "$COLLECT_TRAIN_DUMP" "$COLLECT_PARITY_DIR" || return 1
+    DS4_TRAIN_DUMP="$COLLECT_TRAIN_DUMP"
+    DS4_TD_PARITY="$COLLECT_PARITY_DIR"
+    DS4_TD_PARITY_MAX="$COLLECT_PARITY_MAX"
+    DSPARK_EXACT="$COLLECT_EXACT"
+    export DS4_TRAIN_DUMP DS4_TD_PARITY DS4_TD_PARITY_MAX DSPARK_EXACT
+    echo "collect arm: TRAIN_DUMP=$DS4_TRAIN_DUMP"
+    echo "             PARITY=$DS4_TD_PARITY (cap $DS4_TD_PARITY_MAX per process)"
+    echo "             DSPARK_EXACT=$DSPARK_EXACT (0 = seed-batch era, mirror-invalid data)"
+    echo "verify after start: banner 'DSpark ... exact: $DSPARK_EXACT'; capture banners +"
+    echo "  train_pid<N>.recs appear only on the first TOOL-BEARING request (dspark"
+    echo "  drafts tool traffic only). Check: grep -E 'capture ACTIVE|draft dump"
+    echo "  ACTIVE' $LOG_FILE"
+}
+
 # Alternative model map: short name -> full GGUF path
 # Add entries here for each model variant. Use `start-<name>` / `restart-<name>`.
 # Uses parallel indexed arrays (bash 3.2 compatible — macOS default).
@@ -785,6 +821,14 @@ case "${1:-}" in
   status-proxy)
     status_proxy
     ;;
+  start-collect)
+    arm_collect_env || exit 1
+    exec "$0" start-vision-dspark
+    ;;
+  restart-collect)
+    arm_collect_env || exit 1
+    exec "$0" restart-vision-dspark
+    ;;
   start-*|restart-*)
     action="$1"
     do_restart=0
@@ -839,6 +883,10 @@ case "${1:-}" in
     echo "  start-dspark        - Start with DSpark block speculation (--mtp ... --dspark)"
     echo "  start-<model>       - Start ds4-server with an alternative model"
   echo "  start-qwen          - Qwen3.8 Flash Next Q4_K + vision + batched MTP (ctx 262k; QWEN_* env-overridable)"
+  echo "  start-collect       - Vision-Exp + dspark EXACT + TRAIN_DUMP/PARITY capture armed"
+  echo "                        (restart-collect = same with stop; DS4_TD_*/DSPARK_EXACT env-"
+  echo "                        overridable; NEVER plain start/restart while collecting -"
+  echo "                        zero capture + fp flip kills all disk-KV)"
     echo "  start-<model>-mtp   - Alternative model + legacy MTP drafter"
     echo "  start-<model>-dspark - Alternative model + DSpark support"
     echo "  stop                - Stop ds4-server"
