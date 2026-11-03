@@ -13,10 +13,13 @@ here; they need full re-serialization - future scope if ever required.
 Modes:
   --prove-roundtrip  : read target tensor's ORIGINAL bytes, write them back,
                        assert output file sha256 == input file sha256.
-  --repack NAME=NPZ  : NPZ key 'w' holds flat f32 values (e.g. 4352 for
-                       confidence_proj); block-quantize to q8_0 (engine-
-                       compatible: scale = absmax/127 rounded to f16,
-                       values = round(x/scale)), byte-swap in place.
+  --repack NAME=NPZ  : NPZ key 'w' (or '#KEY' suffix) holds flat f32 values
+                       (e.g. 4352 for confidence_proj); block-quantize to
+                       q8_0 (engine-compatible: scale = absmax/127 rounded
+                       to f16, values = round(x/scale)), byte-swap in place.
+                       q8_0 SOURCES ONLY (S5 review: f32->f32 would also be
+                       size-preserving but is untested - extend + test it
+                       before advertising it).
 Both write to --out (default <in>.repacked.gguf); --in is NEVER modified.
 
 q8_0 layout per block of 32 values: <e f16 scale><32 x i8>. Dequant parity
@@ -130,9 +133,6 @@ def tensor_bytes(dtype, nelem):
     raise SystemExit(f"unsupported dtype {dtype} for size math")
 
 
-DTYPE_NAMES = {0: "f32", 1: "f16", 8: "q8_0"}
-
-
 def sha256(path):
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -181,10 +181,28 @@ def main():
     ap.add_argument("--target-names", default="mtp.2.confidence_head."
                     "proj.weight", help="comma list for --prove-roundtrip")
     a = ap.parse_args()
+    if a.prove_roundtrip and a.repack:
+        sys.exit("--prove-roundtrip and --repack are mutually exclusive")
     out = a.out or a.gguf + ".repacked.gguf"
     if os.path.realpath(out) == os.path.realpath(a.gguf):
         sys.exit("refusing: --out equals --in (official file immutable)")
     tensors = walk_tensors(a.gguf)
+    # validate repack specs BEFORE the multi-GB copy (S5 review MINOR:
+    # a bad name left an orphaned 6 GB copy behind)
+    specs = []
+    for spec in a.repack:
+        name, npz = spec.split("=", 1)
+        if "#" in npz:
+            npz, key = npz.split("#", 1)
+        else:
+            key = "w"
+        if name not in tensors:
+            sys.exit(f"unknown tensor {name}; have "
+                     f"{sum(1 for _ in tensors)} tensors")
+        if tensors[name]["dtype"] != 8:
+            sys.exit(f"{name}: dtype {tensors[name]['dtype']} not q8_0; "
+                     "size-preserving repack supports q8_0 only")
+        specs.append((name, npz, key))
     src_sha = sha256(a.gguf)
     shutil.copyfile(a.gguf, out)
 
@@ -213,16 +231,8 @@ def main():
 
     import numpy as np
     with open(out, "r+b") as f:
-        for spec in a.repack:
-            name, npz = spec.split("=", 1)
-            if "#" in npz:
-                npz, key = npz.split("#", 1)
-            else:
-                key = "w"
+        for name, npz, key in specs:
             t = tensors[name]
-            if t["dtype"] != 8:
-                raise SystemExit(f"{name}: dtype {t['dtype']} not q8_0; "
-                                 "size-preserving repack supports q8_0 only")
             vals = np.load(npz)[key].astype(np.float32).reshape(-1)
             ne = 1
             for d in t["dims"]:

@@ -82,9 +82,20 @@ Preemption under time slip: 4 early start -> 1b -> NEVER 0/2.5/3/2.
 - [x] S5  (inside S3/S4 compute windows) REPACK TOOL on COPY of support gguf:
       extract -> re-insert -> file sha256-identical proof; layout ds4.c:6113.
       DONE ~00:5x tools/repack_dspark_tensor.py: roundtrip sha256 identity
-      PASS + in-place q8_0->q8_0 swap of confcal1b head proven on copy
-      (independent review still PENDING - see log).
+      PASS + in-place q8_0->q8_0 swap of confcal1b head proven on copy;
+      independent review CLOSED PASS_WITH_MINORS ~01:1x (minors fixed,
+      q8_0 goldens pinned).
 - [ ] S6  (gap filler) AB-PROTOCOL.md doc + bench script (no execution).
+      MUST encode (from S5 review): (1) swap strictly copy-based, record
+      output sha next to official sha in ledger; (2) engine binds
+      confidence_proj AT BOOT -> swap requires restart: quiesce collector
+      before restart, re-anchor comparison window post-boot (no mid-run
+      paired stats across swap); (3) heads keep deployable form: linear-
+      4096, NO bias, zero markov half until S4 features land; (4) gate
+      semantics = sigmoid(logit) >= .45 (not logit); (5) judge live A/B on
+      acceptance-length histogram + coverage, not AUC alone (gate-region
+      under-prediction ~1.6pp); (6) q8_0 golden tests must stay green
+      before any repack tool change.
 - [ ] R   07:15 ENGINE RESTORE (see policy) + night report section below.
 
 ## SLOTS: RESULTS (fill live)
@@ -215,3 +226,15 @@ pos-unique. Probe A4 gap_accept column formulaic at d=0 (annotated in code).
 - 00:5x S5 repack tool built + proof battery (see SLOTS:RESULTS S5).
   Roundtrip sha256 identity + in-place confcal1b swap: all four proofs
   PASS. INDEPENDENT REVIEW DISPATCHED (see next log entry when closed).
+- 01:1x S5 INDEPENDENT REVIEW: PASS_WITH_MINORS, zero blockers/majors.
+  Reviewer independently reproduced EVERY proof (4,566-byte diff locality,
+  geometry, dequant bit-identity, rescore .8453/.8453/2 flips/.002730) +
+  confcal1b closure (scores==sigmoid(X@w) to 1.8e-7, hashed split exact).
+  ENGINE-DEQUANT-RULING: tool convention == file convention PROVEN via
+  byte-idempotence on the official tensor; safe to deploy in-place.
+  Minors fixed: q8_0 golden tests PINNED (tests/test_gguf_dq.py: synthetic
+  layout golden + half-step bound + idempotence-on-official-bytes);
+  prove-roundtrip/repack mutex; repack specs validated BEFORE the 6 GB
+  copy (orphan-copy bug); dead DTYPE_NAMES removed; docstring now honest
+  q8_0-only. Note: gguf_dq.py has NO q8_0 port (my premise was wrong;
+  reviewer substituted stronger gold standard). S5 DONE.
