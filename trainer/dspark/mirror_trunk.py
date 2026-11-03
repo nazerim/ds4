@@ -15,11 +15,14 @@ pre sigmoid+eps / post 2*sigmoid / comb row-softmax + 20 alternating sinkhorn
 normalizations), collapse (sum pre_i*stream_i), expand (out_j = v*post_j +
 sum comb[j][i]*r_i), fp8 KV fake-quant (E4M3 per 64-block over the 448
 nope dims; rope 64 pass-through), router (sqrt(softplus) probs, bias on
-selection only, top-6, renorm w/ 1/16384 floor * 1.5).
-STUBS with kernel refs to port next: rope_tail(+inverse), attention
-(noncausal+sinks), grouped-lora out proj (attn_output_a/b), MoE experts
-(q2_k/iq2_xxs dequant via gguf_dq + shared q8_0), main_proj/stage0 inputs,
-spec_logits assembly.
+selection only, top-6, renorm w/ 1/16384 floor * 1.5), rope tail mode 0
+(adjacent pairs, theta=pos*base^(-2i/64), yarn inert ext=0 attn=1, inverse
+negates sin), noncausal MLA attention (scale 1/sqrt(512), kv rows shared as
+k and v, per-head sinks absorb denominator mass), swiglu with +-10 gate
+clamp (shared form; routed form = impl checklist), 6-row batch assembly.
+STUBS with kernel refs remaining: grouped-lora out proj (attn_output_a/b),
+MoE experts apply (gguf_dq.expert_slice_f32 dt10/16 verified to cover the
+support-gguf mtp stacks + shared shexp q8_0), final rms+base-head matmul.
 
 Production drift flags observed at boot: hc_stable=ON norm_unify=ON. The
 metal HC kernels document that the FUSED decode sites keep the historical
@@ -191,9 +194,79 @@ def assemble_stage_input(taps_f32: np.ndarray, ids: np.ndarray,
     return out.reshape(BLOCK + 1, N_HC * N_EMBD)
 
 
+# ---- RoPE tail (dsv4_rope.metal kernel_dsv4_rope_tail_f32, mode 0 =
+# adjacent pairs; production build has ROPE_EXP2_LOG2 OFF -> pow(); yarn is
+# inert for dspark calls: ext_factor=0, freq_scale=1, attn_factor=1,
+# n_ctx_orig=0; theta = pos * base^(-r/64), r = even index in rot region;
+# inverse negates sin. Rows carry pos0+row*1. host pos_step=1 @ds4_metal.m
+# 6242). ----
+
+ROPE_FREQ_BASE = 10000.0
+
+def rope_tail(x: np.ndarray, pos0: int, n_rot: int = N_ROT,
+              inverse: bool = False, freq_base: float = ROPE_FREQ_BASE
+              ) -> np.ndarray:
+    """x (rows, head_dim) or (rows, heads, head_dim) f32: leading dims pass
+    through, tail n_rot dims rotate as adjacent pairs; row t uses position
+    pos0 + t; theta_i = pos * freq_base^(-2i/n_rot), i=0..n_rot/2-1."""
+    x = np.asarray(x, dtype=np.float32)
+    squeeze = x.ndim == 2
+    x3 = x[:, None, :] if squeeze else x
+    rows, heads, hd = x3.shape
+    out = x3.copy()
+    n_nope = hd - n_rot
+    i = np.arange(n_rot // 2)
+    idx0 = n_nope + 2 * i
+    idx1 = idx0 + 1
+    theta = (np.arange(rows, dtype=np.float64) + pos0)[:, None] \
+        * np.power(float(freq_base), (-2.0 * i / n_rot)[None, :])
+    c = np.cos(theta).astype(np.float32)
+    s = np.sin(theta).astype(np.float32)
+    if inverse:
+        s = -s
+    x0 = x3[:, :, idx0]
+    x1 = x3[:, :, idx1]
+    out[:, :, idx0] = x0 * c[:, None, :] - x1 * s[:, None, :]
+    out[:, :, idx1] = x0 * s[:, None, :] + x1 * c[:, None, :]
+    return out[:, 0, :] if squeeze else out
+
+
+# ---- Noncausal MLA attention over raw kv rows + per-head sinks
+# (ds4_gpu_attention_noncausal_raw_batch_heads_tensor; scale=1/sqrt(head_dim)
+# from the shared encode; raw kv rows serve as BOTH k and v; sinks are extra
+# logits that absorb probability mass (no value). softmax denominator
+# includes exp(sink) [flash_attn.metal ~818]. ----
+
+ATTN_SCALE = 1.0 / np.sqrt(N_HEAD_DIM, dtype=np.float64)
+
+def attn_noncausal(q: np.ndarray, kv: np.ndarray, sinks: np.ndarray
+                   ) -> np.ndarray:
+    """q (rows,64,512), kv (visible,512), sinks (64,) -> out (rows,64,512)."""
+    q = q.astype(np.float32)
+    scores = np.einsum("rhd,vd->rhv", q, kv) * np.float32(ATTN_SCALE)
+    sink_logit = sinks.astype(np.float32)[None, :, None]      # (1,H,1)
+    m = np.maximum(scores.max(axis=-1, keepdims=True), sink_logit)
+    p = np.exp(scores - m)
+    ps = np.exp(sink_logit - m)
+    den = p.sum(axis=-1, keepdims=True) + ps
+    return np.einsum("rhv,vd->rhd", p / den, kv)
+
+
+def swiglu(gate: np.ndarray, up: np.ndarray, limit: float = 10.0
+           ) -> np.ndarray:
+    """metal/glu.metal: x1(gate) clamped +-limit (SHARED expert form; ROUTED
+    variant clamp/limit usage = gate impl checklist item, handoff §9);
+    silu(g)*up."""
+    g = np.clip(gate, -limit, limit)
+    return (g / (1.0 + np.exp(-g))) * up
+
+
 # STUBS (port next, kernel refs):
-#   rope_tail(x, rows, heads, dim, rot, pos_start, inverse) -- dsv4_rope.metal
-#   attn_noncausal(q, kv_rows, sinks, scale)               -- flash_attn.metal
-#   lora_out(attn_heads_out, attn_output_a, attn_output_b) -- dense q8_0 pair
-#   moe_ffn(x, layer)                                      -- gguf_dq experts
-#   final_head(conf_mix) -> spec_logits                    -- output_head_f16
+#   lora_out(attn_heads_out, attn_output_a, attn_output_b) -- grouped q8_0
+#       pair (8 groups x 1024, a: [8192,4096], b: [4096,8192] in npz)
+#   moe_ffn(x, layer)          -- gguf_dq.expert_slice_f32 (dt 10/16 both
+#       supported, support-gguf paths + names verified) + shared shexp q8_0
+#       rows from npz; swiglu clamp detail for ROUTED vs SHARED to pin
+#   final_head(conf_mix)       -- rms(final norm) @ output_head_f16 npz
+
+

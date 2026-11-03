@@ -98,3 +98,61 @@ def test_rms_norm_scale():
     x = np.full((1, 8), 3.0, dtype=np.float32)
     y = rms_norm(x, np.ones(8, dtype=np.float32), 0.0)
     assert np.allclose(y, 1.0)                          # unit-rms direction
+
+
+def test_rope_inverse_roundtrip_and_identity():
+    from dspark.mirror_trunk import rope_tail
+    rng = np.random.default_rng(7)
+    x = rng.normal(size=(5, 3, 512)).astype(np.float32)
+    back = rope_tail(rope_tail(x, 17), 17, inverse=True)
+    assert np.allclose(back, x, atol=1e-4)
+    assert np.allclose(rope_tail(x[:1], 0), x[:1], atol=1e-6)  # pos 0 row
+    # nope prefix untouched at pos != 0
+    r = rope_tail(x, 41)
+    assert np.array_equal(r[..., :448], x[..., :448])
+
+
+def test_rope_known_pair():
+    from dspark.mirror_trunk import rope_tail
+    x = np.zeros((1, 1, 512), dtype=np.float32)
+    x[0, 0, 448] = 1.0                                  # i=0: theta = pos
+    r = rope_tail(x, 1)
+    assert abs(r[0, 0, 448] - np.cos(1.0)) < 1e-6
+    assert abs(r[0, 0, 449] - np.sin(1.0)) < 1e-6
+    # i=1: theta = pos * base^(-2/64)
+    x2 = np.zeros((1, 1, 512), dtype=np.float32)
+    x2[0, 0, 450] = 1.0
+    r2 = rope_tail(x2, 2)
+    th = 2 * 10000.0 ** (-2.0 / 64.0)
+    assert abs(r2[0, 0, 451] - np.sin(th)) < 1e-5
+
+
+def test_attn_noncausal_matches_bruteforce():
+    from dspark.mirror_trunk import attn_noncausal
+    rng = np.random.default_rng(8)
+    rows, H, V = 3, 2, 512
+    q = rng.normal(size=(rows, H, 512)).astype(np.float32)
+    kv = rng.normal(size=(V, 512)).astype(np.float32)
+    sinks = rng.normal(size=H).astype(np.float32)
+    out = attn_noncausal(q, kv, sinks)
+    scale = float(np.float32(1.0 / np.sqrt(512.0)))
+    for r in range(rows):
+        for h in range(H):
+            sc = kv @ q[r, h] * scale
+            m = max(sc.max(), sinks[h])
+            p = np.exp(sc - m)
+            ps = np.exp(sinks[h] - m)
+            ref = (p[:, None] * kv).sum(0) / (p.sum() + ps)
+            assert np.allclose(out[r, h], ref, atol=2e-4), (r, h)
+    # huge negative sink = mass absorbed (out shrinks toward 0 directionally)
+    out2 = attn_noncausal(q, kv, np.full(H, -50.0, dtype=np.float32))
+    assert np.abs(out2).max() < np.abs(out).max() + 1.0
+
+
+def test_swiglu_clamp():
+    y = np.zeros((1, 4), dtype=np.float32)
+    gate = np.full((1, 4), 100.0, dtype=np.float32)
+    up = np.ones((1, 4), dtype=np.float32)
+    out = __import__("dspark.mirror_trunk", fromlist=["swiglu"]).swiglu(
+        gate, up)
+    assert (out < 10.1).all() and (out > 9.9).all()     # clamped at 10*silu

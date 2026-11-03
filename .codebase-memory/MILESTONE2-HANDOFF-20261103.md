@@ -92,12 +92,19 @@ pyarrow/pytest; venv exists):
   tensors-20261101/output_head_f16.npz (1.06GB, f16 rows of 4096, NaN-free,
   f32-verified std 0.175 / absmax 3.9). Gate B argmax agreement is the
   correctness backstop for head scale.
-- experts (if needed after §2a): base gguf holds mtp expert stacks
-  quantized (q2_k gate/up, q8_0 down per name); offsets via
-  extract_gguf_tensor --list; dequant via trainer/dspark/gguf_dq.py
-  (q2_k/iq2_xxs bit-exact + golden tests). Full materialization ~=
-  **25.8 GB/stage x 3 = 77 GB** f32 (rev1's 26 GB was wrong) - prefer
-  on-demand top-6 dequant.
+- experts: live in the **SUPPORT gguf** (NOT base): mtp.{0,1,2}.ffn_gate_
+  exps/ffn_up_exps = **iq2_xxs** (engine dt 16), ffn_down_exps = **q2_k**
+  (dt 10); dims [4096,2048,256] stacks; offsets via extract_gguf_tensor
+  --list exps on the support file. gguf_dq.expert_slice_f32 already keys
+  on dt 10/16 -> on-demand per-expert dequant works TODAY. Full f32
+  materialization stays ~77 GB (25.8/stage) - on-demand preferred.
+  ENGINE TYPE ENUM WARNING: ds4.c:2323 gguf_types[] is DS4's OWN numbering
+  ([8]=q8_0, [10]=q2_k, [16]=iq2_xxs - NOT ggml-standard; row-stride math
+  is the ground-truth check, 4352B/4096-row = q8_0). tools/
+  extract_gguf_tensor.py DT_NAMES now matches. Shared experts (ffn_*_
+  shexp) already f32 in the npz; routed bias exp_probs_b per stage;
+  swiglu gate clamp +-10 confirmed for SHARED (glu.metal:33,58) - pinned
+  routed-vs-shared clamp usage = impl checklist item.
 - parity: s1 SEALED 65,536 cycles (+ backup ~/Backups/.../parity-s1/);
   s3: pid41277 16,234 cycles (day-11 era), **pid43176 1,726 cycles** (dev-
   capture era - the scripted first ~202 belong to the 5 known convs; filter

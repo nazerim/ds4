@@ -18,9 +18,11 @@ goes through trainer/dspark/gguf_dq.py (bit-exact ports, golden-tested).
 """
 import argparse, json, os, struct, sys
 
-DT_NAMES = {0:"f32",1:"f16",2:"q2_k",3:"q3_s",4:"q4_0",5:"q4_1",6:"q5_0",
-            7:"q5_1",8:"q8_0",9:"i8",10:"i16",11:"i32",12:"f64",
-            13:"iq1_s",14:"iq2_xxs",15:"iq2_xs",16:"iq3",17:"bf16"}
+# ENGINE enum per ds4.c:2323 gguf_types[] (NOT ggml-standard order!)
+DT_NAMES = {0:"f32",1:"f16",2:"q4_0",3:"q4_1",6:"q5_0",7:"q5_1",8:"q8_0",
+            9:"q8_1",10:"q2_k",11:"q3_k",12:"q4_k",13:"q5_k",14:"q6_k",
+            15:"q8_k",16:"iq2_xxs",17:"iq2_xs",18:"iq3_xxs",19:"iq1_s",
+            20:"iq4_nl",21:"iq3_s",22:"iq2_s",23:"iq4_xs"}
 SCALAR = {0:4,1:2,2:1,3:1,4:1,5:1,6:1,7:1,10:8,11:8,12:8}  # code->bytes? NO:
 # canonical gguf metadata types: uint8=0,int8=1,uint16=2,int16=3,uint32=4,
 # int32=5,float32=6,bool=7,string=8,array=9,uint64=10,int64=11,float64=12
