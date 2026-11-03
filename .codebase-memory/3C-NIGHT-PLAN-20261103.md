@@ -46,10 +46,8 @@ Preemption under time slip: 4 early start -> 1b -> NEVER 0/2.5/3/2.
       Q(c) seed-batch-era chains: labels real tokens (chain-continuity +
           props[0]==labels[1] at accepted cycles) -> markov-label usable.
       GATE: written decision in §DECISIONS below; script = dspark/probe_labels3c.py
-- [ ] S1a 22:50-23:55 CONF-ERA LABELS: recs x parity x conv -> npz slab,
-      exact-era SEALED ONLY (day-12 pid53508 file + day-13; active/60838
-      EXCLUDED - append-live). Builder dspark/labels3c.py.
-      GATE: counts match td_manifest, chain 100%, era tags verified by spot rows.
+- [x] S1a 22:50-23:55 CONF-ERA LABELS — DONE ~23:5x (review PASS_WITH_MINORS,
+      minors fixed+slab rebuilt identical) conf slab day-13/pid53508 only.
 - [ ] S2.5 23:55-00:40 ACCEPT-PROXY EVAL HARNESS (dspark/eval3c.py):
       conf>=.45 precision/recall + AUC vs observed accepts.
       GATE: reproduces milestone-1 anchors AUC .7418/.7933 +- .005 on frozen replay.
@@ -72,6 +70,12 @@ Preemption under time slip: 4 early start -> 1b -> NEVER 0/2.5/3/2.
 - [ ] R   07:15 ENGINE RESTORE (see policy) + night report section below.
 
 ## SLOTS: RESULTS (fill live)
+- S1a: /Volumes/FireCuda520/ds4-train/labels3c/conf_s1a_20261103.npz
+  30,205 cycles / 100,474 slot rows (f16 conf rows [:dlen] only) / meta +
+  masked labels; kept math 30,609-6(dlen1)-398(nl<2)-0(quar); index-join
+  pos_mismatch 0; cases a/b/c = 17,937/8,566/3,702; masked-BCE positive
+  rates .802/.744/.568/.521 (D-S0-4 FINAL). Reviewer full-array byte-exact
+  recompute + 3-cycle spot audit PASS; f16 storage ruling: keep.
 - S0:
 - S1a:
 - S2.5:
@@ -107,13 +111,14 @@ Preemption under time slip: 4 early start -> 1b -> NEVER 0/2.5/3/2.
 3. MARKOV LABELS era-AGNOSTIC: writer dumps checkpoint.v[pos+k] = committed
    stream (ds4.c:76298-76311, lineage-rewind guard); seed==labels[0]=1.0,
    chain 100% both eras. Era rule (pid>=53508) for CONF labels only.
-4. EXACT-ERA PRIORS (amended - marginal != commit): JOINT per-slot commit
-   .801/.465/.238/.175 <- THESE feed BCE priors; conditional-on-prefix
-   .807/.58/.51/.74; marginal matches .807/.641/.556/.512 are CONTAMINATED
-   by post-reject coincidental matches (reviewer independent recompute,
-   n=27,862). The old "1+.807<=1.9x" plausibility clause = unfalsifiable,
-   dropped. Seed-era marginals .978/.955/.934/.920 = opportunistic, conf
-   labels NOT used from that era.
+4. EXACT-ERA PER-SLOT RATES (S1a review FINAL, index-join kept n=30,205,
+   byte-recomputed two-pass): masked-BCE positive rate (prior init / class
+   weights) = .802/.744/.568/.521 (slots 0-3); stored-row positive density
+   = .802/.597/.494/.430; uncond chain P(>=d accepts) = .802/.597/.339/.176
+   -> E[depth]~2.9 incl bonus. The reviewer's earlier .465/.238 set =
+   off-by-one artifact (cap-match cohorts dropped), SUPERSEDED. Marginals
+   .807/.641/.556/.512 remain contaminated-by-design - do not use. Seed-era
+   marginals .978/.955/.934/.920 = opportunistic era, conf labels NOT used.
 5. ENGINE QUIRK keep (mechanism verified): full-window commit = accepts+1
    (87-90% at kl=4); reject replays replacement + successor sample =
    accepts+2 (74% at kl=0) - verify2-always alternative falsified (it would
@@ -129,8 +134,16 @@ pos-unique. Probe A4 gap_accept column formulaic at d=0 (annotated in code).
   via new dspark/probe_labels3c.py; A1-A5 legs; engine code read confirms
   point-accept. Report .codebase-memory/probe3c_s0_20261103.json.
 - 22:55 S0 decisions frozen -> INDEPENDENT REVIEW before S1a.
-- 23:1x S0 INDEPENDENT REVIEW (fresh ctx): probe CORRECT + reproducible
-  241/241 fields; VERDICT REWORK on decision TEXT only: cap-case mislabel
-  (would inject 12-72% false negatives), marginal-vs-joint prior confusion,
+- 23:1x S0 INDEPENDENT REVIEW (fresh ctx): VERDICT REWORK on decision text
+  only (probe correct, 241/241 repro). Blockers: cap-case mislabel (would
+  inject 12-72% false negatives), marginal-vs-joint prior confusion,
   dlen==1 fake_argmax exclusion, conf-rows-stale-beyond-dlen mask,
   index-1:1 join for S1a. All folded into D-S0 FINAL above. S0 DONE.
+- 23:4x S1a INDEPENDENT REVIEW (same reviewer, continued session):
+  PASS_WITH_MINORS. Builder stats CORRECT; reviewer's own S0-review priors
+  (.465/.238) ruled an off-by-one artifact (cap-match cohorts) - D-S0-4
+  amended to masked-BCE rates .802/.744/.568/.521 (stored density
+  .802/.597/.494/.430; uncond chain .802/.597/.339/.176). Full-array
+  byte-exact recompute + spot audits PASS; f16 keep. Minors fixed in
+  labels3c.py (multi-pair cyc offset, hard-fail join, bucket fix, era
+  guard pid>=53508 with --allow-any-era); slab rebuilt identical. S1a DONE.
