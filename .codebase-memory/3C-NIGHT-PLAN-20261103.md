@@ -75,8 +75,12 @@ Preemption under time slip: 4 early start -> 1b -> NEVER 0/2.5/3/2.
       (b) Gate A through torch reproduces slot0 cos .9898
       (c) gradcheck: sinkhorn mixers + router
       Memory: L2 fires here if chunked dequant thrashes.
-- [ ] S1b 05:15-06:45 FULL-POOL MARKOV SLAB (all sealed days ex-day-3,
-      next-token labels era-agnostic, quarantine-masked). Partial OK (exact first).
+- [x] S1b 05:15-06:45 FULL-POOL MARKOV SLAB — BUILT ~02:0x (pulled early;
+      review PENDING). markov_s1b_20261104.npz: 20 pid files, all sealed
+      days ex-day-3; recs-only path (parity NOT needed for next-token
+      labels); 724,297 recs read, 459,365 rows, 457,486 valid (1,879
+      nl<2 sentinels next=-1, mask by mk_valid), 266,952 quarantine-
+      excluded; provenance cols mk_file/mk_ridx; spot audit 6/6 vs raw.
 - [ ] S4  06:45-07:15 JOINT RUN START — ONLY if S2 all green AND S3 green.
       Checkpointed/epoch, hard 07:15 stop, morning = partial epoch curve vs .4529.
 - [x] S5  (inside S3/S4 compute windows) REPACK TOOL on COPY of support gguf:

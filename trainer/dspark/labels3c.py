@@ -70,9 +70,14 @@ def quarantine_excl(recs_path: str, q) -> set:
     return file_exclusions(recs_path, q)
 
 
-def build_pair(recs_path: str, parity_path: str, q, mode: str,
-               cyc_offset: int = 0, allow_any_era: bool = False):
+def build_pair(recs_path: str, parity_path: str | None, q, mode: str,
+               cyc_offset: int = 0, allow_any_era: bool = False,
+               file_id: int = 0):
+    """One (recs[, parity]) pair. markov mode may run parity-less (labels
+    come from recs alone); conf mode REQUIRES parity (conf-row features)."""
     stem = os.path.basename(recs_path)
+    if mode == "conf" and parity_path is None:
+        raise SystemExit("conf mode needs a parity path (features)")
     if mode == "conf" and not allow_any_era:
         # era guard (D-S0-3): conf labels valid only for pid >= 53508
         try:
@@ -84,14 +89,18 @@ def build_pair(recs_path: str, parity_path: str, q, mode: str,
                              "conf labels INVALID (D-S0-3). Override "
                              "knowingly with --allow-any-era.")
     n = os.path.getsize(recs_path) // RECORD_BYTES
-    npar = os.path.getsize(parity_path) // PARITY_STRIDE
+    npar = (os.path.getsize(parity_path) // PARITY_STRIDE
+            if parity_path else -1)
     conv = conv_of_records(recs_path, n)
     excl_idx = quarantine_excl(recs_path, q) if q else set()
 
     rr = open(recs_path, "rb")
     mmr = mmap.mmap(rr.fileno(), 0, access=mmap.ACCESS_READ)
-    pr = open(parity_path, "rb")
-    mmp = mmap.mmap(pr.fileno(), 0, access=mmap.ACCESS_READ)
+    if parity_path:
+        pr = open(parity_path, "rb")
+        mmp = mmap.mmap(pr.fileno(), 0, access=mmap.ACCESS_READ)
+    else:
+        pr = mmp = None
 
     recs = []
     for i in range(n):
@@ -99,27 +108,31 @@ def build_pair(recs_path: str, parity_path: str, q, mode: str,
         nl = r[3]
         recs.append((int(r[0]), int(r[1]), list(r[6:6 + nl]), nl))
 
-    stats = {"n": n, "npar": npar, "index_join": min(n, npar),
+    stats = {"n": n, "npar": npar,
+             "index_join": min(n, npar) if parity_path else n,
              "pos_mismatch": 0, "kept": 0, "skip_quar": 0, "skip_dlen1": 0,
              "skip_dlen_range": 0, "skip_nlabel": 0,
              "excl_idx": len(excl_idx),
              "quarantine": bool(q)}
     slots_conf = []   # per kept cycle: (conf_rows[dlen,4096], labels[dlen])
     mk_seed, mk_next, mk_valid = [], [], []
+    mk_file, mk_ridx = [], []
     meta = []
     slot_rows, slot_lbl, slot_cyc = [], [], []
     cyc = cyc_offset
-    for i in range(min(n, npar)):
+    nlim = min(n, npar) if parity_path else n
+    for i in range(nlim):
         pos, seed, labels, nl = recs[i]
-        base = i * PARITY_STRIDE
-        ppos, pseed, dlen, _st, _r = PARITY_HDR.unpack_from(mmp, base)
-        if ppos != pos:
-            raise RuntimeError(f"index join broken at record {i}: recs pos "
-                               f"{pos} != parity pos {ppos}")
+        if parity_path:
+            base = i * PARITY_STRIDE
+            ppos, pseed, dlen, _st, _r = PARITY_HDR.unpack_from(mmp, base)
+            if ppos != pos:
+                raise RuntimeError(f"index join broken at record {i}: recs "
+                                   f"pos {pos} != parity pos {ppos}")
+            props = list(PAR_PROPS.unpack_from(mmp, base + 12))
         if i in excl_idx:
             stats["skip_quar"] += 1
             continue
-        props = list(PAR_PROPS.unpack_from(mmp, base + 12))
         if mode == "conf":
             if nl < 2:
                 stats["skip_nlabel"] += 1
@@ -156,8 +169,14 @@ def build_pair(recs_path: str, parity_path: str, q, mode: str,
             mk_seed.append(labels[0] if labels else -1)
             mk_next.append(labels[1] if nl >= 2 else -1)
             mk_valid.append(valid)
+            mk_file.append(file_id)
+            mk_ridx.append(i)
             stats["kept"] += valid
-    mmr.close(); rr.close(); mmp.close(); pr.close()
+    mmr.close(); rr.close()
+    if mmp is not None:
+        mmp.close()
+    if pr is not None:
+        pr.close()
 
     out = {"stats": stats}
     if mode == "conf":
@@ -174,6 +193,8 @@ def build_pair(recs_path: str, parity_path: str, q, mode: str,
         out["mk_seed"] = np.array(mk_seed, np.int32)
         out["mk_next"] = np.array(mk_next, np.int32)
         out["mk_valid"] = np.array(mk_valid, np.int8)
+        out["mk_file"] = np.array(mk_file, np.int16)
+        out["mk_ridx"] = np.array(mk_ridx, np.int32)
     return out, cyc
 
 
@@ -181,7 +202,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", choices=["conf", "markov"], required=True)
     ap.add_argument("--pair", nargs=2, action="append", required=True,
-                    metavar=("RECS", "PARITY"))
+                    metavar=("RECS", "PARITY"),
+                    help="PARITY='NONE' for markov mode (recs-only labels)")
     ap.add_argument("--quarantine", default=None)
     ap.add_argument("--allow-any-era", action="store_true",
                     help="skip the conf-mode pid>=53508 era guard (knowingly)")
@@ -193,26 +215,28 @@ def main():
         q = load_quarantine(a.quarantine)
     agg = None
     next_cyc = 0
-    for recs, par in a.pair:
+    pair_stats = []
+    for file_id, (recs, par) in enumerate(a.pair):
+        par = None if par == "NONE" else par
         res, next_cyc = build_pair(recs, par, q, a.mode,
                                    cyc_offset=next_cyc,
-                                   allow_any_era=a.allow_any_era)
+                                   allow_any_era=a.allow_any_era,
+                                   file_id=file_id)
         print("pair", os.path.basename(recs), res["stats"])
+        pair_stats.append({"file_id": file_id, "file": recs,
+                           "stats": res["stats"]})
         if agg is None:
-            agg = res
+            agg = {k: (v.copy() if isinstance(v, np.ndarray) else v)
+                   for k, v in res.items() if k != "stats"}
         else:
-            # concat simple fields (meta/slot arrays), keep first stats
+            # concat simple fields (meta/slot arrays)
             for k in ("conf_rows", "slot_label", "slot_cycle", "mk_seed",
-                      "mk_next", "mk_valid"):
+                      "mk_next", "mk_valid", "mk_file", "mk_ridx", "meta"):
                 if k in agg and k in res and len(res[k]):
                     agg[k] = np.concatenate([agg[k], res[k]])
-            if "meta" in agg and len(res["meta"]):
-                agg["meta"] = np.concatenate([agg["meta"], res["meta"]])
     if agg is None:
         raise SystemExit("no pairs")
-    np.savez(a.out, **{k: v for k, v in agg.items()
-                       if k != "stats" and not k.startswith("_")},
-             _stats=json.dumps(agg["stats"]))
+    np.savez(a.out, **agg, _stats=json.dumps(pair_stats))
     print("wrote", a.out)
 
 
