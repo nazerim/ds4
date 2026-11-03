@@ -191,6 +191,14 @@ Preemption under time slip: 4 early start -> 1b -> NEVER 0/2.5/3/2.
   engine keeps OFFICIAL w1/w2; disk-KV/model_fp implications); deployed
   conf path stays confcal1b; S5 repack sha 3365e6b4.. unchanged, arm-B
   artifact needs no regeneration.
+  SEED REPLICATION (s4full2, --seed 1, ~05:55): plateau top1 .4646
+  [.4636,.4657] / top3 .6103; paired vs anchor +1.17pp CI [+0.67,+1.71]
+  W/L 238/150 sign p=9.2e-6 -> SECOND run beats anchor too; s4full2 vs
+  s4full1 -0.13pp CI [-0.35,+0.08] p=0.28 = run-to-run band ~0.1pp <<
+  effect -> review MINOR 2 (seed variance) CLOSED. Both plateau bands
+  sit fully above anchor band [.4513,.4529]. Claimable line upgraded:
+  "two independent seeds (0,1) both beat the anchor head on the frozen
+  day-3 holdout; deltas +1.31/+1.17pp, CIs exclude 0; seed spread ~0.1pp".
 - S3b: OFFICIAL-HEAD REPLAY (dspark/official3c.py, run_officialreplay1/):
   engine-faithful replay of the official conf head on the S1a slab
   ([h_d | markov_w1(prev_tok_d)], prev_0=seed, prev_d=props[d-1], code
@@ -376,3 +384,7 @@ pos-unique. Probe A4 gap_accept column formulaic at d=0 (annotated in code).
   val .8523 > official .8360 (+1.63pp) > confcal1b .8453 (+0.70pp),
   beats official on ALL 4 slots, ECE .0115. See SLOTS:RESULTS S4b.
   Review + S6 v2 re-check dispatched together.
+- 05:5x S4 SEED REPLICATION (s4full2, seed 1): plateau .4646/.6103,
+  paired vs anchor +1.17pp CI [+0.67,+1.71] p=9.2e-6; vs s4full1
+  -0.13pp p=0.28. Two seeds both beat anchor; seed band ~0.1pp.
+  Review MINOR 2 closed. trainer/TRAIN_V1_s4full2.json.
