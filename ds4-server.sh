@@ -133,14 +133,20 @@ DS4_THINKING_BUDGET_TOKENS="${DS4_THINKING_BUDGET_TOKENS:-16384}"
 export DS4_THINKING_BUDGET_TOKENS
 
 # Thinking-loop tripwire (server default ON; ds4_server.c): force-closes a
-# thinking span once exact token-level repetition sustains >=2400 tokens
+# thinking span once exact token-level repetition sustains >=1200 tokens
 # (per-request: thinking_tripwire / tripwire_min_tokens; named false opts
-# out). CAPTURE ERA LABEL: from starts using this script onward, thinking
-# spans may close early on loops -> trainer loops.py needs the tripwire
-# regex (span geometry same as budget chop lines). Details:
+# out). Default history: 2400 at ship; lowered to 1200 same night from the
+# 16k live specimen (drift-converging loop would have tripped at ~10.4k vs
+# a 15.7k near-miss / 16k budget chop; healthy-days control: 0/122 segments
+# even at 600). CAPTURE ERA LABEL: from starts using this script onward,
+# thinking spans may close early on loops -> trainer loops.py needs the
+# tripwire regex (span geometry same as budget chop lines). Details:
 # .codebase-memory/PLAN-TRIPWIRE-20261102.md + TRIPWIRE-RESULTS-20261102.md
+# + TRIPWIRE-FOLLOWUP-RESULTS-20261103.md
 DS4_THINK_TRIPWIRE="${DS4_THINK_TRIPWIRE:-1}"
 export DS4_THINK_TRIPWIRE
+DS4_TRIPWIRE_MIN_TOKENS="${DS4_TRIPWIRE_MIN_TOKENS:-1200}"
+export DS4_TRIPWIRE_MIN_TOKENS
 
 # Alternative model map: short name -> full GGUF path
 # Add entries here for each model variant. Use `start-<name>` / `restart-<name>`.
@@ -894,7 +900,7 @@ case "${1:-}" in
     echo "                        QWEN_KV_DIR/QWEN_KV_SIZE mirror it per profile)"
     echo "  DS4_THINK_TRIPWIRE  - '1' enables the thinking-loop tripwire server-wide"
     echo "                        (default: 1). DS4_TRIPWIRE_MIN_TOKENS sets the"
-    echo "                        repetition-volume (default 2400, range 600-2560)."
+    echo "                        repetition-volume (default 1200, range 600-2560)."
     echo "  KV_SMALL_DENSE      - Keep ALL KV anchors ≤ this token count sticky"
     echo "                        (default: 49152). Raise to bound head-divergence rebuilds."
     exit 1
