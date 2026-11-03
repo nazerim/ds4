@@ -15,6 +15,13 @@ NIGHT-RUN-3-RESULTS.md -> NIGHT-RUN-2-RESULTS.md -> PLAN-TRAINER-20261101.md
   + new) + PARITY s3 + budget 8192 + tripwire 1. BANK NOTE from now on:
   era = 'tripwire-escalation'. Prior: PID 41277/43176/47339 lineages in
   day-10/day-11/active.
+- **V-DSPARK ERA LIVE** (Nov-03 12:44, PID 50920): restart-vision-dspark
+  (plain restart DROPS --dspark => zero capture + fp change forces full
+  re-prefill, burned 2x same day). Capture banners verified ACTIVE; parity
+  + recs growing on pid50920 files. 0.6 A/B: termbench@temp0.6 produced a
+  55k-token VISIBLE DSML-payload runaway (no THINKING flag = tripwire blind
+  there; killed 14:00:36) -> 0.6 REJECTED, temp 1.0 stands, corpus regime
+  unchanged. Runaway banked-clean via LOOP-MANUAL sidecar (9,017 recs).
 - TRIPWIRE ERA (pre-escalation): PIDs 41277 (binary Nov-03 00:13 with
   tripwire commits 2fd684d+e94d055, strings-verified pre-deploy): env =
   budget 8192 + DS4_THINK_TRIPWIRE=1 (script default now), TRAIN_DUMP=active
@@ -166,6 +173,10 @@ Extraction: /Volumes/FireCuda520/ds4-train/tensors-20261101/
 7. Commit-only-on-ask; PROPOSED-COMMITS.md ready (7 groups).
 8. Server-mode dspark = tool-requests-only is ENGINE BEHAVIOR (by design,
    DSML suppression) - capture inherits it (agent traffic = target distro).
+9. SAMPLING: thinking temp stays 1.0 (DeepSeek-style). 0.6 A/B (Nov-03,
+   termbench): sharper lock -> thinking trip period-16 + 55k-token visible
+   payload runaway OUTSIDE all guard coverage. Payload-region guard = the
+   real gap (engine window item), not the temperature.
 
 ## 6. QUEUE (ordered)
 0a. DONE Nov-02: loops tool (trainer/dspark/loops.py, 4 new tests, 16/16
@@ -226,11 +237,26 @@ Extraction: /Volumes/FireCuda520/ds4-train/tensors-20261101/
    code: ds4.c prepare_impl 80060-80560, markov/conf helpers 36537-37100,
    metal graph in ds4_metal.m dspark section); 2x-corpus rerun when banked
    pool ~400k; iq2_xxs dequant already ported for expert materialization.
+   LOOP-MECHANISM NOTE (Nov-03): opportunistic acceptance (default
+   EXACT=0) accepts draft only at target argmax (ds4.c 76688) = sampler-
+   tail clip = attractor amplifier; dspark-OFF window logged 0 trips vs
+   11 in the ON window. NEXT restart (bank tonight = free window): add
+   DSPARK_EXACT=1 + conf watch (exact mode default conf 0.8, script:236)
+   -> trips/hr decides deploy regime BEFORE 3c conf-head training (markov
+   head unaffected; conf calibration target DEPENDS on accept policy).
 3. Needs future window (each short): deep-ctx+tools bounding refinement
    (128k+ prompts, ON/OFF) - optional polish; parity dump capture session
    for real mirror validation run (engine ON is fine - dump is env-gated,
-   so actually NOT window-bound beyond a restart).
+   so actually NOT window-bound beyond a restart); NEW: tripwire coverage
+   for visible/tool-payload decode (termbench@0.6 runaway = evidence, 55k
+   junk cycles) + DS4_THINK_TEMPERATURE env hook (sampling A/Bs without
+   rebuild).
 4. Bank rhythm: say "bank" -> stop/validate/manifest/backup dated dir;
+   audit regen MUST merge the manual sidecar: `uv run python -m
+   dspark.loops --audit --logs '/Users/naz/Projects/ds4/log/ds4.log*'
+   --manual LOOP-MANUAL-20261103.json --out LOOP-QUARANTINE-<date>.json`
+   (sidecar kills the payload-runaway window; hi=59620 = max RECORDED pos,
+   NOT ck_len - overshoot silently excises 0, verified live).
    graceful stop only (shutdown-flush verified: conv tails persist via
    server_close_resources -> ds4_session_free -> td flush).
 5. SEPARATE-AGENT READY: TODO-THINKING-BUDGET-20261102.md - Tier-1 (server-

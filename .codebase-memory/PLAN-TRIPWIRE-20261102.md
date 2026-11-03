@@ -1,5 +1,28 @@
 # PLAN-TRIPWIRE-20261102 — thinking loop tripwire (Tier-1, plan only)
 
+## Improvement ledger (2026-11-03, post-escalation ship)
+
+| # | Improvement | Status | Evidence basis | Next action |
+|---|---|---|---|---|
+| 1 | Per-request hard thinking budget (5249d80) | shipped | chops exact, live-confirmed | — |
+| 2 | Loop tripwire, scaled-volume rule (2fd684d) | shipped | study 0/164 false trips; 17 prod fires | — |
+| 3 | Re-entry escalation: suppress after 2 same-request closes (12cc181) | shipped | dbwal proved close-only bounded; 17 chops/17 re-attachments | first live "repeated re-entry" sighting (watch logs) |
+| 4 | Volume default 2400 -> 1200 (49fe1d8) | shipped | 16k specimen curve 9.8/10.4/10.9/15.7k @ 600/1200/1800/2400; controls 0/122 even @600 | re-measure fire-latency distribution after an era day |
+| 5 | (gen=N) in close lines -> exact span geometry | shipped | TRIP_RE matched live | loops.py may drop PROGRESS_RE recovery (trainer lane) |
+| 6 | Anchor-repeat detector (v2): >=K verbatim run seen >=2x, period-free | proposed | semantic/drift class: day2/9 monsters, live 663-block @9% lag-rate - structurally invisible to period tests | BLOCKED on hole-aware sim redo (None-salted hash prototype false-negatived on ~1/6-token capture dropouts); then pick K/M on healthy-corpus grid |
+| 7 | Cross-request escalation + context pruning (session fingerprint, wrap-up rotation, drop verbatim core from reconstructed prompt) | planned (followup exp. section above) | 7x identical p=447 across 17 requests = per-request re-prime; escape half-life 2 steps | large patch: KV-rebuild cost, tool-binding safety, capture sign-off, request-level opt-in first |
+| 8 | Quarantine depth-cut dilution fix (real loops at depth 4-5) | proposed, trainer lane | pid48230/pid32353 "healthy" segments decode to verbatim loops | hand off finding; tripwire log lines = span-accurate markers |
+| 9 | pmax > 512 window extension | rejected v1 | specimen: caught at p=186 within window; p=663 class is drift not exact | reopen only on an exact-large-p sighting |
+| 10 | Budget closes counting toward escalation | deferred (R8) | client-named budget chops are legitimate | future knob if data says so |
+| 11 | Suppression-chain live E2E | open caveat | induction refused x5 prompt styles; state machine reviewed + unit'd | observe first production re-entry, then targeted fixture |
+
+Free validation in flight: tonight's looping session under the 1200 window -
+converging drift should chop ~10-12k (retro-validates #4 on hole-free live
+data); a clear loop NOT firing while converging is the strongest argument
+to prioritize #6 (half-day sim redo, engine-free).
+
+## Scope note
+
 Companion to TODO-TRIPWIRE-20261102.md. Builds directly on committed budget
 work (`5249d80`); reuses its force-close path verbatim. Anchors verified
 in-tree 2026-11-02 post-commit. Engine currently on Qwen profile (PID from
