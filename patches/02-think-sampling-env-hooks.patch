@@ -1,0 +1,155 @@
+--- a/ds4_server.c
++++ b/ds4_server.c
+@@ -1241,6 +1241,47 @@
+     if (v < TW_MIN_VOLUME_FLOOR) v = TW_MIN_VOLUME_FLOOR;
+     if (v > TW_VOLUME_RING_MAX) v = TW_VOLUME_RING_MAX;
+     return v;
++}
++
++/* Thinking-regime sampling defaults (WINDOW-PATCHES-20261103 P1): rebase
++ * the DeepSeek-style thinking defaults (DS4_DEFAULT_TEMPERATURE/TOP_P/
++ * MIN_P, ds4.h) at LAUNCH via DS4_THINK_TEMPERATURE / DS4_THINK_TOP_P /
++ * DS4_THINK_MIN_P for sampling A/Bs without rebuilds.  Unlike the tripwire
++ * knobs these are parsed EXACTLY ONCE in main() before serving, because the
++ * decode loop re-reads them per token block and the #3975-analog audit (see
++ * the mtp_spec_disabled hoist) forbids per-token getenv.  Strict parse,
++ * mirroring the budget-env doctrine: whole-string match, hex rejected
++ * ("0x10" must not parse), non-finite or out-of-range rejected; invalid or
++ * absent = the compiled default.  Explicit request values still win: the
++ * _set flags guard the use sites in the decode loop.  SCOPE NOTE: the
++ * thinking regime covers the WHOLE request (both channels) whenever
++ * thinking is enabled, not just in-span tokens - that is exactly how the
++ * Nov-03 temp-0.6 experiment reached the visible payload, so the startup
++ * banner is mandatory (strings + log both name the active values). */
++static float server_think_env_float(const char *name, float fallback,
++                                    float lo, float hi) {
++    const char *e = getenv(name);
++    if (!e || !*e) return fallback;
++    if (e[0] == '0' && (e[1] == 'x' || e[1] == 'X')) return fallback;
++    char *end = NULL;
++    float v = strtof(e, &end);
++    if (end == e || *end != '\0') return fallback;
++    if (!isfinite(v) || v < lo || v > hi) return fallback;
++    return v;
++}
++
++static float g_think_temperature = DS4_DEFAULT_TEMPERATURE;
++static float g_think_top_p = DS4_DEFAULT_TOP_P;
++static float g_think_min_p = DS4_DEFAULT_MIN_P;
++
++static void server_think_sampling_init(void) {
++    g_think_temperature = server_think_env_float("DS4_THINK_TEMPERATURE",
++                                                 DS4_DEFAULT_TEMPERATURE,
++                                                 0.0f, 10.0f);
++    g_think_top_p = server_think_env_float("DS4_THINK_TOP_P",
++                                           DS4_DEFAULT_TOP_P, 0.0f, 1.0f);
++    g_think_min_p = server_think_env_float("DS4_THINK_MIN_P",
++                                           DS4_DEFAULT_MIN_P, 0.0f, 1.0f);
+ }
+ 
+ /* "thinking_tripwire": true|false; null = not named (same null-tolerance
+@@ -16223,14 +16264,19 @@
+         float top_p = j->req.top_p;
+         float min_p = j->req.min_p;
+         if (ds4_think_mode_enabled(j->req.think_mode)) {
+-            /* Thinking keeps the fixed DeepSeek-style sampling defaults, but
+-             * only for knobs the client left out: an explicit request value
+-             * (e.g. temperature 0 from a benchmark harness) must win, or the
+-             * same greedy request returns different text on every call. */
+-            if (!j->req.temperature_set) temperature = DS4_DEFAULT_TEMPERATURE;
++            /* Thinking keeps the DeepSeek-style sampling defaults (env-
++             * rebaseable at launch via DS4_THINK_TEMPERATURE/TOP_P/MIN_P,
++             * see server_think_sampling_init), but only for knobs the
++             * client left out: an explicit request value (e.g.
++             * temperature 0 from a benchmark harness) must win, or the
++             * same greedy request returns different text on every call.
++             * Applies to the whole request (thinking AND visible tokens)
++             * while think mode is on - deliberate (Nov-03 A/B evidence),
++             * and what the visible tripwire now guards. */
++            if (!j->req.temperature_set) temperature = g_think_temperature;
+             if (!j->req.top_k_set) top_k = 0;
+-            if (!j->req.top_p_set) top_p = DS4_DEFAULT_TOP_P;
+-            if (!j->req.min_p_set) min_p = DS4_DEFAULT_MIN_P;
++            if (!j->req.top_p_set) top_p = g_think_top_p;
++            if (!j->req.min_p_set) min_p = g_think_min_p;
+         }
+         const bool greedy_tool_syntax = !thinking.inside && in_tool_call &&
+             !dsml_decode_state_uses_payload_sampling(dsml_state);
+@@ -18725,6 +18771,14 @@
+         server_close_resources(&s);
+         return 1;
+     }
++
++    /* Thinking-regime sampling defaults: parsed once here (before serving),
++     * logged so the active era's binary state is checkable with strings +
++     * the startup line, never per-token. */
++    server_think_sampling_init();
++    server_log(DS4_LOG_DEFAULT,
++               "ds4-server: thinking sampling defaults temp=%.3f top_p=%.3f min_p=%.3f (env-overridable)",
++               g_think_temperature, g_think_top_p, g_think_min_p);
+ 
+     int lfd = listen_on(cfg.host, cfg.port);
+     if (lfd < 0) {
+@@ -21129,6 +21183,54 @@
+     TEST_ASSERT(!server_tripwire_env_enabled());        /* "1" only */
+     unsetenv("DS4_THINK_TRIPWIRE");
+     TEST_ASSERT(!server_tripwire_env_enabled());
++}
++
++/* Thinking-regime sampling env hooks (WINDOW-PATCHES-20261103 P1): strict
++ * whole-string float, hex rejected ("0x3" out, matching the budget-env
++ * doctrine), non-finite and out-of-range rejected, absent/garbage = the
++ * compiled default; init caches all three for the decode loop. */
++static void test_think_sampling_env(void) {
++    const float base = DS4_DEFAULT_TEMPERATURE;
++    unsetenv("DS4_THINK_TEMPERATURE");
++    TEST_ASSERT(server_think_env_float("DS4_THINK_TEMPERATURE", base,
++                                       0.0f, 10.0f) == base);
++    setenv("DS4_THINK_TEMPERATURE", "", 1);
++    TEST_ASSERT(server_think_env_float("DS4_THINK_TEMPERATURE", base,
++                                       0.0f, 10.0f) == base);
++    setenv("DS4_THINK_TEMPERATURE", "0.6", 1);
++    TEST_ASSERT(server_think_env_float("DS4_THINK_TEMPERATURE", base,
++                                       0.0f, 10.0f) == 0.6f);
++    setenv("DS4_THINK_TEMPERATURE", "0x3", 1);
++    TEST_ASSERT(server_think_env_float("DS4_THINK_TEMPERATURE", base,
++                                       0.0f, 10.0f) == base);
++    setenv("DS4_THINK_TEMPERATURE", "0.6abc", 1);
++    TEST_ASSERT(server_think_env_float("DS4_THINK_TEMPERATURE", base,
++                                       0.0f, 10.0f) == base);
++    setenv("DS4_THINK_TEMPERATURE", "-0.5", 1);
++    TEST_ASSERT(server_think_env_float("DS4_THINK_TEMPERATURE", base,
++                                       0.0f, 10.0f) == base);
++    setenv("DS4_THINK_TEMPERATURE", "11", 1);
++    TEST_ASSERT(server_think_env_float("DS4_THINK_TEMPERATURE", base,
++                                       0.0f, 10.0f) == base);
++    setenv("DS4_THINK_TEMPERATURE", "inf", 1);
++    TEST_ASSERT(server_think_env_float("DS4_THINK_TEMPERATURE", base,
++                                       0.0f, 10.0f) == base);
++    setenv("DS4_THINK_TOP_P", "1.5", 1);
++    TEST_ASSERT(server_think_env_float("DS4_THINK_TOP_P", DS4_DEFAULT_TOP_P,
++                                       0.0f, 1.0f) == DS4_DEFAULT_TOP_P);
++    setenv("DS4_THINK_TEMPERATURE", "0.6", 1);
++    setenv("DS4_THINK_TOP_P", "0.9", 1);
++    unsetenv("DS4_THINK_MIN_P");
++    server_think_sampling_init();
++    TEST_ASSERT(g_think_temperature == 0.6f);
++    TEST_ASSERT(g_think_top_p == 0.9f);
++    TEST_ASSERT(g_think_min_p == DS4_DEFAULT_MIN_P);
++    unsetenv("DS4_THINK_TEMPERATURE");
++    unsetenv("DS4_THINK_TOP_P");
++    server_think_sampling_init();   /* leave globals at compiled defaults */
++    TEST_ASSERT(g_think_temperature == DS4_DEFAULT_TEMPERATURE &&
++                g_think_top_p == DS4_DEFAULT_TOP_P &&
++                g_think_min_p == DS4_DEFAULT_MIN_P);
+ }
+ 
+ static void test_api_thinking_controls_parse(void) {
+@@ -28579,6 +28681,7 @@
+     test_model_alias_thinking_controls();
+     test_api_thinking_controls_parse();
+     test_tripwire_detector();
++    test_think_sampling_env();
+     test_render_think_max_prompt_prefix();
+     test_render_non_thinking_prompt_closes_think();
+     test_render_drops_old_reasoning_without_tools();

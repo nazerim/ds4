@@ -1,0 +1,87 @@
+--- a/trainer/dspark/loops.py
++++ b/trainer/dspark/loops.py
+@@ -6,6 +6,14 @@
+      healthy 2-5x. Cut: depth > 15 AND pairs >= 300. (Unchanged, reviewed
+      sound Nov-03.)
+   2. SPAN-level: chop log lines mark budget/tripwire force-closes.
++     - "trip": thinking tripwire close lines (wrap-up + close injected).
++     - "vis": visible-loop abort lines (engine patch 01, 2026-11-03
++       WINDOW-PATCHES bundle): the thinking-run detector extended to
++       visible/DSML payload decode; action is ABORT (no injection), line
++       reads "visible loop tripwire: aborted generation at T visible
++       tokens (period P) (gen=G)". Same [B+G-T, B+G] geometry; excised
++       unconditionally when pid-attributed like "trip" (the firing IS
++       cycle evidence and the whole aborted turn is junk).
+ 
+ SPAN GEOMETRY (fixed per code review ses_e62ad1309: B1/B2, Nov-03):
+ Engine logs "chat ctx=A..B:S ... (gen=G)" where B is the PROMPT length fixed
+@@ -47,6 +55,10 @@
+ TRIP_RE = re.compile(
+     r"(?:chat|completion) ctx=\d+\.\.(\d+):\d+ thinking loop tripwire: "
+     r"closed span at (\d+) tokens(?: \(period \d+\))?"
++    r"(?:.*?\(gen=(\d+)\))?")
++VIS_RE = re.compile(
++    r"(?:chat|completion) ctx=\d+\.\.(\d+):\d+ visible loop tripwire: "
++    r"aborted generation at (\d+) visible tokens(?: \(period \d+\))?"
+     r"(?:.*?\(gen=(\d+)\))?")
+ PROGRESS_RE = re.compile(r"(?:chat|completion) ctx=\d+\.\.(\d+):\d+ gen=(\d+)")
+ PID_RE = re.compile(r"parity_pid(\d+)\.bin")
+@@ -122,6 +134,18 @@
+                     hi = b + gen
+                     spans.append([max(0, hi - tok), hi, "trip", pid])
+                     last_gen[b] = gen
++                    continue
++                m = VIS_RE.search(line)
++                if m:
++                    # visible-loop abort (engine patch 01, WINDOW-PATCHES
++                    # 20261103): same [B+G-T, B+G] geometry; the window is
++                    # the visible (tool-payload) run at the turn's tail.
++                    b, tok = int(m.group(1)), int(m.group(2))
++                    gen = (int(m.group(3)) if m.group(3)
++                           else last_gen.get(b, tok))
++                    hi = b + gen
++                    spans.append([max(0, hi - tok), hi, "vis", pid])
++                    last_gen[b] = gen
+     return spans
+ 
+ 
+--- a/trainer/tests/test_loops.py
++++ b/trainer/tests/test_loops.py
+@@ -68,11 +68,15 @@
+         "1103 00:13:00 ds4-server: chat ctx=190000..190050:50 thinking loop "
+         "tripwire: closed span at 2747 tokens (period 447)\n"
+         "1103 00:13:30 ds4-server: completion ctx=120000..125000:5000 "
+-        "thinking loop tripwire: closed span at 3000 tokens (period 77)\n")
++        "thinking loop tripwire: closed span at 3000 tokens (period 77)\n"
++        "1103 00:14:00 ds4-server: chat ctx=300000..355000:55000 visible "
++        "loop tripwire: aborted generation at 1420 visible tokens "
++        "(period 87) (gen=54321), no injection\n")
+     spans = parse_spans([str(lp)])
+     assert spans[0] == [175303, 183495, "budget", 555]      # [B+G-T, B+G]
+     assert spans[1] == [190050, 192797, "trip", 555]        # no progress -> [B, B+T]
+     assert spans[2] == [125000, 128000, "trip", 555]        # completion prefix
++    assert spans[3] == [355000 + 54321 - 1420, 355000 + 54321, "vis", 555]
+     # review B1 worked-example regression:
+     assert spans[0][0] == 175303 and spans[0][1] == 175303 + 8192
+ 
+@@ -161,6 +165,20 @@
+     assert len(file_exclusions(rp2, q2)) == 72
+ 
+ 
++def test_attributed_vis_span_unconditional_like_trip(tmp_path):
++    # visible-loop aborts (engine patch 01): pid-attributed "vis" spans
++    # excise unconditionally, like "trip" -- the detector firing IS exact-
++    # cycle evidence and the whole aborted turn is junk. Contrast with
++    # "budget" (depth-guarded) and with unattributed vis windows (which
++    # fall to the generic SPAN_WINDOW_DEPTH guard in file_exclusions).
++    rp = str(tmp_path / "train_pid555.recs")
++    _write(rp, _healthy(1000, 200))            # depth ~1x: NOT depth-flaggable
++    q = {"version": 3, "segments": {}, "spans": [[1000, 1199, "vis", 555]]}
++    assert len(file_exclusions(rp, q)) == 200
++    q["spans"] = [[1000, 1199, "vis", 556]]    # foreign pid untouched
++    assert file_exclusions(rp, q) == set()
++
++
+ def test_manual_span_unconditional_and_merged(tmp_path):
+     # Visible/tool-payload runaways (termbench@0.6 class) live OUTSIDE
+     # thinking spans: no log line, near-1x interleaved depth. A pid-

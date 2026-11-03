@@ -1,0 +1,80 @@
+--- a/ds4_server.c
++++ b/ds4_server.c
+@@ -16171,6 +16171,22 @@
+     int tw_total = 0;     /* uncapped in-span sampled count for reporting */
+     bool tw_tripped = false, tw_exhaust = false;
+     int tw_period = 0;
++    /* Visible-segment tripwire (WINDOW-PATCHES-20261103 P0): the same
++     * sustained-exact-repeat detector watching the current VISIBLE token
++     * run - outside thinking spans, including DSML tool-payload regions
++     * (the Nov-03 termbench@0.6 55k-token payload runaway class the
++     * thinking detector is structurally blind to: its ring only sees
++     * strictly-inside-span tokens).  Shares the thinking_tripwire
++     * request/env kill switch (vw arms off j->req.thinking_tripwire), but
++     * NOT the later tw_on disable flips - an abort needs no close special,
++     * so a vocab/valve/no-fit defeat of the thinking side must not blind
++     * this one.  Action is abort-only: never inject text into the answer
++     * channel; the turn ends as a plain length stop. */
++    bool vw_on = j->req.thinking_tripwire;
++    int vw_ring[3072];
++    int vw_len = 0, vw_since = 0;
++    int vw_total = 0;     /* uncapped current-visible-run sampled count */
++    int vw_period = 0;
+     /* Re-entry escalation: count tripwire closes; on the re-open AFTER the
+      * 2nd close, suppress thinking for the rest of THIS request by
+      * force-closing at the first in-span sampled token (fresh request =
+@@ -16529,6 +16545,54 @@
+                         if (p > 0) {
+                             tw_period = p;
+                             tw_exhaust = true;
++                        }
++                    }
++                }
++            }
++            if (vw_on) {
++                /* Visible-run detector (WINDOW-PATCHES-20261103 P0): same
++                 * pure tripwire_period + same volume, fed by SAMPLED tokens
++                 * strictly inside the current non-thinking run.  Any span
++                 * transition (open token, close token) or in-span token
++                 * resets the run, so it never arms across a thinking
++                 * interruption.  Tool-payload regions ARE visible runs:
++                 * thinking_state_feed is skipped inside tool state, so
++                 * thinking.inside stays false across DSML payload text --
++                 * exactly the Nov-03 runaway territory the thinking ring
++                 * cannot see.  Abort-only: no text is injected into the
++                 * answer channel; the turn ends with the existing
++                 * finish=length semantics (the incomplete-tool-call path
++                 * keeps length stops as-is: no repair, no continuation,
++                 * no degrade rewrite). */
++                if (thinking.inside || was_thinking || budget_injected) {
++                    vw_len = 0;
++                    vw_since = 0;
++                    vw_total = 0;
++                } else {
++                    vw_total++;
++                    if (vw_len == (int)(sizeof(vw_ring) / sizeof(vw_ring[0]))) {
++                        memmove(vw_ring, vw_ring + 1,
++                                (size_t)(vw_len - 1) * sizeof(vw_ring[0]));
++                        vw_len--;
++                    }
++                    vw_ring[vw_len++] = token;
++                    if (++vw_since >= 32 && vw_len >= 600) {
++                        vw_since = 0;
++                        int p = tripwire_period(vw_ring, vw_len, tw_volume);
++                        if (p > 0) {
++                            vw_period = p;
++                            finish = "length";
++                            stop_detail = "visible loop tripwire";
++                            server_log(DS4_LOG_DEFAULT,
++                                       "ds4-server: %s ctx=%s visible loop tripwire: aborted generation at %d visible tokens (period %d) (gen=%d), no injection",
++                                       j->req.kind == REQ_CHAT ? "chat" : "completion",
++                                       ctx_span, vw_total, vw_period,
++                                       completion);
++                            trace_event(s, trace_id,
++                                        "visible loop tripwire: period %d at %d visible tokens (gen=%d); aborted, finish=length",
++                                        vw_period, vw_total, completion);
++                            stop_decode = true;
++                            break;
+                         }
+                     }
+                 }
