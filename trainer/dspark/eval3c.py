@@ -76,8 +76,8 @@ def commit_rates(slab):
 
 
 def gate_stats(score, commit, valid, thresh=0.45):
-    s, y, v = score[valid], commit[valid], True
-    pred = s >= thresh
+    s, y = score[valid], commit[valid]
+    pred = (s >= thresh).astype(int)   # engine gate: cut iff sigmoid< thresh
     tp = int(((pred == 1) & (y == 1)).sum())
     fp = int(((pred == 1) & (y == 0)).sum())
     fn = int(((pred == 0) & (y == 1)).sum())
@@ -103,7 +103,9 @@ def evaluate(score, slab, thresh=0.45):
         if m.sum() and valid[m].any():
             out["per_slot"][d] = gate_stats(score[m], commit[m], valid[m],
                                             thresh)
-    # baseline: positional-prior (score decreases with slot depth)
+    # baseline: positional-prior (score decreases with slot depth). NB:
+    # gate precision/recall are meaningless for the baseline (constant score
+    # per slot); only its AUCs are the S3 bar (per-slot .5, pooled ~.546).
     base = -slot_idx.astype(float)
     out["baseline_positional"] = gate_stats(base, commit, valid, thresh=0.5)
     return out
@@ -132,7 +134,9 @@ def _auc_ref(score, y):
     return float((r1 - n1 * (n1 + 1) / 2) / (n1 * n0))
 
 
-def selftest(slab_path, tol=0.01):
+def selftest(slab_path, expect_trainer=None, expect_chain=None, tol=0.01):
+    """expect_*: optional comma lists (passed via CLI) so future slabs are
+    not judged against frozen day-13 constants."""
     rng = np.random.default_rng(20261103)
     results = {"auc_equiv": [], "rates": None}
     # adversarial + tie cases
@@ -159,27 +163,40 @@ def selftest(slab_path, tol=0.01):
     rates, ns = commit_rates(slab)
     results["rates_trainer_seen"] = rates
     results["rates_n"] = ns
-    # Trainer-seen per-slot positive rate = (label==1)/(valid) over STORED
-    # rows at slot d. Deep-slot rows only exist when dlen>d, which over-
-    # represents acceptance, so this is HIGHER than the unconditional
-    # accept-chain P(a>=d+1)/P(a>=d). Both are real; the trainer sees THIS.
-    expect_trainer = [0.802, 0.744, 0.728, 0.735]
-    results["rates_trainer_ok"] = all(
-        r is not None and abs(r - e) <= tol
-        for r, e in zip(rates[:4], expect_trainer))
-    # Reconcile with reviewer's UNCONDITIONAL accept-chain from meta k_lab.
+    # Trainer-seen per-slot positive rate = P(label==1 | UNMASKED
+    # (BCE-scored) row at slot d). Deep-slot rows only exist when dlen>d,
+    # which over-represents acceptance, so this is HIGHER than the
+    # unconditional accept-chain P(a>=d+1)/P(a>=d). Both are real; the
+    # trainer's gradients see THIS one (class weights / bias init).
+    if expect_trainer:
+        results["rates_trainer_ok"] = all(
+            r is not None and abs(r - e) <= tol
+            for r, e in zip(rates[:4], expect_trainer))
+    else:
+        results["rates_trainer_ok"] = None
+    # UNCONDITIONAL accept-chain from meta k_lab (headline stat).
     meta = slab["meta"]
     k_lab = meta[:, 3].astype(int)
-    dlen = meta[:, 1].astype(int)
-    a = np.where(k_lab >= 0, k_lab, dlen)  # accept run (=dlen when no reject)
+    w = meta[:, 4].astype(int)
+    # run length: k_lab if rejected in-window else full EVALUATED window w
+    # (case-c cycles have w<dlen: only w slots were ever evaluated)
+    a = np.where(k_lab >= 0, k_lab, w)
     unconditional = []
     for d in range(4):
         ge_d = (a >= d).sum()
         ge_d1 = (a >= d + 1).sum()
         unconditional.append(round(ge_d1 / ge_d, 3) if ge_d else None)
     results["rates_uncond_chain"] = unconditional
-    results["PASS"] = bool(results["auc_equiv_ok"]
-                           and results["rates_trainer_ok"])
+    if expect_chain:
+        results["rates_chain_ok"] = all(
+            r is not None and abs(r - e) <= tol
+            for r, e in zip(unconditional[:4], expect_chain))
+    else:
+        results["rates_chain_ok"] = None
+    results["PASS"] = bool(
+        results["auc_equiv_ok"]
+        and (results["rates_trainer_ok"] is not False)
+        and (results["rates_chain_ok"] is not False))
     return results
 
 
@@ -189,9 +206,16 @@ def main():
     ap.add_argument("--slab", required=True)
     ap.add_argument("--scores", default=None)
     ap.add_argument("--thresh", type=float, default=0.45)
+    ap.add_argument("--expect", default=None,
+                    help="comma list, trainer-seen rates to assert")
+    ap.add_argument("--expect-chain", default=None,
+                    help="comma list, uncond accept-chain rates to assert")
     a = ap.parse_args()
     if a.selftest:
-        r = selftest(a.slab)
+        et = ([float(x) for x in a.expect.split(",")] if a.expect else None)
+        ec = ([float(x) for x in a.expect_chain.split(",")]
+              if a.expect_chain else None)
+        r = selftest(a.slab, expect_trainer=et, expect_chain=ec)
         print(json.dumps(r, indent=1))
         raise SystemExit(0 if r["PASS"] else 1)
     slab = np.load(a.slab, allow_pickle=True)

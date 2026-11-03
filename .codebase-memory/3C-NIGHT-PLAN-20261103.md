@@ -50,18 +50,25 @@ Preemption under time slip: 4 early start -> 1b -> NEVER 0/2.5/3/2.
       minors fixed+slab rebuilt identical) conf slab day-13/pid53508 only.
 - [x] S2.5 23:55-00:40 ACCEPT-PROXY EVAL HARNESS (dspark/eval3c.py) — DONE.
       GATE REDEFINED (defect found): original "reproduce .7418/.7933 +- .005"
-      NOT reproducible - those are TRAINED V1Head conf AUCs on stale streak
-      labels; weights/scores never persisted; official head proj needs
-      [h4096|markov256] but parity stores h only. New honest gate: (a) auc()
-      == confidence_probe.auc bit-exact incl ties [PASS 4/4], (b) trainer-seen
-      rates re-derived from slab + uncond chain reconciled [PASS:
-      .802/.744/.728/.735 + .802/.744/.568/.521], (c) per-slot gate-stats +
-      positional-prior baseline for S3. "Beat milestone-1 .7418/.7933" lives
-      on as S3's aspirational ceiling note; S3's REAL bar = beat per-slot
-      positional-prior AUC (computed in same run).
+      is REPLAYABLE-BUT-NOT-GATE-VALID, not unreproducible. Those are TRAINED
+      V1Head conf AUCs on STALE streak labels (train_v1.py:255); the weights
+      DO exist (trainer/v1_head_cos32clean2.pt) and day-3 persists, so they
+      are replayable - but they measure cycle-level streak>=1/3, a target
+      D-S0-1/5 disqualified, so they cannot gate a per-slot-accept head.
+      Official-head replay from parity IS impossible: head proj is (1,4352)
+      =[h4096|markov256], parity stores h only. New gate (PASS): (a) auc()
+      == confidence_probe.auc bit-exact incl ties [4/4], (b) trainer-seen
+      unmasked-row rates .802/.744/.728/.735 re-derived + uncond chain
+      .802/.744/.568/.521 reconciled from same k_lab, (c) gate-stats +
+      positional-prior baseline (pooled .5457) = S3's real bar.
 - [ ] S3 00:40-02:45 CONF-ONLY CALIBRATION RUN: BCE on accept labels, trainable
       confidence proj (parity conf rows in, NO trunk). Tag confcal1.
-      GATE: held-out AUC >= .7418/.7933. (Agent builds S5 repack tool during run.)
+      GATE (S2.5-reviewed): held-out per-slot AUC must BEAT positional-prior
+      baseline (per-slot .5 / pooled .5457 from eval3c) AND be calibrated
+      (ECE small); milestone-1 .7418/.7933 = aspirational ceiling note ONLY
+      (a different, streak-label metric - NOT the gate). Split day-13 cycles
+      train/val (e.g. 90/10 by conv, conv-disjoint) - day-3 stays frozen for
+      the S4 joint run only. (Agent builds S5 repack tool during run.)
 - [ ] S2  02:45-05:15 TORCH PORT mirror_torch.py (1:1 of Trunk.cycle, handoff
       §7/§8/§8b/§9) + verify legs:
       (a) torch vs numpy conf-row cos ~1.000 same cycles
@@ -120,13 +127,14 @@ Preemption under time slip: 4 early start -> 1b -> NEVER 0/2.5/3/2.
    stream (ds4.c:76298-76311, lineage-rewind guard); seed==labels[0]=1.0,
    chain 100% both eras. Era rule (pid>=53508) for CONF labels only.
 4. EXACT-ERA PER-SLOT RATES (S2.5 RECONCILED - one dataset, TWO stats, do
-   not mix): (i) TRAINER-SEEN BCE row rate = P(commit | stored row at slot
-   d) = .802/.744/.728/.735 (dens 30205/24217/14059/7254) <- use THIS for
-   class weights / bias init, it is what gradients actually see (deep slots
-   exist only in long windows -> over-represent acceptance); (ii)
-   UNCONDITIONAL accept-chain P(a>=d+1 | a>=d) = .802/.744/.568/.521
-   (pool-wide, from k_lab) <- headline accept-quality stat. Eval harness
-   selftest derives BOTH from the slab and matches. Stored-row positive
+   not mix): (i) TRAINER-SEEN BCE row rate = P(commit | UNMASKED
+   (BCE-scored) row at slot d) = .802/.744/.728/.735 (dens
+   30205/24217/14059/7254) <- use THIS for class weights / bias init, it is
+   what gradients actually see (deep slots exist only in long windows ->
+   over-represent acceptance); (ii) UNCONDITIONAL accept-chain
+   P(a>=d+1 | a>=d) = .802/.744/.568/.521 (pool-wide, from k_lab, run
+   length a = k_lab if >=0 else w) <- headline accept-quality stat. Eval
+   harness selftest derives+asserts BOTH from the slab. Stored-row positive
    density .802/.597/.494/.430; uncond chain P(>=d) .802/.597/.339/.176.
    Historical: reviewer's S0-review .465/.238 set was an off-by-one
    artifact (superseded in S1a review); marginals .807/.641/.556/.512
@@ -160,3 +168,13 @@ pos-unique. Probe A4 gap_accept column formulaic at d=0 (annotated in code).
   byte-exact recompute + spot audits PASS; f16 keep. Minors fixed in
   labels3c.py (multi-pair cyc offset, hard-fail join, bucket fix, era
   guard pid>=53508 with --allow-any-era); slab rebuilt identical. S1a DONE.
+- 23:5x S2.5 INDEPENDENT REVIEW: PASS_WITH_MINORS + one builder factual
+  error caught: "weights/scores never persisted" FALSE -
+  trainer/v1_head_cos32clean2.pt EXISTS (my compound zsh glob misled me).
+  Milestone .7418/.7933 = replayable but NOT gate-valid (streak-label
+  target, D-S0-disqualified). S3 queue gate FIXED before S3 (stale
+  >=.7418 line replaced: beat positional-prior baseline + calibration).
+  eval3c minors fixed: unmasked-row wording, --expect/--expect-chain
+  parameters (no frozen day-13 constants), chain leg ASSERTED, case-c
+  run-length uses w, dead var, baseline annotation. Re-selftest PASS with
+  both expect lists; 33/33. S2.5 DONE (review closed).
