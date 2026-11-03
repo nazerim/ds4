@@ -1,0 +1,42 @@
+{
+ "conv": 4,
+ "targets": 24,
+ "parity_hits": 19,
+ "slots": {
+  "slot0": {
+   "n": 19,
+   "cos_mean": 0.989772,
+   "cos_min": 0.965507,
+   "maxerr_mean": 0.40161,
+   "maxerr_max": 0.93204
+  },
+  "slot1": {
+   "n": 19,
+   "cos_mean": 0.977642,
+   "cos_min": 0.945683,
+   "maxerr_mean": 0.30859,
+   "maxerr_max": 0.68983
+  },
+  "slot2": {
+   "n": 11,
+   "cos_mean": 0.967313,
+   "cos_min": 0.903552,
+   "maxerr_mean": 0.40611,
+   "maxerr_max": 0.84681
+  },
+  "slot3": {
+   "n": 5,
+   "cos_mean": 0.953006,
+   "cos_min": 0.91021,
+   "maxerr_mean": 0.33917,
+   "maxerr_max": 0.92717
+  },
+  "slot4": {
+   "n": 2,
+   "cos_mean": 0.927025,
+   "cos_min": 0.865018,
+   "maxerr_mean": 0.29458,
+   "maxerr_max": 0.47642
+  }
+ }
+}

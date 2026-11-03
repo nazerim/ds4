@@ -67,6 +67,19 @@ The stage cache is WINDOWED, cycle-granular, per stage (ds4.c read in full):
    ambiguous 'probe'); grade early cycles by RELATIVE gates only.
    (iii) Optional later (window+tiny): dump <=128 prefill h-rows per conv
    (~1.5MB) if byte-exact early-cycle replay is ever required.
+>>> AMENDED SAME DAY by GATE-A findings (see MILESTONE2-GATEA-RESULTS-
+   20261103.md; authoritative): the window is POSITION-ADJACENCY managed
+   (merge_target_range keeps old rows only when start<=old_end; multi-token
+   accepts break adjacency -> crop resets). DECODE-TIME WINDOW IS ALMOST
+   ALWAYS EMPTY; dense history exists only in cycle-1 post-prefill. Mirror
+   default = MIRROR_EMPTY_RING=1. GATE A CONDITIONAL PASS: slot0 cos_mean
+   0.9898 on pid53508 exact-era (19 cycles), residuals attributed to
+   scheduler-skip support rows (unrecordable), activation-quant diffs,
+   depth compounding. CRITICAL ERA FACT: pre-EXACT data ran M5 seed-batch
+   mode (real-token draft rows) -> gate comparisons ONLY on pid>=53508.
+   Noise probe proves trunk smooth (2% extra input noise -> self-cos
+   >=0.9996): 0.99-class is the honest bar, 0.9995 would need per-position
+   h capture extension (deferred).
 REMAINING TO READ for the forward (S2.1): attention context assembly over
 window rows + the 6 batch rows (metal_graph_eval_dspark_stage_block 35891+,
 noncausal probe 35900s, rope positions for cached rows, raw_cache layout
@@ -222,6 +235,35 @@ renorm (40388), dsv4_fp8_kv_quantize layout (which dims quantized: kv
 512-with-rot-64?), attention scaling (1/sqrt? sinks in softmax denom),
 rope_tail inverse semantics + yarn params (freq_base/betas from shape),
 hc_expand_split residual formula, spec_logits head path.
+>>> ALL CLOSED by §8b + §9 below (kernel reads complete; lora group map =
+contiguous 8-head chunks verified via heads_bytes=n_tok*8*4096@ds4_metal.m).
+
+## 9. GATE A HARNESS FACTS (mirror_trunk.py run_gate_a; first light 0.94)
+JOIN RULE (empirically verified pid43176 probe): parity hdr.seed = props[0]
+= FIRST PROPOSAL, NOT the seed token. recs r[1] = labels[0] = actual t[pos].
+Join = (pos, recs.labels[1]) == (parity.pos, parity.seed) -- works on
+accepted-first-proposal cycles (~all dlen>=1 mostly); rejected-first cycles
+are skipped (mild selection bias, revisit later). pos COLLIDES across convs
+of one pid -- never join on pos alone.
+ELIGIBILITY: window exact requires cycles >= WINDOW_ROWS+8 (135) past every
+turn boundary (pos jump > 32 == new prompt == engine RE-SEEDS window from
+prefill taps (absent from .recs) each turn, not only conv start) AND conv
+deep enough. Dev pid43176 convs are all too shallow (max 152 recs) -- use
+day-12 pid48230 (auto-selects 5230-rec conv, 6 bounds, targets exist).
+FIRST RESULT: cos ~0.886-0.949 maxerr ~0.65-0.78 (slots 0-2, one cycle).
+That is far ABOVE the ~3% fp8-input-noise floor (cos ~0.9995 expected) =>
+systematic convention bug remains, NOT a noise ceiling. Diagnostics in
+flight (MIRROR_HC_STABLE=1 sigmoid form; MIRROR_EMPTY_RING=1 window blame
+split). Conventions verified already: group-slice lora, ids [seed,noise x4],
+position ladder (target@pos-1, drafts@pos..pos+4), kv row order [window|
+target|drafts], per-stage ring append/evict math (seed eviction after 127
+appends -> off-by-one verified), eps values (rms 1e-20 vision-exp override,
+hc 1e-6), norm weight direct-scale (means ~0.2 not 1+w), router scale
+1/sqrt512, sinks as logit in denom.
+NEXT IF STABLE-FLIP FAILS: suspect activation quantization in fused matmul
+kernels (q8 pair kernels may quantize activations: attention_output 'q8'
+weight-only vs 'low_q8_rows' path), MoE gate/up/down accumulation order
+(f16 vs f32), rope pow-vs-exp2 path, sinkhorn fused-norm variant differences.
 
 ## 8. KERNEL MATH BANKED (Nov-03 late session)
 ROUTER (batch, our model; ds4_metal.m 34330-34470 + dsv4_misc.metal
