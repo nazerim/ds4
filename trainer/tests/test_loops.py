@@ -68,11 +68,15 @@ def test_log_parse_gen_geometry(tmp_path):
         "1103 00:13:00 ds4-server: chat ctx=190000..190050:50 thinking loop "
         "tripwire: closed span at 2747 tokens (period 447)\n"
         "1103 00:13:30 ds4-server: completion ctx=120000..125000:5000 "
-        "thinking loop tripwire: closed span at 3000 tokens (period 77)\n")
+        "thinking loop tripwire: closed span at 3000 tokens (period 77)\n"
+        "1103 00:14:00 ds4-server: chat ctx=300000..355000:55000 visible "
+        "loop tripwire: aborted generation at 1420 visible tokens "
+        "(period 87) (gen=54321), no injection\n")
     spans = parse_spans([str(lp)])
     assert spans[0] == [175303, 183495, "budget", 555]      # [B+G-T, B+G]
     assert spans[1] == [190050, 192797, "trip", 555]        # no progress -> [B, B+T]
     assert spans[2] == [125000, 128000, "trip", 555]        # completion prefix
+    assert spans[3] == [355000 + 54321 - 1420, 355000 + 54321, "vis", 555]
     # review B1 worked-example regression:
     assert spans[0][0] == 175303 and spans[0][1] == 175303 + 8192
 
@@ -159,6 +163,20 @@ def test_attributed_budget_needs_depth_evidence(tmp_path):
     q2 = {"version": 3, "segments": {},
           "spans": [[1000, 1071, "budget", 556]]}
     assert len(file_exclusions(rp2, q2)) == 72
+
+
+def test_attributed_vis_span_unconditional_like_trip(tmp_path):
+    # visible-loop aborts (engine patch 01): pid-attributed "vis" spans
+    # excise unconditionally, like "trip" -- the detector firing IS exact-
+    # cycle evidence and the whole aborted turn is junk. Contrast with
+    # "budget" (depth-guarded) and with unattributed vis windows (which
+    # fall to the generic SPAN_WINDOW_DEPTH guard in file_exclusions).
+    rp = str(tmp_path / "train_pid555.recs")
+    _write(rp, _healthy(1000, 200))            # depth ~1x: NOT depth-flaggable
+    q = {"version": 3, "segments": {}, "spans": [[1000, 1199, "vis", 555]]}
+    assert len(file_exclusions(rp, q)) == 200
+    q["spans"] = [[1000, 1199, "vis", 556]]    # foreign pid untouched
+    assert file_exclusions(rp, q) == set()
 
 
 def test_manual_span_unconditional_and_merged(tmp_path):

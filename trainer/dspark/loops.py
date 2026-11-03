@@ -6,6 +6,14 @@ Two mechanisms, one JSON artifact (version 3):
      healthy 2-5x. Cut: depth > 15 AND pairs >= 300. (Unchanged, reviewed
      sound Nov-03.)
   2. SPAN-level: chop log lines mark budget/tripwire force-closes.
+     - "trip": thinking tripwire close lines (wrap-up + close injected).
+     - "vis": visible-loop abort lines (engine patch 01, 2026-11-03
+       WINDOW-PATCHES bundle): the thinking-run detector extended to
+       visible/DSML payload decode; action is ABORT (no injection), line
+       reads "visible loop tripwire: aborted generation at T visible
+       tokens (period P) (gen=G)". Same [B+G-T, B+G] geometry; excised
+       unconditionally when pid-attributed like "trip" (the firing IS
+       cycle evidence and the whole aborted turn is junk).
 
 SPAN GEOMETRY (fixed per code review ses_e62ad1309: B1/B2, Nov-03):
 Engine logs "chat ctx=A..B:S ... (gen=G)" where B is the PROMPT length fixed
@@ -47,6 +55,10 @@ ENFORCE_RE = re.compile(
 TRIP_RE = re.compile(
     r"(?:chat|completion) ctx=\d+\.\.(\d+):\d+ thinking loop tripwire: "
     r"closed span at (\d+) tokens(?: \(period \d+\))?"
+    r"(?:.*?\(gen=(\d+)\))?")
+VIS_RE = re.compile(
+    r"(?:chat|completion) ctx=\d+\.\.(\d+):\d+ visible loop tripwire: "
+    r"aborted generation at (\d+) visible tokens(?: \(period \d+\))?"
     r"(?:.*?\(gen=(\d+)\))?")
 PROGRESS_RE = re.compile(r"(?:chat|completion) ctx=\d+\.\.(\d+):\d+ gen=(\d+)")
 PID_RE = re.compile(r"parity_pid(\d+)\.bin")
@@ -121,6 +133,18 @@ def parse_spans(log_patterns):
                            else last_gen.get(b, tok))
                     hi = b + gen
                     spans.append([max(0, hi - tok), hi, "trip", pid])
+                    last_gen[b] = gen
+                    continue
+                m = VIS_RE.search(line)
+                if m:
+                    # visible-loop abort (engine patch 01, WINDOW-PATCHES
+                    # 20261103): same [B+G-T, B+G] geometry; the window is
+                    # the visible (tool-payload) run at the turn's tail.
+                    b, tok = int(m.group(1)), int(m.group(2))
+                    gen = (int(m.group(3)) if m.group(3)
+                           else last_gen.get(b, tok))
+                    hi = b + gen
+                    spans.append([max(0, hi - tok), hi, "vis", pid])
                     last_gen[b] = gen
     return spans
 
