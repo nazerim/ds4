@@ -215,6 +215,17 @@ Extraction: /Volumes/FireCuda520/ds4-train/tensors-20261101/
     cos32clean2 RAN Nov-03 (v3 geometry, 324,081-pair pool): **THE HONEST
     ANCHOR = .4529/.5950** (delta_from_h .3185 max, boundary .8657 max,
     AUC .742/.793; clean convergence epochs 24-31 plateau .4519-.4529).
+    cos32clean3 RAN Nov-03 (~17:3x, 427,162-pair pool, +31.8%, day-12
+    sealed incl v-dspark era, quarantine 20261103.json): **DATA SCALING
+    FLAT** - top1 plateau mean .4390 (best .4495 e13; anchor .4524 mean;
+    -1.3pp ~= 2 sigma on 7,492-pair holdout, 95% CI +-1.1pp), top3 .5954
+    vs .5950 = exact flat. no_h .1819 (+4.8pp REAL: markov ate the pool),
+    delta_from_h shrank .3185->.2528; AUC >=1 .6929 (-4.9pp, era-mix
+    calibration watch-item). VERDICT: trunk-linear architecture is
+    DATA-SATURATED at ~1.32x -> cos32x2clean@600k = formality tiebreak,
+    NOT a gate; mirror (milestone-2 -> 3c) is the only path past .45 and
+    is unambiguously main line. PROTOCOL FIX: compare plateau-window
+    means (e>=24), single-epoch deltas <1.5pp on this holdout are noise.
     All mirror/head targets now chase .4529 on clean pools; next clean
     scaling point cos32x2clean at ~600k clean pairs.
     (311,029-pair clean pool vs .4369/.5769 on 304k contaminated pool of
@@ -263,10 +274,12 @@ Extraction: /Volumes/FireCuda520/ds4-train/tensors-20261101/
 3. Needs future window (each short): deep-ctx+tools bounding refinement
    (128k+ prompts, ON/OFF) - optional polish; parity dump capture session
    for real mirror validation run (engine ON is fine - dump is env-gated,
-   so actually NOT window-bound beyond a restart); NEW: tripwire coverage
-   for visible/tool-payload decode (termbench@0.6 runaway = evidence, 55k
-   junk cycles) + DS4_THINK_TEMPERATURE env hook (sampling A/Bs without
-   rebuild).
+   so actually NOT window-bound beyond a restart); tripwire payload
+   coverage + DS4_THINK_TEMPERATURE + wrap-up hygiene: **DRAFTED as apply-
+   ready bundle patches/01-03 + WINDOW-PATCHES-20261103.md (reviewed
+   17:2x: 01/02 apply-clean verified, 03 live w/ vis spans, 23/23; WINDOW
+   TODO: make + suites + verify variant-log-line vs VIS_RE parity; sidecar
+   stays until 01 ships)**.
 4. Bank rhythm: say "bank" -> stop/validate/manifest/backup dated dir;
    audit regen MUST merge the manual sidecar: `uv run python -m
    dspark.loops --audit --logs '/Users/naz/Projects/ds4/log/ds4.log*'
