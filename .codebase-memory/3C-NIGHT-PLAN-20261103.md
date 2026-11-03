@@ -121,6 +121,8 @@ Preemption under time slip: 4 early start -> 1b -> NEVER 0/2.5/3/2.
       form (now confcal2 engine form); sigmoid>=.45 semantics; judge on
       accept-LEN hist + engagement not AUC; q8_0 goldens green).
 - [ ] R   07:15 ENGINE RESTORE (see policy) + night report section below.
+      STATUS ~07:15: night report WRITTEN (below); RESTORE HELD - engine
+      never stopped (PID 60838), operator signals the restart window.
 
 ## SLOTS: RESULTS (fill live)
 - S1a: /Volumes/FireCuda520/ds4-train/labels3c/conf_s1a_20261103.npz
@@ -262,7 +264,10 @@ Preemption under time slip: 4 early start -> 1b -> NEVER 0/2.5/3/2.
   k:count format (17 bins); decision rule v2 + coverage = DSpark
   ENGAGEMENT definition + keep-.45 conservative-gate watch. bench script
   E2E-parse-tested offline; NEVER executed against live engine tonight.
-- R:
+- R: RESTORE HELD ~07:15 per operator (window open; engine never stopped
+  tonight, PID 60838, day-14 collection live). On signal:
+  restart-collect -> verify 'exact: 1' banner in log/ds4.log only (no
+  probes). See PROGRESS LOG 07:1x + NIGHT REPORT.
 
 ## DECISIONS
 ### D-S0 (FINAL 23:15 - amended per independent review; probe repro 241/241)
@@ -403,6 +408,10 @@ pos-unique. Probe A4 gap_accept column formulaic at d=0 (annotated in code).
   val .8523 > official .8360 (+1.63pp) > confcal1b .8453 (+0.70pp),
   beats official on ALL 4 slots, ECE .0115. See SLOTS:RESULTS S4b.
   Review + S6 v2 re-check dispatched together.
+- 05:5x S4 SEED REPLICATION (s4full2, seed 1): plateau .4646/.6103,
+  paired vs anchor +1.17pp CI [+0.67,+1.71] p=9.2e-6; vs s4full1
+  -0.13pp p=0.28. Two seeds both beat anchor; seed band ~0.1pp.
+  Review MINOR 2 closed. trainer/TRAIN_V1_s4full2.json.
 - 06:5x S4b + S6 RE-CHECK REVIEW: S4b PASS (every number reproduced,
   pairing byte-verified, repack end-to-end proven); S6 PASS_WITH_MINORS
   (new MAJOR: bench hist parse vs real k:count format -> FIXED inline:
@@ -413,8 +422,47 @@ pos-unique. Probe A4 gap_accept column formulaic at d=0 (annotated in code).
   conservative-gate watch wording -> protocol doc v3. Doc folds done:
   AB-PROTOCOL v3 (arms, shas, engagement-coverage, watch item, hist
   format), official3c.py parity-seed trap comment, ledger S4b/S6 CLOSED,
-  S4 claim upgraded to two-seed wording.
-- 05:5x S4 SEED REPLICATION (s4full2, seed 1): plateau .4646/.6103,
-  paired vs anchor +1.17pp CI [+0.67,+1.71] p=9.2e-6; vs s4full1
-  -0.13pp p=0.28. Two seeds both beat anchor; seed band ~0.1pp.
-  Review MINOR 2 closed. trainer/TRAIN_V1_s4full2.json.
+  S4 claim upgraded to two-seed wording. Fold-over review (commit
+  66d12ae) PASS ~07:0x: hist decode verified in BOTH field orders, p
+  ruling: builder's p=0.28 correct, reviewer's 1.0 was a formula floor;
+  2 minors fixed (A1b file name, *_PARTIAL.json gitignore).
+- 07:1x R: engine NEVER STOPPED tonight (preempt/seal path never
+  triggered - all jobs fit the memory envelope; PID 60838 serving
+  continuously, day-14 collection still live/UNSEALED). Restore held
+  per operator ("window open past 07:15, will signal"). On signal:
+  ./ds4-server.sh restart-collect -> grep 'exact: 1' banner in
+  log/ds4.log ONLY (capture banners are lazy - NO probe requests);
+  day-14 seal = morning follow-up (stop->td_validate->seal->manifest->
+  rsync->loops --audit), NOT part of R.
+
+## NIGHT REPORT (final, ~07:15 20261104)
+MISSION: beat the official DSpark conf head via the 3c lane - ACHIEVED
+at the offline level; deployment decision deferred to the morning A/B.
+1. CONF HEAD: confcal2 (engine-form linear-4352 over
+   [h_d | markov_w1(prev_d)], no bias) val AUC .8523 vs official .8360
+   (+1.63pp CI [+1.15,+2.11]) and confcal1b .8453; beats official on
+   ALL 4 slots; ECE .0115; quantization-silent through deployed q8_0
+   (.8523 through repacked bytes, 6/8992 gate flips). ARM B READY:
+   support_AB_confcal2.gguf sha 5c0286dd..701013; confcal1b
+   (3365e6b4..) fallback. Cross-era claim = provisional-pending-live;
+   generalization evidence = single-pid single-day conv-disjoint.
+2. DRAFT HEAD (milestone evidence only, NOT deployable): s4full1/2
+   (two seeds) beat the .4524 anchor head on the frozen day-3 holdout:
+   +1.31pp CI [+0.80,+1.82] and +1.17pp CI [+0.67,+1.71], runs
+   indistinguishable from each other (-0.13pp p=0.28) -> beyond seed
+   noise; max delta_from_h .3275. Engine keeps official w1/w2.
+3. TOOLING: Gate A torch mirror port green (gradcheck 8/8, Gate A rerun
+   6-dp identical); repack tool + q8_0 goldens (36/36 tests); bench
+   client parse-complete vs real engine stats format; AB-PROTOCOL v3
+   pre-registered (arms, shas, P0 probe gate, engagement-based
+   coverage, keep-.45 conservative-gate watch).
+4. HYGIENE: official GGUF sha 0807a67f.. unchanged (verified after every
+   proof run); day-3 holdout frozen; NO live A/B executed, NO probes;
+   corpus/blade artifacts never committed; secrets never echoed; all
+   slots independently reviewed before closure (every review
+   PASS/PASS_WITH_MINORS, zero BLOCKERS survived the night).
+MORNING TODO: (a) R restore on operator signal + banner verify; (b) day-
+14 seal when convenient; (c) run AB-PROTOCOL v3: P0 probe gate FIRST
+(DS4_DSPARK_STATS=1 both arms, tool-bearing prompt, cycles>0), then
+A->B->A->B; (d) if B advances: iterate conf training on growing pool +
+engine-form head seeded from s4full recipe as NEXT research item.
