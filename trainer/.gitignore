@@ -2,3 +2,4 @@
 __pycache__/
 *.pt
 .pytest_cache/
+*_PARTIAL.json

@@ -87,7 +87,7 @@ A1b. OFFLINE re-baseline BEFORE booting arm B (rule: retrained drafter
     head => re-baseline): tests/dspark_traffic_probe.sh +
     dspark_temp_battery.sh spawn their OWN engine (refuse while one runs)
     and hardcode SUPPORT=official — run with the engine DOWN and the
-    SUPPORT override pointed at support_AB.gguf. This is NOT a live A/B
+    SUPPORT override pointed at support_AB_confcal2.gguf. This is NOT a live A/B
     step. (A0 old "log snapshot" step dropped: rotate_logs already
     cp-snapshots every boot.)
 A2. Arm order A→B→A→B (first cycle informal, second SCORED). Switch via
