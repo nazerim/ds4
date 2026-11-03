@@ -129,7 +129,7 @@ export DS4_VISION_KEEP_IMAGES
 # no cap. Per-request overrides: reasoning_budget_tokens / thinking_budget_tokens
 # (alias) / Anthropic thinking.budget_tokens; a named 0 opts that request out.
 # Details: .codebase-memory/THINKING-BUDGET-RESULTS-20261102.md
-DS4_THINKING_BUDGET_TOKENS="${DS4_THINKING_BUDGET_TOKENS:-8192}"
+DS4_THINKING_BUDGET_TOKENS="${DS4_THINKING_BUDGET_TOKENS:-16384}"
 export DS4_THINKING_BUDGET_TOKENS
 
 # Thinking-loop tripwire (server default ON; ds4_server.c): force-closes a
