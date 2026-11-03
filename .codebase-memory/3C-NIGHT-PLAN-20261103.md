@@ -28,9 +28,17 @@ traffic overnight (user asleep). Model server remote; all compute local.
 4. Corpus/parity dumps blade-local, never committed. Secrets never echoed.
 
 ## THE QUEUE  (gate RED = stop that lane, honor preemption order)
+>>> REVIEW RULE (user, 22:45): EVERY step ends with an INDEPENDENT
+>>> fresh-context review (subagent, read-only) of its artifacts BEFORE the
+>>> step is marked done and its outputs are consumed by the next step.
+>>> Verdicts land in PROGRESS LOG. Reviews: S0 script+data+decisions;
+>>> S1a/S1b builder code + slab spot-audit; S2.5 metric math vs milestone-1;
+>>> S3 run config + report reading; S2 port 1:1-ness + gradcheck honesty;
+>>> S4 config; S5 byte-identity proof; S6 protocol soundness.
 Preemption under time slip: 4 early start -> 1b -> NEVER 0/2.5/3/2.
 
-- [ ] S0 22:05-22:50 LABEL-SEMANTICS PROBE (3C-HANDOFF §6 a/b/c)
+^- [x] S0 22:05-22:50 LABEL-SEMANTICS PROBE — DONE 23:1x (probe+REWORK-fixed;
+      D-S0 FINAL in DECISIONS below; S1a/S3 consume it) (3C-HANDOFF §6 a/b/c)
       Q(a) props[dlen-1] = last-accepted (H1: dlen=accept-count) or reject slot
           (H2: dlen=accept+1)? Test props[d]==t[pos+d+1] per slot on joined
           exact-era cycles.
@@ -76,7 +84,53 @@ Preemption under time slip: 4 early start -> 1b -> NEVER 0/2.5/3/2.
 - R:
 
 ## DECISIONS
-(to be written by S0 probe)
+### D-S0 (FINAL 23:15 - amended per independent review; probe repro 241/241)
+1. CONF BCE LABELS - THREE-CASE CAP RULE (consumers use THIS text):
+   w = min(dlen, n_label-1). Scan d < w for first mismatch k_lab.
+   a) mismatch at k_lab < w: label 1 for d<k_lab, 0 at k_lab, MASK d>k_lab.
+   b) no mismatch, w == dlen: all 1 on [0,dlen); MASK d>=dlen; NO 0 label.
+   c) no mismatch, w < dlen: all 1 on [0,w); MASK w..dlen-1; NEVER label 0.
+   EXCLUDE dlen==1 cycles (fake_argmax: props[0] = target's own argmax, not
+   a draft - ds4.c:80533-80537). Oracle deterministic: replacement resamples
+   with the draft token zeroed (ds4.c:84344-84354) => within the evaluated
+   window label-match <=> accept, first-mismatch <=> first reject. Caveat:
+   rare eval clamps (max_tokens/ctx/EOS ~84402-84432) shrink the window
+   AFTER the parity write; masking covers most, tolerate rest. NEVER
+   gap-derived accept-runs: A5 invalidates gap-as-oracle in exact era
+   (k_lab=0 -> gap 2 in 74%, gap 1 once file-wide; seed era agrees but is
+   irrelevant for conf).
+2. DLEN SEMANTICS: conf-prefix-truncated window (ds4.c:80493-80513); props
+   ZERO beyond dlen (76189-76191, 100% audited - A3's 0.0% is the zero-fill,
+   not reject physics); CONF ROWS beyond dlen are STALE NONZERO - mask by
+   dlen everywhere. Acceptance empirically dlen-correlated (slot0 match
+   .707@dlen2 -> .903@dlen5): build NO dlen-agnostic priors.
+3. MARKOV LABELS era-AGNOSTIC: writer dumps checkpoint.v[pos+k] = committed
+   stream (ds4.c:76298-76311, lineage-rewind guard); seed==labels[0]=1.0,
+   chain 100% both eras. Era rule (pid>=53508) for CONF labels only.
+4. EXACT-ERA PRIORS (amended - marginal != commit): JOINT per-slot commit
+   .801/.465/.238/.175 <- THESE feed BCE priors; conditional-on-prefix
+   .807/.58/.51/.74; marginal matches .807/.641/.556/.512 are CONTAMINATED
+   by post-reject coincidental matches (reviewer independent recompute,
+   n=27,862). The old "1+.807<=1.9x" plausibility clause = unfalsifiable,
+   dropped. Seed-era marginals .978/.955/.934/.920 = opportunistic, conf
+   labels NOT used from that era.
+5. ENGINE QUIRK keep (mechanism verified): full-window commit = accepts+1
+   (87-90% at kl=4); reject replays replacement + successor sample =
+   accepts+2 (74% at kl=0) - verify2-always alternative falsified (it would
+   predict constant +2; full-match cohorts commit +1). Chain positions and
+   per-slot labels unaffected; mirror gate inputs unaffected (control 100%).
+PLUS from review: S1a joins by INDEX 1:1 (recs<->parity same record index,
+same ok-gate ds4.c:80681-80683, n_par==n_recs exactly) + pos assertion, NOT
+pos-unique. Probe A4 gap_accept column formulaic at d=0 (annotated in code).
 
 ## PROGRESS LOG
 - 22:03 plan committed; night run starts.
+- 22:1x S0 probes: day-13/pid53508 (exact) + day-12/pid50920 (seed-batch)
+  via new dspark/probe_labels3c.py; A1-A5 legs; engine code read confirms
+  point-accept. Report .codebase-memory/probe3c_s0_20261103.json.
+- 22:55 S0 decisions frozen -> INDEPENDENT REVIEW before S1a.
+- 23:1x S0 INDEPENDENT REVIEW (fresh ctx): probe CORRECT + reproducible
+  241/241 fields; VERDICT REWORK on decision TEXT only: cap-case mislabel
+  (would inject 12-72% false negatives), marginal-vs-joint prior confusion,
+  dlen==1 fake_argmax exclusion, conf-rows-stale-beyond-dlen mask,
+  index-1:1 join for S1a. All folded into D-S0 FINAL above. S0 DONE.
