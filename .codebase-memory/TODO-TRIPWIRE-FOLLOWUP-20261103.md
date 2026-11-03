@@ -1,5 +1,10 @@
 # TODO-TRIPWIRE-FOLLOWUP-20261103 - re-entry escalation (small, high-value)
 
+> Plan: `.codebase-memory/PLAN-TRIPWIRE-FOLLOWUP-20261103.md` — includes a
+> correctness trap found during planning: the shared `budget_force_count>3`
+> disable path would RE-ENABLE thinking under suppression on the 4th
+> re-open (valve must skip counting suppressed closes).
+
 Owner: tripwire codeowner (commits 2fd684d, e94d055). Parent doc:
 TODO-TRIPWIRE-20261102.md + TRIPWIRE-RESULTS-20261102.md.
 

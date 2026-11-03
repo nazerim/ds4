@@ -850,10 +850,16 @@ typedef struct {
      * wins. Off everywhere = zero new code paths execute at decode time. */
     bool thinking_tripwire;
     int tripwire_min_tokens;
-    /* Set when a span was tripwire-closed: the span's token count and the
-     * detected period; 0 period = never fired (usage field absent). */
+    /* Set when a span was tripwire-closed. period = the last DETECTOR trip
+     * (suppressed closes keep it, describing the fingerprint that caused
+     * escalation); tokens = the span that closed last (1..17 for a
+     * suppressed close). 0 period = never fired (usage field absent). */
     int tripwire_report_tokens;
     int tripwire_report_period;
+    /* Re-entry escalation (PLAN-TRIPWIRE-FOLLOWUP-20261103): tripwire
+     * closes this request + whether suppression engaged. */
+    int tripwire_report_closes;
+    bool tripwire_report_suppressed;
     bool has_tools;
     bool prompt_preserves_reasoning;
     /* For /v1/responses: emit reasoning_summary_* events / fields only when the
@@ -7723,9 +7729,11 @@ static void append_openai_usage_json(buf *b, const request *r,
         }
         if (r->tripwire_report_period > 0) {
             buf_printf(b, "%s\"thinking_tripwire\":{\"tokens_in_span\":%d,"
-                       "\"period\":%d}",
+                       "\"period\":%d,\"closes\":%d,\"suppressed\":%s}",
                        need_comma ? "," : "",
-                       r->tripwire_report_tokens, r->tripwire_report_period);
+                       r->tripwire_report_tokens, r->tripwire_report_period,
+                       r->tripwire_report_closes,
+                       r->tripwire_report_suppressed ? "true" : "false");
         }
         buf_puts(b, "}");
     }
@@ -9313,8 +9321,11 @@ static void append_responses_usage_json(buf *b, const request *r,
         input_tokens, cached_tokens, cache_write_tokens,
         output_tokens, r ? r->thinking_budget_reported : 0);
     if (r && r->tripwire_report_period > 0) {
-        buf_printf(b, ",\"thinking_tripwire\":{\"tokens_in_span\":%d,\"period\":%d}",
-                   r->tripwire_report_tokens, r->tripwire_report_period);
+        buf_printf(b, ",\"thinking_tripwire\":{\"tokens_in_span\":%d,\"period\":%d,"
+                   "\"closes\":%d,\"suppressed\":%s}",
+                   r->tripwire_report_tokens, r->tripwire_report_period,
+                   r->tripwire_report_closes,
+                   r->tripwire_report_suppressed ? "true" : "false");
     }
     buf_printf(b, "},\"total_tokens\":%d}", input_tokens + output_tokens);
 }
@@ -16160,11 +16171,20 @@ decode_again:
     int tw_total = 0;     /* uncapped in-span sampled count for reporting */
     bool tw_tripped = false, tw_exhaust = false;
     int tw_period = 0;
+    /* Re-entry escalation: count tripwire closes; on the re-open AFTER the
+     * 2nd close, suppress thinking for the rest of THIS request by
+     * force-closing at the first in-span sampled token (fresh request =
+     * clean slate per TODO; cross-request escalation is the pruning
+     * experiment's territory). */
+    int tw_closes = 0;
+    bool tw_suppress = false;
     /* Reporting resets with each decode pass (goto decode_again re-entry):
      * a discarded attempt must not leave a half-true sidecar behind.  Within
      * one pass a second span's trip overwrites the first (last-wins). */
     j->req.tripwire_report_tokens = 0;
     j->req.tripwire_report_period = 0;
+    j->req.tripwire_report_closes = 0;
+    j->req.tripwire_report_suppressed = false;
     const bool thinking_gates_tool_markers = ds4_think_mode_enabled(j->req.think_mode);
     bool tool_scan_waiting_for_think_close =
         thinking_gates_tool_markers && thinking.inside;
@@ -16214,7 +16234,7 @@ decode_again:
              * the wrap-up + close sequence for injection, one token per loop
              * iteration. */
             const bool by_tripwire = tw_on && tw_exhaust && !tw_tripped;
-            if (++budget_force_count > 3) {
+            if (!tw_suppress && ++budget_force_count > 3) {
                 if (tw_on && thinking_budget > 0) {
                     server_log(DS4_LOG_WARNING,
                                "ds4-server: thinking budget %d attempted close %d times without effect; budget and tripwire disabled for this request",
@@ -16261,8 +16281,9 @@ decode_again:
                                    budget_close_n);
                     } else if (tw_on) {
                         server_log(DS4_LOG_WARNING,
-                                   "ds4-server: thinking tripwire close requested with only %d token(s) of output room left; close sequence (%d tokens) would not fit, span left as-is",
-                                   max_tokens - completion, budget_close_n);
+                                   "ds4-server: thinking tripwire close requested with only %d token(s) of output room left; close sequence (%d tokens) would not fit, span left as-is%s",
+                                   max_tokens - completion, budget_close_n,
+                                   tw_suppress ? " (re-entry suppression lifted)" : "");
                     } else {
                         server_log(DS4_LOG_WARNING,
                                    "ds4-server: thinking budget %d reached with only %d token(s) of output room left; close sequence (%d tokens) would not fit, span left as-is",
@@ -16280,15 +16301,44 @@ decode_again:
                     if (by_tripwire) {
                         tw_tripped = true;
                         tw_exhaust = false;
+                        tw_closes++;
                         j->req.tripwire_report_tokens = tw_total;
-                        j->req.tripwire_report_period = tw_period;
-                        server_log(DS4_LOG_DEFAULT,
-                                   "ds4-server: %s ctx=%s thinking loop tripwire: closed span at %d tokens (period %d), injecting wrap-up + close",
-                                   j->req.kind == REQ_CHAT ? "chat" : "completion",
-                                   ctx_span, tw_total, tw_period);
-                        trace_event(s, trace_id,
-                                    "thinking loop tripwire: period %d at %d in-span tokens; injecting wrap-up + close",
-                                    tw_period, tw_total);
+                        j->req.tripwire_report_period = tw_period;                        j->req.tripwire_report_closes = tw_closes;
+                        /* Sidecar semantics (review M2): period = last
+                         * DETECTOR trip (self-assigned, stays stale during
+                         * suppressed closes); tokens_in_span = the closing
+                         * span itself (may be 1..17 for a suppressed close).
+                         * Suppressed lines omit the period the log cannot
+                         * know; the "closed span at N tokens" prefix is
+                         * shared so trainer TRIP_RE extracts both shapes.
+                         * suppressed_close == tw_suppress holds because
+                         * escalation engages at the first re-open after
+                         * close #2 - every close while tw_suppress is set
+                         * is a suppression close. Rate limit: first 3,
+                         * then every 25th (closes 1-2 are detector closes
+                         * and always log). */
+                        const bool suppressed_close = tw_suppress;
+                        if (!suppressed_close || tw_closes <= 3 ||
+                            tw_closes % 25 == 0) {
+                            if (suppressed_close) {
+                                server_log(DS4_LOG_DEFAULT,
+                                           "ds4-server: %s ctx=%s thinking loop tripwire: closed span at %d tokens (suppressed re-open) (gen=%d), injecting wrap-up + close",
+                                           j->req.kind == REQ_CHAT ? "chat" : "completion",
+                                           ctx_span, tw_total, completion);
+                                trace_event(s, trace_id,
+                                            "thinking loop tripwire: suppressed re-open closed at %d tokens (gen=%d)",
+                                            tw_total, completion);
+                            } else {
+                                server_log(DS4_LOG_DEFAULT,
+                                           "ds4-server: %s ctx=%s thinking loop tripwire: closed span at %d tokens (period %d) (gen=%d), injecting wrap-up + close",
+                                           j->req.kind == REQ_CHAT ? "chat" : "completion",
+                                           ctx_span, tw_total, tw_period,
+                                           completion);
+                                trace_event(s, trace_id,
+                                            "thinking loop tripwire: period %d at %d in-span tokens (gen=%d); injecting wrap-up + close",
+                                            tw_period, tw_total, completion);
+                            }
+                        }
                     } else {
                         server_log(DS4_LOG_DEFAULT,
                                    "ds4-server: %s ctx=%s thinking budget %d enforced after %d in-span tokens (gen=%d), injecting wrap-up + close",
@@ -16448,8 +16498,24 @@ decode_again:
                     tw_tripped = false;
                     tw_exhaust = false;
                     tw_since = 0;
+                    if (tw_closes >= 2 && !tw_suppress) {
+                        /* Re-entry escalation: this is the third span of
+                         * the request after two detector closes - end any
+                         * span almost immediately for the remainder. */
+                        tw_suppress = true;
+                        j->req.tripwire_report_suppressed = true;
+                        server_log(DS4_LOG_DEFAULT,
+                                   "ds4-server: %s ctx=%s thinking loop tripwire: repeated re-entry (%d closes, last period %d); thinking suppressed for remainder of request",
+                                   j->req.kind == REQ_CHAT ? "chat" : "completion",
+                                   ctx_span, tw_closes, tw_period);
+                    }
                 } else if (was_thinking && thinking.inside && !budget_injected) {
                     tw_total++;
+                    if (tw_suppress) {
+                        /* Suppress mode: force-close at the first in-span
+                         * sampled token (queue/injection unchanged). */
+                        tw_exhaust = true;
+                    }
                     if (tw_len == (int)(sizeof(tw_ring) / sizeof(tw_ring[0]))) {
                         memmove(tw_ring, tw_ring + 1,
                                 (size_t)(tw_len - 1) * sizeof(tw_ring[0]));
@@ -20969,13 +21035,23 @@ static void test_tripwire_detector(void) {
         r.thinking_budget_reported = 0;
         r.tripwire_report_tokens = 2720;
         r.tripwire_report_period = 388;
+        r.tripwire_report_closes = 2;
+        r.tripwire_report_suppressed = false;
         buf b3 = {0};
         append_openai_usage_json(&b3, &r, 100, 50);
         TEST_ASSERT(strstr(b3.ptr, "reasoning_tokens") == NULL &&
             strstr(b3.ptr,
               "\"completion_tokens_details\":{\"thinking_tripwire\":"
-              "{\"tokens_in_span\":2720,\"period\":388}}") != NULL);
+              "{\"tokens_in_span\":2720,\"period\":388,\"closes\":2,"
+              "\"suppressed\":false}}") != NULL);
         buf_free(&b3);
+        r.tripwire_report_closes = 5;
+        r.tripwire_report_suppressed = true;
+        buf b3b = {0};
+        append_openai_usage_json(&b3b, &r, 100, 50);
+        TEST_ASSERT(strstr(b3b.ptr, "\"closes\":5,\"suppressed\":true}")
+                    != NULL);
+        buf_free(&b3b);
         r.thinking_budget_reported = 138;
         buf b4 = {0};
         append_openai_usage_json(&b4, &r, 100, 50);
