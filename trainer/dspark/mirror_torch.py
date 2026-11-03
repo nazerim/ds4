@@ -108,8 +108,14 @@ def fp8_kv_quantize(kv):
     """mirror fp8_kv_quantize: fake-quant E4M3 on first 448 dims in 64-
     blocks (amax floor 1e-4, scale=2^ceil(log2(amax/448)), clamp +-448,
     nearest-grid * scale); last 64 rope dims pass through.
-    NON-DIFFERENTIABLE by design (engine quantizer; gradcheck excludes)."""
-    kv = kv.clone()
+    NON-DIFFERENTIABLE by design on the quantized half: the nope half is
+    DETACHED (engine quantizer has no meaningful gradient; S2 review ruled
+    detach explicit rather than accidental-zero via sign). The rope half
+    (last 64 dims) passes through the engine quantizer untouched, so it
+    deliberately KEEPS gradient - that asymmetry is engine-faithful.
+    Functional assembly (torch.cat) instead of in-place slice writes:
+    the port's earlier `kv[..., :448] = ...` clobbered an AsStrided view
+    autograd had saved and killed backward (S2 review MAJOR 2)."""
     _, pos = _e4m3_tensors(kv.dtype)
     nope = kv[..., :448].reshape(*kv.shape[:-1], 7, 64)
     amax = torch.clamp(nope.abs().max(dim=-1, keepdim=True).values,
@@ -119,8 +125,8 @@ def fp8_kv_quantize(kv):
     av, asig = v.abs(), torch.sign(v)
     idx = (av[..., None] - pos).abs().argmin(dim=-1)
     q = pos[idx] * asig
-    kv[..., :448] = (q * scale).reshape(*kv.shape[:-1], 448)
-    return kv
+    quant = (q * scale).reshape(*kv.shape[:-1], 448).detach()
+    return torch.cat([quant, kv[..., 448:]], dim=-1)
 
 
 def router(logits, bias):
@@ -208,13 +214,20 @@ class TorchTrunk:
         self.head_scale = cvt(np_trunk.head_scale)
         self.final_norm = cvt(np_trunk.final_norm)
         self._xpcache: dict = {}
+        self.xp_cache_cap = max(16, int(np_trunk._ecache_cap) * 3)
 
     def expert(self, stage, which, eid):
         key = (stage, which, eid)
         v = self._xpcache.get(key)
         if v is None:
             # share the numpy trunk's cached buffer (zero-copy; eviction
-            # from the numpy cache cannot free it while we hold a ref)
+            # from the numpy cache cannot free it while we hold a ref).
+            # BOUND (S2 review MINOR 1): insert-ordered FIFO; entries are
+            # views, so eviction only drops references. POLICY: expert
+            # slices are share-don't-train - S4 must NOT set requires_grad
+            # on them (aliasing would corrupt the numpy mirror's buffers).
+            if len(self._xpcache) >= self.xp_cache_cap:
+                self._xpcache.pop(next(iter(self._xpcache)))
             v = torch.from_numpy(self.np.expert(stage, which, eid))
             self._xpcache[key] = v
         return v
@@ -228,10 +241,15 @@ class TorchTrunk:
 
     def _ffn(self, st, x):
         logits = x @ st["gate_inp"].T + st["exp_b"][None, :]
-        sel, w = router(logits, None)
-        out = torch.zeros_like(x)
+        # router selection+weights are DISCRETE/scalar coefficients: the
+        # engine treats them as constants, so we DETACH before the .numpy()
+        # hop (S2 review MAJOR 1: grad-tracked router crashed on w.numpy()).
+        # Gradient still reaches `logits` consumers? NO - by design: expert
+        # routing is not trained through the trunk.
+        sel, w = router(logits.detach(), None)
         sel_np = sel.numpy()
         w_np = w.numpy()
+        rows = []
         for r in range(x.shape[0]):
             acc = torch.zeros(N_EMBD, dtype=x.dtype)
             for e_i in range(N_EXPERT_USED):
@@ -245,13 +263,21 @@ class TorchTrunk:
                 mid = swiglu(gate_v, up_v) \
                     * torch.tensor(np.float32(w_np[r, e_i]), dtype=x.dtype)
                 acc = acc + mid @ dm.T
-            out[r] = acc
+            rows.append(acc)
+        out = torch.stack(rows, dim=0)   # functional (was out[r] = acc)
         shared = swiglu(x @ st["sh_gate"].T,
                         x @ st["sh_up"].T) @ st["sh_down"].T
         return out + shared
 
     def cycle_gradable(self, pos, seed, taps_f32, ring):
-        """cycle() with grad enabled (S4 will train through this)."""
+        """cycle() with grad enabled (S4 will train through this).
+        POST-S2-REVIEW CONTRACT: gradients reach every dense weight and
+        the input taps, EXCEPT (engine-faithful constants): (a) expert
+        routing selections/weights (detached at the .numpy() hop),
+        (b) the quantized nope half of the KV cache (engine quantizer,
+        detached). Trainables must be explicit leaf views with
+        requires_grad_(True); do NOT train expert slices (aliased into
+        the numpy mirror's buffers - share-don't-train)."""
         with torch.enable_grad():
             return self._cycle(pos, seed, taps_f32, ring)
 
@@ -263,11 +289,15 @@ class TorchTrunk:
         feature_pos = pos - 1
         taps = torch.from_numpy(np.ascontiguousarray(taps_f32, np.float32))
         main_x = rms_norm(taps @ self.main_proj.T, self.main_norm, mt.RMS_EPS)
-        stage_in = torch.zeros((BLOCK + 1, N_HC, N_EMBD), dtype=torch.float32)
-        stage_in[0] = main_x[None, :]
         ids = [seed] + [NOISE_TOKEN] * (BLOCK - 1)
-        for i, tok in enumerate(ids, start=1):
-            stage_in[i] = self.embd[tok].to(torch.float32)[None, :]
+        # functional assembly (no in-place row writes - S2 review MINOR 3).
+        # Semantics = numpy broadcast: each 4096 row REPLICATED across the
+        # N_HC streams (stage_in[i] = row[None,:] broadcast to (N_HC,4096));
+        # repeat materializes the same (6,N_HC,4096) as the old code.
+        stage_rows = torch.stack(
+            [main_x] + [self.embd[tok].to(torch.float32) for tok in ids],
+            dim=0)                                        # (6,4096)
+        stage_in = stage_rows[:, None, :].repeat(1, N_HC, 1)
         streams = None
         for s in range(3):
             st = self.stages[s]
@@ -277,8 +307,14 @@ class TorchTrunk:
                                           st["hc_attn_base"],
                                           st["hc_attn_scale"])
             cur = hc_collapse(stage_in, pre)
-            an = rms_norm(cur, st["attn_norm"], mt.RMS_EPS)
-            an[0] = main_x
+            # TARGET row uses the shared main ladder (engine: dspark_main_x
+            # computed once at stage0); rms_norm is row-wise so composing
+            # [main_x | norm(cur[1:])] is forward-identical to norm-all-
+            # then-overwrite, without the in-place write. cur/an are
+            # 2-D (6,4096) here - collapse already weighted the streams.
+            an = torch.cat([main_x[None, :],
+                            rms_norm(cur[1:], st["attn_norm"], mt.RMS_EPS)],
+                           dim=0)
             drafts = an[1:]
             qr = rms_norm(drafts @ st["q_a"].T, st["q_a_norm"], mt.RMS_EPS)
             q = (qr @ st["q_b"].T).reshape(BLOCK, N_HEAD, N_HEAD_DIM)
@@ -286,8 +322,8 @@ class TorchTrunk:
                          mt.RMS_EPS)
             q = rope_tail(q, pos)
             kv = rms_norm(an @ st["attn_kv"].T, st["kv_a_norm"], mt.RMS_EPS)
-            kv[0] = rope_tail(kv[0:1], feature_pos)[0]
-            kv[1:] = rope_tail(kv[1:], pos)
+            kv = torch.cat([rope_tail(kv[0:1], feature_pos),
+                            rope_tail(kv[1:], pos)], dim=0)
             kv = fp8_kv_quantize(kv)
             ring_rows = ring[s]
             if ring_rows and not mt.MIRROR_EMPTY_RING:
@@ -312,7 +348,10 @@ class TorchTrunk:
             fcur = rms_norm(fcur, st["ffn_norm"], mt.RMS_EPS)
             block2 = self._ffn(st, fcur)
             streams = hc_expand(block2, streams, fpost, fcomb)
-            ring[s].append(kv[0].clone())
+            # ring = quantized KV cache: future-cycle history is CONSTANT
+            # (engine semantics; also stops autograd graphs accumulating
+            # across cycles). Numerically identical to clone().
+            ring[s].append(kv[0].detach().clone())
             if len(ring[s]) > WINDOW_ROWS:
                 del ring[s][:len(ring[s]) - WINDOW_ROWS]
             stage_in = torch.cat([stage_in[0:1], streams], dim=0)
@@ -366,42 +405,42 @@ class NumpyGateAdapter:
 # ---------------------------- verify legs ----------------------------
 
 def leg_gradcheck():
-    """(c) autograd validity on tiny inputs, float64."""
+    """(c) autograd validity on tiny inputs, float64. Uses an enable_grad
+    CONTEXT (S2 review MINOR 2: the old set_grad_enabled(False) at exit was
+    a silent no-grad trap for later code in the same process)."""
     from torch.autograd import gradcheck
-    torch.set_grad_enabled(True)
     f64 = torch.float64
     res = {}
-    x = torch.randn(3, 8, dtype=f64, requires_grad=True)
-    w = torch.randn(8, dtype=f64, requires_grad=True)
-    res["rms_norm"] = gradcheck(rms_norm, (x, w, 1e-6))
-    mix = torch.randn(2, 24, dtype=f64, requires_grad=True)
-    sc = torch.rand(3, dtype=f64, requires_grad=True) + 0.5
-    bs = torch.randn(24, dtype=f64, requires_grad=True)
-    stable = mt.HC_SIGMOID_STABLE
-    res["hc_split_sinkhorn"] = gradcheck(
-        lambda m, s, b: hc_split_sinkhorn(m, s, b, 1e-6), (mix, sc, bs))
-    st_ = torch.randn(2, 4, 8, dtype=f64, requires_grad=True)
-    pre = torch.rand(2, 4, dtype=f64, requires_grad=True)
-    res["hc_collapse"] = gradcheck(hc_collapse, (st_, pre))
-    v = torch.randn(2, 8, dtype=f64, requires_grad=True)
-    r_ = torch.randn(2, 4, 8, dtype=f64, requires_grad=True)
-    post = torch.rand(2, 4, dtype=f64, requires_grad=True)
-    comb = torch.rand(2, 4, 4, dtype=f64, requires_grad=True)
-    res["hc_expand"] = gradcheck(hc_expand, (v, r_, post, comb))
-    q = torch.randn(3, N_HEAD, 64, dtype=f64, requires_grad=True)
-    kv = torch.randn(7, 64, dtype=f64, requires_grad=True)
-    sinks = torch.randn(N_HEAD, dtype=f64, requires_grad=True)
-    # small head_dim ok: attn op is dtype/shape generic
-    res["attn_noncausal"] = gradcheck(
-        attn_noncausal, (q, kv, sinks))
-    g = torch.randn(4, 16, dtype=f64, requires_grad=True)
-    u = torch.randn(4, 16, dtype=f64, requires_grad=True)
-    res["swiglu"] = gradcheck(swiglu, (g, u))
-    xq = torch.randn(2, N_HEAD, N_HEAD_DIM, dtype=f64, requires_grad=True)
-    res["rope_tail"] = gradcheck(rope_tail, (xq, 17))
-    res["rope_tail_inv"] = gradcheck(
-        lambda t: rope_tail(t, 17, inverse=True), (xq,))
-    torch.set_grad_enabled(False)
+    with torch.enable_grad():
+        x = torch.randn(3, 8, dtype=f64, requires_grad=True)
+        w = torch.randn(8, dtype=f64, requires_grad=True)
+        res["rms_norm"] = gradcheck(rms_norm, (x, w, 1e-6))
+        mix = torch.randn(2, 24, dtype=f64, requires_grad=True)
+        sc = torch.rand(3, dtype=f64, requires_grad=True) + 0.5
+        bs = torch.randn(24, dtype=f64, requires_grad=True)
+        res["hc_split_sinkhorn"] = gradcheck(
+            lambda m, s, b: hc_split_sinkhorn(m, s, b, 1e-6), (mix, sc, bs))
+        st_ = torch.randn(2, 4, 8, dtype=f64, requires_grad=True)
+        pre = torch.rand(2, 4, dtype=f64, requires_grad=True)
+        res["hc_collapse"] = gradcheck(hc_collapse, (st_, pre))
+        v = torch.randn(2, 8, dtype=f64, requires_grad=True)
+        r_ = torch.randn(2, 4, 8, dtype=f64, requires_grad=True)
+        post = torch.rand(2, 4, dtype=f64, requires_grad=True)
+        comb = torch.rand(2, 4, 4, dtype=f64, requires_grad=True)
+        res["hc_expand"] = gradcheck(hc_expand, (v, r_, post, comb))
+        q = torch.randn(3, N_HEAD, 64, dtype=f64, requires_grad=True)
+        kv = torch.randn(7, 64, dtype=f64, requires_grad=True)
+        sinks = torch.randn(N_HEAD, dtype=f64, requires_grad=True)
+        # small head_dim ok: attn op is dtype/shape generic
+        res["attn_noncausal"] = gradcheck(
+            attn_noncausal, (q, kv, sinks))
+        g = torch.randn(4, 16, dtype=f64, requires_grad=True)
+        u = torch.randn(4, 16, dtype=f64, requires_grad=True)
+        res["swiglu"] = gradcheck(swiglu, (g, u))
+        xq = torch.randn(2, N_HEAD, N_HEAD_DIM, dtype=f64, requires_grad=True)
+        res["rope_tail"] = gradcheck(rope_tail, (xq, 17))
+        res["rope_tail_inv"] = gradcheck(
+            lambda t: rope_tail(t, 17, inverse=True), (xq,))
     return res
 
 

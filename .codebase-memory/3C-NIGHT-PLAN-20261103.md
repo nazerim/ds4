@@ -139,11 +139,19 @@ Preemption under time slip: 4 early start -> 1b -> NEVER 0/2.5/3/2.
   rows - consumers must mask (conv-hash val AND label!=-1).
 - S2: trainer/dspark/mirror_torch.py — torch twin of Trunk.cycle (zero-copy
   views, shared expert cache, dtype-generic diff ops, NumpyGateAdapter).
-  Legs: (a) 30 conf-row cos vs numpy min .99999988; (b) GATE A IDENTICAL
-  at 6 dp to frozen baseline (.989772/.977642/.967313/.953006/.927025,
-  conv4 24/19) and to today's numpy control run; (c) gradcheck 8/8 f64.
-  Reports /tmp/mirror_torch_selfcheck.json + /tmp/gateA_{torch,numpy}_
-  20261104.json. Independent review PENDING.
+  Review CLOSED PASS_WITH_MINORS ~03:3x: numerical fidelity bit-exact
+  (30/30 cos bit-identical to reviewer's rerun; Gate A identical 6 dp;
+  TIE-CONVENTION-RULING zero new risk). MAJOR (gradable path) FIXED per
+  reviewer ruling: router logits.detach() before .numpy(); fp8_kv_quantize
+  functional cat + explicit detach of quantized nope half (rope half keeps
+  grad - engine-faithful asymmetry); ALL in-place row writes functional
+  (_cycle, _ffn stack); ring append detached; gradcheck ctx (no more
+  global no-grad trap); _xpcache FIFO-bound + share-don't-train policy.
+  POST-FIX RE-VERIFY: gradable smoke PASS (T3 q_a grad 1.51, T4 head_fn/
+  main_proj/s1_q_b all nonzero, fwd cos .9999997, peak RSS 6,993 MB <=L0);
+  selfcheck PASS (gradcheck 8/8, 30-row cos min .99999988); GATE A rerun
+  IDENTICAL at 6 dp to frozen baseline. Reports /tmp/{s2_gradable_smoke,
+  mirror_torch_selfcheck2,gateA_torch_20261104b}.json. S2 DONE.
 - S1b: /Volumes/FireCuda520/ds4-train/labels3c/markov_s1b_20261104.npz —
   review CLOSED PASS_WITH_MINORS ~02:3x: conf-rebuild BYTE-IDENTICAL (S1a
   review stands); full audit all 459,365 rows vs raw (0 mismatches, 0 dup
