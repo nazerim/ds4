@@ -85,6 +85,13 @@ pyarrow/pytest; venv exists):
 - embeddings: tensors-20261101/token_embd_f16.npz (129280x4096 f16,
   row-major rows of 4096; extraction REPRODUCIBLE via
   tools/extract_gguf_tensor.py --list/--name/--rows, byte-verified vs npz).
+- lm head (NEW, gate B material): output.weight is UNTIED q8_0 [4096,129280]
+  at gguf off 97,023,770,688 (4352 B/row = q8_0 34B/32el blocks per the
+  ENGINE enum ds4.c:2330 ([8]=q8_0 - DS4 uses its own type numbering, NOT
+  ggml std). tools/extract_output_head.py -> BANKED
+  tensors-20261101/output_head_f16.npz (1.06GB, f16 rows of 4096, NaN-free,
+  f32-verified std 0.175 / absmax 3.9). Gate B argmax agreement is the
+  correctness backstop for head scale.
 - experts (if needed after §2a): base gguf holds mtp expert stacks
   quantized (q2_k gate/up, q8_0 down per name); offsets via
   extract_gguf_tensor --list; dequant via trainer/dspark/gguf_dq.py
@@ -234,3 +241,37 @@ STILL OPEN kernel reads: hc_expand_split, dsv4_fp8_kv_quantize (dsv4_kv.
 metal), noncausal_raw_batch_heads scaling + sinks placement in softmax
 denom (flash_attn.metal), rope_tail inverse + yarn consts (dsv4_rope.metal),
 spec_logits head path (ds4.c 36xxx/80xxx), indexer_topk tie behavior.
+
+## 8b. TAIL FINDINGS (same session)
+- EXPAND4 (dsv4_hc.metal:652): out_j = block_v*post_j + SUM_i comb[j][i]*r_i
+  (block_v = attn_out (+block_add if has_add); post = 2*sigmoid part of split,
+  comb = sinkhorned matrix, r_i = residual streams). CONFIRMED full mixer
+  algebra: collapse uses pre, expand uses post+comb.
+- FP8 KV (dsv4_kv.metal:111): FAKE-quant E4M3 on the FIRST 448 dims in
+  64-blocks: amax floored 1e-4, scale=2^ceil(log2(amax/448)), clamp(v/scale,
+  +-448) -> e4m3 dequant * scale, written back f32; LAST 64 (rope) dims
+  pass f32 EXACT. MLA 512 = 448 nope + 64 rope layout. Fully reproducible.
+- SPEC_LOGITS (ds4.c 36200-36350): final rows (conf, pre-norm) ->
+  rms(final->norm) -> matmul with **BASE MODEL OUTPUT HEAD**
+  (base_weights->output, q8_0 [4096,129280]) -> spec_logits 5 rows.
+  *** NEW MATERIAL REQUIRED (S2.2): extract output head from base gguf via
+  tools/extract_gguf_tensor.py (--name, q8_0 -> dequant rows via gguf_dq)
+  to blade npz; ~1 GB f32 or keep f16/q8 + on-demand. conf rows DON'T need
+  it (milestone-2 gate A unaffected); proposal gate B does.
+- ATTENTION (flash_attn.metal shared ext kernel): q*k*scale, noncausal over
+  [window|target|drafts] raw rows, sinks = extra key at logit position
+  sinks[head] added to softmax denom; output /S. Exact scale value + rope
+  inverse convention + indexer_topk tie-break: VERIFY AT IMPL against
+  parity rows (cos gate catches), don't block on more reading.
+- STAGE FLOW recap for impl: per stage s: flat=rms(stage_input_hc rows6) ->
+  mix=fn_attn@flat (24) -> split: pre=sig+eps, post=2sig, comb=sinkhorn ->
+  attn_cur=SUM pre_i stream_i -> rms attn_norm (row0 := main_x shared) ->
+  q path (5 drafts): q_a(1024)->norm->q_b(64x512)->head-rms->rope(pos+row) ;
+  kv path (6): kv(512)->kv_a_norm->rope(row0 feature_pos, drafts pos+) ->
+  fakequant448 -> store ring append_pos ; heads: noncausal attn over
+  window+6, sinks, unrope(inverse) -> out_a/b grouped-lora(8x1024) ->
+  expand4 vs draft residuals -> ffn: flat2=rms -> mix_ffn/sinkhorn ->
+  ffn_cur=collapse(pre) -> rms ffn_norm -> router(sqrt-softplus+bias top6,
+  weights renorm*1.5) -> 6 routed experts (gate,up swiglu, down) + shared
+  (always) -> SUM -> expand4 again -> next stage. After stage2: conf rows =
+  collapse(hc_head mix, PRE final norm); logits rows = norm-mix @ base head.
