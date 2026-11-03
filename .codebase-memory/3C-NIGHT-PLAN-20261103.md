@@ -75,12 +75,13 @@ Preemption under time slip: 4 early start -> 1b -> NEVER 0/2.5/3/2.
       (b) Gate A through torch reproduces slot0 cos .9898
       (c) gradcheck: sinkhorn mixers + router
       Memory: L2 fires here if chunked dequant thrashes.
-- [x] S1b 05:15-06:45 FULL-POOL MARKOV SLAB — BUILT ~02:0x (pulled early;
-      review PENDING). markov_s1b_20261104.npz: 20 pid files, all sealed
+- [x] S1b 05:15-06:45 FULL-POOL MARKOV SLAB — DONE ~02:3x (built early,
+      review CLOSED PASS_WITH_MINORS). markov_s1b_20261104.npz: 20 pid files, all sealed
       days ex-day-3; recs-only path (parity NOT needed for next-token
       labels); 724,297 recs read, 459,365 rows, 457,486 valid (1,879
-      nl<2 sentinels next=-1, mask by mk_valid), 266,952 quarantine-
-      excluded; provenance cols mk_file/mk_ridx; spot audit 6/6 vs raw.
+      nl<2 sentinels next=-1, mask by mk_valid), 264,932 quarantine-
+      excluded (ledger initially said 266,952 - reviewer corrected);
+      provenance cols mk_file/mk_ridx; spot audit 6/6 vs raw.
 - [ ] S4  06:45-07:15 JOINT RUN START — ONLY if S2 all green AND S3 green.
       Checkpointed/epoch, hard 07:15 stop, morning = partial epoch curve vs .4529.
 - [x] S5  (inside S3/S4 compute windows) REPACK TOOL on COPY of support gguf:
@@ -126,9 +127,35 @@ Preemption under time slip: 4 early start -> 1b -> NEVER 0/2.5/3/2.
   within-day single-pid (day-13/53508) conv-disjoint generalization ONLY -
   cross-day/cross-era drift unproven. confcal1_val_scores.npy covers ALL
   rows - consumers must mask (conv-hash val AND label!=-1).
-- S2:
-- S1b:
+- S2: trainer/dspark/mirror_torch.py — torch twin of Trunk.cycle (zero-copy
+  views, shared expert cache, dtype-generic diff ops, NumpyGateAdapter).
+  Legs: (a) 30 conf-row cos vs numpy min .99999988; (b) GATE A IDENTICAL
+  at 6 dp to frozen baseline (.989772/.977642/.967313/.953006/.927025,
+  conv4 24/19) and to today's numpy control run; (c) gradcheck 8/8 f64.
+  Reports /tmp/mirror_torch_selfcheck.json + /tmp/gateA_{torch,numpy}_
+  20261104.json. Independent review PENDING.
+- S1b: /Volumes/FireCuda520/ds4-train/labels3c/markov_s1b_20261104.npz —
+  review CLOSED PASS_WITH_MINORS ~02:3x: conf-rebuild BYTE-IDENTICAL (S1a
+  review stands); full audit all 459,365 rows vs raw (0 mismatches, 0 dup
+  cycles, quarantine per-file exact, total 264,932); sentinels 1,846 nl0 +
+  33 nl1; S4 rules: mask mk_valid==1; split keys (mk_file, conv) with conv
+  via mk_ridx->idx.jsonl join (bare conv ids COLLIDE across pids); 422
+  rows (0.09%) cross-file conversation-continuity residue accepted+noted.
 - S4:
+- S3b: OFFICIAL-HEAD REPLAY (dspark/official3c.py, run_officialreplay1/):
+  engine-faithful replay of the official conf head on the S1a slab
+  ([h_d | markov_w1(prev_tok_d)], prev_0=seed, prev_d=props[d-1], code
+  ds4.c:37033-37064/80320; keep-pass cross-asserted vs slab meta all
+  30,205 cycles). ENGINE PAIRING CONFIRMED: H1 chain .8243 > H2 seed-only
+  .7946 (deep slots). VAL-SPLIT (same hashed 8,992 rows): official .8360
+  (slots .8775/.8352/.8114/.7671) vs confcal1b .8453 (.8829/.8409/.8077/
+  .7722) vs baseline .5448 -> confcal1b BEATS official pooled (+.0093;
+  wins slots 0/1/3, loses slot2 -.004). Deployment-relevant: official
+  gate-.45 coverage 1.000 (cuts NOTHING in exact-era pool) vs confcal1b
+  .9083; 825 val rows (9.2%) disagree at the gate. "Beat the official
+  head" = honest but modest AUC delta + the head actually engages at .45.
+  Official replay scores saved (official_h1_scores.npy, all rows) - S4
+  comparison baseline.
 - S5: tools/repack_dspark_tensor.py (in-place size-preserving q8_0->q8_0 /
   f32->f32 swap on COPY; refuses --out==--in). Proofs on official support
   gguf (sha 0807a67f..., NEVER written): (1) roundtrip read+rewrite orig
@@ -246,3 +273,14 @@ pos-unique. Probe A4 gap_accept column formulaic at d=0 (annotated in code).
   copy (orphan-copy bug); dead DTYPE_NAMES removed; docstring now honest
   q8_0-only. Note: gguf_dq.py has NO q8_0 port (my premise was wrong;
   reviewer substituted stronger gold standard). S5 DONE.
+- 02:2x S2 legs ALL GREEN: selfcheck PASS (gradcheck 8/8 f64; torch-vs-
+  numpy conf cos min .99999988 over 30 rows, empty+warmed ring) and
+  GATE A through torch IDENTICAL at 6 dp to the frozen numpy baseline
+  (.989772/.977642/.967313/.953006/.927025; conv4 24 targets 19 hits)
+  incl. today's numpy rerun control. INDEPENDENT REVIEW DISPATCHED.
+- 02:3x S1b INDEPENDENT REVIEW: PASS_WITH_MINORS. Highest-stakes check
+  clean: conf-mode rebuild byte-identical to shipped S1a slab (refactor
+  safe). Full provenance audit 459,365/459,365; quarantine per-file exact;
+  ledger corrected 266,952->264,932; era-agnostic claim holds empirically
+  incl. seed-batch pids. S4 consumption rules pinned (see SLOTS:RESULTS).
+  S1b DONE.
