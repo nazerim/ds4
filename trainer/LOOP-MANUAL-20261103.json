@@ -1,0 +1,9 @@
+{
+ "note": "Manual quarantine spans, merged at audit time: python -m dspark.loops --audit --logs 'log/ds4.log*' --manual LOOP-MANUAL-20261103.json --out LOOP-QUARANTINE-<new>.json. Kind 'manual' is pid-attributed and UNCONDITIONAL (visible-payload runaways are outside thinking spans: no log lines, interleaved depth near 1x, so trip/budget/depth rules cannot see them).",
+ "spans": [
+  [5853, 59620, "manual", 50920]
+ ],
+ "provenance": {
+  "5853-59632/pid50920": "termbench temp-0.6 session, conv 24 (idx ck_len 6411..59632): thinking trip at 13:44:48 (period 16) then ~55k-token VISIBLE tool-payload repeat loop (DSML_START, no THINKING flag = no guard coverage), 13:44->14:00:36 'client disconnected' (killed). Cannot collide with the 350k lineages in this pid (conv 1-23, pos>=320906). RULE: span hi must equal the segment's max RECORDED pos (dump _segments: 59,620 here), NOT the idx ck_len max (59,632) -- ck_len runs ahead of the last captured draft cycle, and S2 intersection (maxpos >= hi-1) excises NOTHING if hi overshoots (caught live Nov-03 twice)."
+ }
+}

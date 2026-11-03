@@ -159,3 +159,25 @@ def test_attributed_budget_needs_depth_evidence(tmp_path):
     q2 = {"version": 3, "segments": {},
           "spans": [[1000, 1071, "budget", 556]]}
     assert len(file_exclusions(rp2, q2)) == 72
+
+
+def test_manual_span_unconditional_and_merged(tmp_path):
+    # Visible/tool-payload runaways (termbench@0.6 class) live OUTSIDE
+    # thinking spans: no log line, near-1x interleaved depth. A pid-
+    # attributed "manual" span must excise its window unconditionally...
+    rp = str(tmp_path / "train_pid700.recs")
+    _write(rp, _healthy(0, 1000))
+    q = {"version": 3, "segments": {}, "spans": [[100, 300, "manual", 700]]}
+    assert file_exclusions(rp, q) == set(range(100, 301))
+    # ...scoped to its pid only...
+    q["spans"] = [[100, 300, "manual", 701]]
+    assert file_exclusions(rp, q) == set()
+    # ...and survive audit regeneration via list or sidecar merge, deduped.
+    side = tmp_path / "manual.json"
+    side.write_text(json.dumps({"spans": [[100, 300, "manual", 700]]}))
+    qq = build_quarantine(days=[], root=str(tmp_path), manual=str(side))
+    assert [100, 300, "manual", 700] in qq["spans"]
+    qq2 = build_quarantine(days=[], root=str(tmp_path),
+                           manual=[[100, 300, "manual", 700],
+                                  [100, 300, "manual", 700]])
+    assert qq2["spans"].count([100, 300, "manual", 700]) == 1

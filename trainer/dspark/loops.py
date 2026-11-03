@@ -126,7 +126,13 @@ def parse_spans(log_patterns):
 
 
 def build_quarantine(days=None, root=CORPUS_ROOT, log_patterns=None,
-                     depth_cut=DEPTH_CUT, min_pairs=MIN_PAIRS):
+                     depth_cut=DEPTH_CUT, min_pairs=MIN_PAIRS,
+                     manual=None):
+    """manual: list of spans [[lo,hi,kind,pid],...] or a sidecar JSON path
+    {"spans":[...]} merged into the audit output. This is how known hazards
+    that NO log-based span covers get excised at bank time -- e.g. a
+    visible/tool-payload runaway repeat (tripwire watches thinking spans
+    only; Nov-03 termbench@0.6 burned ~55k such cycles into pid50920)."""
     if days is None:
         days = sorted(d for d in os.listdir(root)
                       if os.path.isdir(os.path.join(root, d))
@@ -148,8 +154,25 @@ def build_quarantine(days=None, root=CORPUS_ROOT, log_patterns=None,
                   "span_geometry": "pos [B+G-T, B+G]; pid-per-line; "
                                    "segment-intersected"},
          "segments": segments, "segment_detail": flagged,
-         "spans": parse_spans(log_patterns)}
+         "spans": _merge_spans(parse_spans(log_patterns), manual)}
     return q
+
+
+def _merge_spans(spans, manual):
+    """Append manual spans (list or sidecar path), dedup on (lo,hi,kind,pid)."""
+    if not manual:
+        return spans
+    if isinstance(manual, str):
+        with open(manual) as f:
+            manual = json.load(f).get("spans", [])
+    seen = {tuple(s[:4]) for s in spans}
+    for s in manual:
+        t = (s[0], s[1], s[2] if len(s) > 2 else "manual",
+             s[3] if len(s) > 3 else None)
+        if t not in seen:
+            spans.append(list(t))
+            seen.add(t)
+    return spans
 
 
 def file_exclusions(recs_path, q):
@@ -228,10 +251,15 @@ def main():
     ap.add_argument("--root", default=CORPUS_ROOT)
     ap.add_argument("--days", default=None)
     ap.add_argument("--logs", default=None)
+    ap.add_argument("--manual", default=None,
+                    help="sidecar JSON {\"spans\": [[lo,hi,kind,pid],...]} "
+                         "merged into the audit (visible-payload runaways "
+                         "and other hazards no log span covers)")
     a = ap.parse_args()
     days = a.days.split(",") if a.days else None
     logs = a.logs.split(",") if a.logs else None
-    q = build_quarantine(days=days, root=a.root, log_patterns=logs)
+    q = build_quarantine(days=days, root=a.root, log_patterns=logs,
+                         manual=a.manual)
     tot_seg_pairs = sum(f["pairs"] for f in q["segment_detail"])
     from collections import Counter as C
     kinds = C(s[2] for s in q["spans"])
