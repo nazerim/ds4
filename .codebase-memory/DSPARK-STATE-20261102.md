@@ -22,6 +22,12 @@ NIGHT-RUN-3-RESULTS.md -> NIGHT-RUN-2-RESULTS.md -> PLAN-TRAINER-20261101.md
   55k-token VISIBLE DSML-payload runaway (no THINKING flag = tripwire blind
   there; killed 14:00:36) -> 0.6 REJECTED, temp 1.0 stands, corpus regime
   unchanged. Runaway banked-clean via LOOP-MANUAL sidecar (9,017 recs).
+- **EXACT ERA LIVE** (Nov-03 14:06, PID 53508): day-12 banked first
+  (106,574 recs, chain 100.0%, backed up +1.2G, LOOP-QUARANTINE-
+  20261103.json regenerated w/ manual span); booted DSPARK_EXACT=1 per
+  decision #10 - two termbench suites clean (0 trips / 1 legit 16k ride /
+  depth<=1.9x), fp unchanged by flip, harness-teardown disconnect 16:06
+  normal. Collection cmd now includes DSPARK_EXACT=1.
 - TRIPWIRE ERA (pre-escalation): PIDs 41277 (binary Nov-03 00:13 with
   tripwire commits 2fd684d+e94d055, strings-verified pre-deploy): env =
   budget 8192 + DS4_THINK_TRIPWIRE=1 (script default now), TRAIN_DUMP=active
@@ -177,6 +183,16 @@ Extraction: /Volumes/FireCuda520/ds4-train/tensors-20261101/
    termbench): sharper lock -> thinking trip period-16 + 55k-token visible
    payload runaway OUTSIDE all guard coverage. Payload-region guard = the
    real gap (engine window item), not the temperature.
+10. ACCEPT POLICY: **EXACT=1 is the deploy regime** (Nov-03 A/B CLOSED:
+    two full termbench suites under --mtp-exact-sampling = 64 turns, 0
+    tripwire closes, worst new-segment depth 1.8-1.9x (legit band), 9k
+    tool payload closed properly, correctness kept - run-2 "proper result,
+    hygiene docked" on the one 16k budget ride). Opportunistic era = 11+
+    trips + 55k runaway (sampler-tail clip, ds4.c 76688). Cost ~-30% t/s
+    (27-36 vs 44-55) = the retrain's target metric. 3c CONF HEAD CALIBRATES
+    TO EXACT ACCEPTANCE semantics; markov head policy-agnostic. Residual:
+    wrap-up-injection hygiene check; ledger #6 drift detector unproven
+    (zero drift sightings across two clean runs).
 
 ## 6. QUEUE (ordered)
 0a. DONE Nov-02: loops tool (trainer/dspark/loops.py, 4 new tests, 16/16
@@ -240,10 +256,10 @@ Extraction: /Volumes/FireCuda520/ds4-train/tensors-20261101/
    LOOP-MECHANISM NOTE (Nov-03): opportunistic acceptance (default
    EXACT=0) accepts draft only at target argmax (ds4.c 76688) = sampler-
    tail clip = attractor amplifier; dspark-OFF window logged 0 trips vs
-   11 in the ON window. NEXT restart (bank tonight = free window): add
-   DSPARK_EXACT=1 + conf watch (exact mode default conf 0.8, script:236)
-   -> trips/hr decides deploy regime BEFORE 3c conf-head training (markov
-   head unaffected; conf calibration target DEPENDS on accept policy).
+   11 in the ON window. A/B RUN + RESOLVED (decision #10): EXACT=1 live
+   since PID 53508 (14:06), two clean suites; capture fp UNCHANGED by
+   exact flip (verified model_fp). Bank-era data from 53508 onward =
+   exact-regime distribution - 3c conf head calibrates to it.
 3. Needs future window (each short): deep-ctx+tools bounding refinement
    (128k+ prompts, ON/OFF) - optional polish; parity dump capture session
    for real mirror validation run (engine ON is fine - dump is env-gated,
