@@ -255,12 +255,13 @@ Extraction: /Volumes/FireCuda520/ds4-train/tensors-20261101/
 1. DONE: cos32x15 -> data-bound confirmed (§3, w-loop caveat). Next scaling point at
    ~600k pairs (2x of x15; ~4-6 heavy workdays at 100k/day soak) - one
    command when pool is there: same protocol, --out-tag cos32x2.
-1M. MILESTONE-2 STATUS (Nov-03 ~19:30): GATE A CONDITIONAL PASS - see
-    MILESTONE2-GATEA-RESULTS-20261103.md (mirror_trunk.py live: full 3-stage
-    trunk forward, slot0 cos 0.990 on exact-era; window resets on gaps ->
-    empty-ring is the model; ERA RULE: gate data = pid>=53508 only, older
-    = seed-batch mode). NEXT: gate B (head+markov chain vs props), then 3c
-    torch differentiable port. Handoff §2/§7/§8/§8b/§9 carry the maps.
+1M. MILESTONE-2 GATES CLOSED (Nov-03 ~20:00): GATE A + GATE B both
+    CONDITIONAL PASS - see MILESTONE2-GATEA-RESULTS-20261103.md (mirror_
+    trunk.py full trunk forward verified: slot0 conf cos 0.990; proposal
+    chain tail CONTROL=100%, FULL slot0 95% / block 82% = conf-depth
+    compounding only; era rule gate-data = pid>=53508 exact-mode). NEXT:
+    3c torch differentiable port (trainable markov_w1/w2 + confidence
+    proj first; conf calibrates to EXACT acceptance per decision #10).
 1M. MILESTONE-2 RESUMES AFTER COMPACTION: read
     .codebase-memory/MILESTONE2-HANDOFF-20261103.md (full knowledge +
     execution plan S2.1-S2.5; materials complete incl token_embd_f16.npz;

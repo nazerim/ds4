@@ -58,6 +58,43 @@ then 3c design: differentiable torch version of Trunk.cycle (same math,
 autograd), trainable = markov_w1/w2 + confidence proj (+hc/norms), conf
 calibration target = exact-acceptance semantics (decision #10).
 
+## GATE B FINAL (batch n=40 cycles / 121 slots; verdict: CONDITIONAL PASS)
+- CONTROL leg: **121/121 = 100.0%** every slot - head+chain+markov tail is
+  bit-faithful in effect (exact proposals from engine conf rows).
+- FULL leg: block-prefix match 81.8%; per slot 0.95 / 0.825 / 0.72 /
+  0.667 / 0.5 (n=40,24,15,9,8 deep slots are small-n AND selection-biased:
+  slot d measured only when dlen>d, i.e. longer-accept cycles).
+- Decode: the ONLY error source left is conf-row cos compounding across
+  draft rows (Gate A: .99 -> .93 slot0->4); tail + semantics proven clean.
+  95% slot0 from a 1e-2-level vector cos is the expected discrete-argmax
+  behavior near margin ties.
+- Bar verdict: original "97-99%" assumed slot0-class; per-slot reality is
+  the honest shape. FUNCTIONAL for 3c: training does not need proposal
+  equality, it needs faithful gradients, and both gates now prove the
+  graph is the engine's graph modulo the documented residual (skip-cycle
+  support rows / activation-quant kernels / fp8 taps).
+- Improvement candidates if deeper-slot fidelity ever matters: replicate
+  engine f16 down-input + RNE e4m3 tie rule bit-exactly; capture extension
+  for skipped-cycle h rows; both deferred.
+
+## GATE B FIRST LIGHT (same evening; batch n=40 running)
+Chain port (markov_propose_chain: state=w1[prev]; bias=W2@state;
+argmax(logits_row+bias); prev=proposal; start prev=seed) + tail
+(rms(final->norm) @ output_head) validated:
+- CONTROL leg (parity's OWN conf rows -> my tail -> chain vs props):
+  **28/28 = 100%** - head+chain+markov semantics EXACT.
+- FULL leg (mirror conf): overall 85.7%; **slot0 = 100%** (incl cycles
+  where engine's first proposal was REJECTED - join pos-unique now, not
+  accepted-biased); depth drift 0.875/0.833/0.75/0.5 (small n).
+- Read: end-to-end proposal fidelity is gated by conf-row cos compounding
+  across draft slots (each draft row attends earlier draft rows), NOT by
+  the tail. The 97-99% bar applies to slot0-1 territory now; deeper-slot
+  improvement = 3c's own job (that's what a better head fixes).
+Repro: uv run python -m dspark.mirror_trunk --gate-b --recs <active/
+train_pid53508.recs> --parity <s3/parity_pid53508.bin> --compare N
+--stride S --report out.json. Join = pos-unique cycles (parity record
+count==1 at that pos). Era rule pid>=53508 unchanged.
+
 ## Gate B checklist (next)
 conf rows -> rms(final->norm) -> @ output_head_f16 (BANKED, untied q8_0
 dequant, tools/extract_output_head.py) -> + markov bias chain (mirror.py

@@ -291,8 +291,11 @@ class Trunk:
 
     def __init__(self, npz_path: str, embd_path: str,
                  support_gguf: str | None = None,
-                 expert_cache_slices: int = 200):
+                 expert_cache_slices: int = 200,
+                 head_npz: str | None = None):
         z = np.load(npz_path)
+        self.npz_path = npz_path
+        self.head_npz = head_npz
         self.embd = np.load(embd_path)["weight"]              # f16 (129280,4096)
         self.stages = []
         for s in range(3):
@@ -665,10 +668,106 @@ def noise_sensitivity(trunk: Trunk, recs_path, parity_path, conv, idxs,
     mm.close()
 
 
+def markov_propose_chain(logits: np.ndarray, w1: np.ndarray, w2: np.ndarray,
+                         seed: int, count: int) -> np.ndarray:
+    """dspark_apply_markov_greedy_probe port: state = w1[prev]; bias =
+    w2 @ state; argmax(logits[d] + bias); prev = proposal. (q8_0 variant
+    ds4.c:36634 = same math quantized; CPU fallthrough per 37070.)"""
+    prev = seed
+    out = np.zeros(count, dtype=np.int64)
+    for d in range(count):
+        state = w1[prev].astype(np.float64)
+        bias = w2 @ state                       # (V,) bias per candidate
+        score = logits[d].astype(np.float64) + bias
+        prev = int(np.argmax(score))
+        out[d] = prev
+    return out
+
+
+def run_gate_b(recs_path, parity_path, trunk: Trunk, conv: int,
+               n_compare: int = 20, stride: int = 60, log=print):
+    """Two legs per target cycle:
+       CONTROL: parity's OWN conf rows -> final norm -> head -> chain vs
+                props  (isolates head+chain fidelity; expect ~100%)
+       FULL:    mirror conf rows -> same tail -> chain vs props
+                (end-to-end proposal match; expect 97-99% per fp8 floor)
+       Join: pos-unique cycles only (exactly one parity record at that pos)."""
+    from .mirror import load_head_weights
+    w = load_head_weights(trunk.npz_path)
+    lists = conv_record_lists(recs_path)
+    rec_ids = lists[conv]
+    f = open(recs_path, "rb")
+    import mmap as _m
+    mm = _m.mmap(f.fileno(), 0, access=_m.ACCESS_READ)
+    metas = [read_rec(mm, ri) for ri in rec_ids]
+    g = open(parity_path, "rb")
+    gm = _m.mmap(g.fileno(), 0, access=_m.ACCESS_READ)
+    np_rec = gm.size() // PARITY_STRIDE
+    pcount, prec = {}, {}
+    want_pos = {m[0] for m in metas}
+    for i in range(np_rec):
+        base = i * PARITY_STRIDE
+        pos, seed, dlen, _st, _r = PARITY_HDR.unpack_from(gm, base)
+        if pos not in want_pos:
+            continue
+        pcount[pos] = pcount.get(pos, 0) + 1
+        if pcount[pos] == 1:
+            props = np.frombuffer(gm, dtype=np.int32, count=BLOCK,
+                                  offset=base + 12).copy()
+            hid = np.frombuffer(gm, dtype=np.float32, count=5 * N_EMBD,
+                                offset=base + 32).reshape(5, N_EMBD).copy()
+            prec[pos] = (int(dlen), props, hid)
+    gm.close()
+    head = np.load(trunk.head_npz)["weight"].astype(np.float32)
+    log(f"gate B: conv {conv}, {len(want_pos)} cycle-positions, "
+        f"{sum(1 for p in want_pos if pcount.get(p) == 1)} pos-unique")
+    targets = sorted(i for i, m in enumerate(metas)
+                     if pcount.get(m[0]) == 1 and m[3] is not None
+                     and prec[m[0]][0] > 0)
+    targets = targets[:n_compare * stride:stride]
+    stats = {"control": {}, "full": {}}
+    depth_stats = {"control": {}, "full": {}}
+    for idx in targets:
+        pos, seed, taps, _l1 = metas[idx]
+        dlen, props, hid = prec[pos]
+        conf_m = trunk.cycle(pos, seed, taps, [[], [], []])
+        for leg, conf in (("control", hid), ("full", conf_m)):
+            normed = rms_norm(conf[:dlen], trunk.final_norm, RMS_EPS)
+            logits = normed @ head.T
+            pred = markov_propose_chain(logits, w["markov_w1"],
+                                        w["markov_w2"], seed, dlen)
+            m = int((pred[:dlen] == props[:dlen]).sum())
+            st = stats[leg]
+            st["hits"] = st.get("hits", 0) + m
+            st["total"] = st.get("total", 0) + int(dlen)
+            for d in range(dlen):
+                ds = depth_stats[leg].setdefault(d, [0, 0])
+                ds[0] += int(pred[d] == props[d])
+                ds[1] += 1
+            log(f"  idx={idx} pos={pos} dlen={dlen} {leg}: "
+                f"{m}/{dlen} pred0={pred[0]} prop0={props[0]}")
+    mm.close()
+    report = {}
+    for leg in ("control", "full"):
+        st = stats[leg]
+        tot = st.get("total", 0)
+        report[leg] = {"slots": tot,
+                       "match_rate": round(st.get("hits", 0) / tot, 4)
+                       if tot else None,
+                       "per_slot": {d: round(v[0] / v[1], 4)
+                                    for d, v in sorted(
+                                        depth_stats[leg].items())}}
+        log(f"GATE B {leg}: {report[leg]}")
+    return report
+
+
 def main():
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--gate-a", action="store_true")
+    ap.add_argument("--gate-b", action="store_true")
+    ap.add_argument("--head-npz", default="/Volumes/FireCuda520/ds4-train/"
+                    "tensors-20261101/output_head_f16.npz")
     ap.add_argument("--recs", required=True)
     ap.add_argument("--parity", required=True)
     ap.add_argument("--npz", default="/Volumes/FireCuda520/ds4-train/"
@@ -685,7 +784,7 @@ def main():
     ap.add_argument("--noise-rel", type=float, default=0.0)
     ap.add_argument("--noise-idxs", default="230,680,830")
     a = ap.parse_args()
-    trunk = Trunk(a.npz, a.embd, a.support_gguf)
+    trunk = Trunk(a.npz, a.embd, a.support_gguf, head_npz=a.head_npz)
     if a.conv is None:
         lists = conv_record_lists(a.recs)
         a.conv = max(lists, key=lambda c: len(lists[c]))
@@ -695,7 +794,10 @@ def main():
                           [int(x) for x in a.noise_idxs.split(",")],
                           rel=a.noise_rel)
         return
-    rep = run_gate_a(a.recs, a.parity, trunk, a.conv, a.compare, a.stride)
+    if a.gate_b:
+        rep = run_gate_b(a.recs, a.parity, trunk, a.conv, a.compare, a.stride)
+    else:
+        rep = run_gate_a(a.recs, a.parity, trunk, a.conv, a.compare, a.stride)
     if a.report:
         with open(a.report, "w") as f:
             json.dump(rep, f, indent=1)
