@@ -61,8 +61,8 @@ Preemption under time slip: 4 early start -> 1b -> NEVER 0/2.5/3/2.
       unmasked-row rates .802/.744/.728/.735 re-derived + uncond chain
       .802/.744/.568/.521 reconciled from same k_lab, (c) gate-stats +
       positional-prior baseline (pooled .5457) = S3's real bar.
-- [ ] S3 00:40-02:45 CONF-ONLY CALIBRATION RUN: BCE on accept labels, trainable
-      confidence proj (parity conf rows in, NO trunk). Tag confcal1.
+- [x] S3 00:40-02:45 CONF-ONLY CALIBRATION RUN — DONE ~00:4x (confcal1 ->
+      review caught bias non-deployable -> confcal1b refit, deploy-faithful).
       GATE (S2.5-reviewed): held-out per-slot AUC must BEAT positional-prior
       baseline (per-slot .5 / pooled .5457 from eval3c) AND be calibrated
       (ECE small); milestone-1 .7418/.7933 = aspirational ceiling note ONLY
@@ -79,8 +79,11 @@ Preemption under time slip: 4 early start -> 1b -> NEVER 0/2.5/3/2.
       next-token labels era-agnostic, quarantine-masked). Partial OK (exact first).
 - [ ] S4  06:45-07:15 JOINT RUN START — ONLY if S2 all green AND S3 green.
       Checkpointed/epoch, hard 07:15 stop, morning = partial epoch curve vs .4529.
-- [ ] S5  (inside S3/S4 compute windows) REPACK TOOL on COPY of support gguf:
+- [x] S5  (inside S3/S4 compute windows) REPACK TOOL on COPY of support gguf:
       extract -> re-insert -> file sha256-identical proof; layout ds4.c:6113.
+      DONE ~00:5x tools/repack_dspark_tensor.py: roundtrip sha256 identity
+      PASS + in-place q8_0->q8_0 swap of confcal1b head proven on copy
+      (independent review still PENDING - see log).
 - [ ] S6  (gap filler) AB-PROTOCOL.md doc + bench script (no execution).
 - [ ] R   07:15 ENGINE RESTORE (see policy) + night report section below.
 
@@ -94,11 +97,31 @@ Preemption under time slip: 4 early start -> 1b -> NEVER 0/2.5/3/2.
 - S0:
 - S1a:
 - S2.5:
-- S3:
+- S3: run_confcal1b/ (bias-free, deploy-faithful; SUPERSEDES confcal1) =
+  linear(4096)+ZERO markov half, NO bias (engine conf = pure matvec,
+  validator pins [4352,1] DENSE); hashed conv split (hash%10==0 val,
+  3482 val cycles / 8992 val rows); pooled val AUC .8453 vs IN-RUN
+  val-population baseline .5448; per-slot .883/.841/.808/.772;
+  ECE .0109; gate region [.35,.55] n=1538 pred .4666 obs .4824.
+  Ceiling note .7418/.7933 exceeded but different metric. CAVEAT (review):
+  within-day single-pid (day-13/53508) conv-disjoint generalization ONLY -
+  cross-day/cross-era drift unproven. confcal1_val_scores.npy covers ALL
+  rows - consumers must mask (conv-hash val AND label!=-1).
 - S2:
 - S1b:
 - S4:
-- S5:
+- S5: tools/repack_dspark_tensor.py (in-place size-preserving q8_0->q8_0 /
+  f32->f32 swap on COPY; refuses --out==--in). Proofs on official support
+  gguf (sha 0807a67f..., NEVER written): (1) roundtrip read+rewrite orig
+  bytes -> output sha256 == input PASS; (2) walker offset cross-check:
+  conf tensor abs 4,077,251,392 (rel 4,077,245,696 + data_start 5,696),
+  dequant BIT-IDENTICAL vs mtp_nonexpert_f32.npz; (3) confcal1b repack:
+  4,566 changed bytes ALL inside 4,624 B window, sizes equal, dequant
+  max|delta| 6.8e-4, markov half exactly zero; (4) functional: val rows
+  rescored through repacked bytes AUC .8453 == .8453, gate-.45 flips 2/
+  8992 (.02%), max|score delta| .0027 -> q8_0 requant calibration-silent,
+  no f32 offset-rewrite needed. Artifact: /Volumes/FireCuda520/ds4-train/
+  repack_test/support_confcal1b.gguf (blade-local, NOT committed).
 - S6:
 - R:
 
@@ -178,3 +201,17 @@ pos-unique. Probe A4 gap_accept column formulaic at d=0 (annotated in code).
   parameters (no frozen day-13 constants), chain leg ASSERTED, case-c
   run-length uses w, dead var, baseline annotation. Re-selftest PASS with
   both expect lists; 33/33. S2.5 DONE (review closed).
+- 00:3x S3 INDEPENDENT REVIEW (confcal1): PASS_WITH_MINORS. Split provably
+  conv-disjoint (37 val/340 train convs, empty intersection), no feature
+  leakage (rows = parity base+32, audited in S1a), numbers recomputed
+  independently. MAJOR CAUGHT: trained BIAS not deployable - engine conf
+  is pure matvec_any over [h4096|markov256], no bias anywhere, validator
+  pins [4352,1] -> S5 would silently drop b=-0.0113 (~18-20/8864 val gate
+  flips). Fixed: conf3c.py --bias flag (DEFAULT OFF = deploy-faithful);
+  refit confcal1b w/ hashed conv split (creation-order %10 skew fixed) +
+  in-run val-pop baseline (.5448) replacing frozen .5457. Result: pooled
+  .8453, ECE .0109, gate-region .4666 vs .4824 - PASS. Reviewer also
+  ruled q8_0 requant acceptable (blockwise ~1% rel err << ECE).
+- 00:5x S5 repack tool built + proof battery (see SLOTS:RESULTS S5).
+  Roundtrip sha256 identity + in-place confcal1b swap: all four proofs
+  PASS. INDEPENDENT REVIEW DISPATCHED (see next log entry when closed).
