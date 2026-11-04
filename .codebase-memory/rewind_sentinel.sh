@@ -2,6 +2,8 @@
 # Watch the live engine for DSML rewind regressions, without touching it.
 #
 # Usage: sh .codebase-memory/rewind_sentinel.sh [minutes] [logfile]
+# Knobs: DS4_SENTINEL_PORT (8001), DS4_SENTINEL_INTERVAL (20s),
+#        DS4_SENTINEL_TRAIN / DS4_SENTINEL_PARITY (corpus-liveness dirs)
 #
 # Why this exists as a file instead of an inline loop: the first version matched
 # the engine with `pgrep -f "port 8001"`, which also matches this script's own
@@ -21,9 +23,29 @@ LOG=${2:-log/ds4.log}
 PORT=${DS4_SENTINEL_PORT:-8001}
 TRAIN_DIR=${DS4_SENTINEL_TRAIN:-/Volumes/FireCuda520/ds4-train/active}
 PARITY_DIR=${DS4_SENTINEL_PARITY:-/Volumes/FireCuda520/ds4-parity}
+INTERVAL=${DS4_SENTINEL_INTERVAL:-20}
 END=$((SECONDS + MINUTES * 60))
 
-cnt() { grep -c "$1" "$LOG" 2>/dev/null || echo 0; }
+# grep -c prints 0 AND exits nonzero when nothing matched, so writing this as
+# `grep -c ... || echo 0` captures "0\n0" - a two-line value that makes every
+# [ "$n" -gt "$base" ] comparison die with "integer expression expected" and
+# silently deafens the whole watcher.  That is the exact failure this script is
+# for, so run the alert test below before trusting a fresh copy of this file:
+#   printf 'x generation rewind rebuild ctx=1..2:1 y\n' > /tmp/s.log
+#   sh .codebase-memory/rewind_sentinel.sh 1 /tmp/s.log   # must alert and exit 1
+# Verified against a real appended trigger and a real truncation: alert fires and
+# rotation re-baselines.  Detection lags by INTERVAL plus the lsof call (~2 s),
+# so budget ~25 s with the defaults rather than expecting sub-second reaction.
+cnt() {
+	n=$(grep -c "$1" "$LOG" 2>/dev/null)
+	[ -z "$n" ] && n=0
+	printf '%s\n' "$n"
+}
+cnt_i() {
+	n=$(grep -ci "$1" "$LOG" 2>/dev/null)
+	[ -z "$n" ] && n=0
+	printf '%s\n' "$n"
+}
 
 # Baselines for the five failure signals, plus the two counters that decide
 # whether the fixes are actually being exercised (a silent engine and a fixed
@@ -35,7 +57,7 @@ set_baseline() {
 	base_edge=$(cnt "target-ahead-of-window")
 	base_discard=$(cnt "kv cache discarded")
 	base_fail=$(cnt "prefill failed")
-	base_div=$(grep -ci "divergence" "$LOG" 2>/dev/null || echo 0)
+	base_div=$(cnt_i "divergence")
 }
 set_baseline
 
@@ -51,7 +73,8 @@ while [ $SECONDS -lt $END ]; do
 	fi
 
 	# Rotation or truncation: re-baseline instead of comparing across files.
-	lines=$(wc -l < "$LOG" 2>/dev/null || echo 0)
+	lines=$(wc -l < "$LOG" 2>/dev/null | tr -d " \n")
+	[ -z "$lines" ] && lines=0
 	if [ "$lines" -lt "$prev_lines" ]; then
 		echo "log rotated ($prev_lines -> $lines lines) at $(date '+%H:%M:%S'); re-baselined"
 		set_baseline
@@ -66,7 +89,7 @@ while [ $SECONDS -lt $END ]; do
 	[ "$d" -gt "$base_discard" ] && { echo "KV DISCARDED (store integrity, after force-kill restarts) at $(date '+%H:%M:%S'):"; grep "kv cache discarded" "$LOG" | tail -2 | cut -c1-260; exit 1; }
 	f=$(cnt "prefill failed")
 	[ "$f" -gt "$base_fail" ] && { echo "PREFILL FAILED at $(date '+%H:%M:%S'):"; grep "prefill failed" "$LOG" | tail -2 | cut -c1-260; exit 1; }
-	v=$(grep -ci "divergence" "$LOG" 2>/dev/null || echo 0)
+	v=$(cnt_i "divergence")
 	[ "$v" -gt "$base_div" ] && { echo "DIVERGENCE LINE at $(date '+%H:%M:%S'):"; grep -i "divergence" "$LOG" | tail -2 | cut -c1-260; exit 1; }
 
 	sleep 20
