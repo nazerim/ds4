@@ -754,3 +754,34 @@ engine-form head seeded from s4full recipe as NEXT research item.
   this is latency only). Docs written back: PLAN-DSML-REWIND.md +
   ISSUE-EXACT-DSML-REWIND-REBUILD-20261104.md (corrections 3-6 recorded,
   including two of MY OWN claims retracted same evening).
+- 21:1x RETRACTION + CORRECTION of my own 20:4x entry ("ROOT CAUSE FOUND,
+  FIX DEPLOYED"): that entry named the eval-site clearing as the cause. It is
+  ONE of two routes, and NOT the dominant one. The per-site label build (fcad472)
+  named the real culprit within six minutes of deploying:
+  end_state=ds4_session_eval_dspark_speculative_stochastic (21:03:30,
+  kept=234,683 est_s=671). frontier - window_start = 4 = accepted_drafts pins it
+  to the stochastic driver's direct-prefix commit (ds4.c:84669-84683): truncate to
+  start, capture_invalidate (zeroes end), commit frontier prefix, push accepted
+  drafts, mark valid - and no dspark_rewind_keep(). Its argmax twin (84122) does
+  the same sequence and DOES arm. The stochastic driver has one arming site and
+  three invalidation sites, and it is the sampled-temperature path -> an
+  EXACT-sampling tool session hits it on nearly every block. Fixed in 18fa4f8
+  (gated on DS4_REWIND_RESUME), deployed 21:12:17 PID 11552.
+  WHY MY SYNTHETIC REPRO SHOWED ZERO BAILS, finally: that instance reported
+  sample_cycles=0 - the stochastic driver never ran, because the repro never
+  rejected a draft and then crossed a mode boundary in the same turn. Every
+  "the stall doesn't reproduce" reading up to now was measuring the wrong driver.
+  *** FOR THE CORPUS/PARITY LANE (action, not information): serve and rebuild are
+  NOT bit-identical - they differ in reduction order the same way batched verify
+  differs from serial decode. A flip needs the sampling CDF cut to land inside
+  that ulp, but at request level a flip re-conditions everything after it. The
+  served route is the engine's dominant reference (all four other commit paths
+  already rewind this way), so this deploy moves emission TOWARD the reference -
+  but it still changes what THIS binary would have emitted on exactly that branch.
+  Re-baseline parity captures at the 21:12:17 deploy and mark the three
+  stall-labeled turns (19:28:26, 19:39:31, 20:57:52, 21:03:30) as known-divergent
+  if any parity diff is reported across the boundary. Rollback:
+  DS4_REWIND_RESUME=0 ./ds4-server.sh restart-collect.
+  Two engine restarts tonight were force-kills mid-rebuild; the disk KV store
+  survived (229,376-token entry hit in 651.8 ms after the first), so no rehydrate
+  damage observed - but that is one sample, worth watching on the next deep turn.
