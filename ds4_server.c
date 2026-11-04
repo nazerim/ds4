@@ -14701,10 +14701,19 @@ static int server_generation_rewind(server *s, server_slot *slot,
      * decremented position would contradict the window the reason came from. */
     const int requested = pos;
     /* A mode change only needs logits at the retained boundary. Replaying the
-     * previous token can cross before the verifier snapshot in exact mode. */
-    if (resample && ds4_session_rewind_speculative(slot->session, pos)) {
-        pthread_mutex_unlock(&s->inference_mu);
-        return 0;
+     * previous token can cross before the verifier snapshot in exact mode.
+     * The gate can also answer OK and the attempt still fail downstream (a GPU
+     * copy in the frontier restore, a replay eval, a TP round-trip), so the
+     * reason captured above would otherwise report OK on a line about
+     * rebuilding; re-ask after the failed attempt and log that too. */
+    const char *reason_try = "-";
+    if (resample) {
+        if (ds4_session_rewind_speculative(slot->session, pos)) {
+            pthread_mutex_unlock(&s->inference_mu);
+            return 0;
+        }
+        reason_try = ds4_rewind_reason_name(
+            ds4_session_rewind_reason(slot->session, pos, NULL));
     }
     if (resample) pos--;
     ds4_session_rewind(slot->session, pos);
@@ -14722,7 +14731,7 @@ static int server_generation_rewind(server *s, server_slot *slot,
          * output.  Say what is happening, and roughly how long it will take,
          * before it starts (PLAN-DSML-REWIND M0). */
         server_log(DS4_LOG_KVCACHE,
-                   "ds4-server: generation rewind rebuild ctx=%s window_owner=%s route=%s resample=%d reason=%s requested=%d truncate=%d window=%d..%d window_max=%d prefixes=%u logits=%d frontier=%d checkpoint_valid=%d common=%d kept_tokens=%d est_s=%.0f exact=%d",
+                   "ds4-server: generation rewind rebuild ctx=%s window_owner=%s route=%s resample=%d reason=%s requested=%d truncate=%d window=%d..%d end_state=%s reason_try=%s window_max=%d prefixes=%u logits=%d frontier=%d checkpoint_valid=%d common=%d kept_tokens=%d est_s=%.0f exact=%d",
                    ctx && ctx[0] ? ctx : "-",
                    rewind_window_owner(s->engine),
                    resample ? "mode-boundary" : "truncation",
@@ -14732,6 +14741,8 @@ static int server_generation_rewind(server *s, server_slot *slot,
                    pos,
                    win.window_start,
                    win.window_end,
+                   win.end_cause ? win.end_cause : "none",
+                   reason_try,
                    win.max_window,
                    win.prefixes,
                    win.has_boundary_logits ? 1 : 0,
@@ -14748,7 +14759,7 @@ static int server_generation_rewind(server *s, server_slot *slot,
          * invalidates the checkpoint); log it so the assumption stays evidence
          * rather than folklore. */
         server_log(DS4_LOG_KVCACHE,
-                   "ds4-server: generation rewind truncated without rebuild ctx=%s window_owner=%s route=%s resample=%d reason=%s requested=%d truncate=%d window=%d..%d frontier=%d common=%d kept_tokens=%d",
+                   "ds4-server: generation rewind truncated without rebuild ctx=%s window_owner=%s route=%s resample=%d reason=%s requested=%d truncate=%d window=%d..%d end_state=%s frontier=%d common=%d kept_tokens=%d",
                    ctx && ctx[0] ? ctx : "-",
                    rewind_window_owner(s->engine),
                    resample ? "mode-boundary" : "truncation",
@@ -14758,6 +14769,7 @@ static int server_generation_rewind(server *s, server_slot *slot,
                    pos,
                    win.window_start,
                    win.window_end,
+                   win.end_cause ? win.end_cause : "none",
                    win.frontier,
                    common,
                    kept_tokens);

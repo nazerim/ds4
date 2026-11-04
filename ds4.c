@@ -61906,6 +61906,10 @@ struct ds4_session {
     float *dspark_rewind_logits;
     int dspark_rewind_start;
     int dspark_rewind_end;
+    /* Which site last cleared dspark_rewind_end.  A zeroed end and a stale end
+     * look identical to the gate, but only one of them is a real loss of
+     * coverage, and the rebuild path cannot tell them apart without this. */
+    const char *dspark_rewind_end_cause;
     uint32_t dspark_rewind_prefixes;
 #endif
     ds4_kv_cache cpu_cache;
@@ -62953,6 +62957,7 @@ static void ds4_session_dspark_capture_invalidate(ds4_session *s) {
 #ifndef DS4_NO_GPU
     if (!s) return;
     s->dspark_rewind_end = 0;
+    s->dspark_rewind_end_cause = "capture-invalidate";
     s->dspark_draft_valid = false;
     s->dspark_draft_len = 0;
     s->dspark_tp_proposal = false;
@@ -64051,6 +64056,7 @@ static bool spec_frontier_copy(const ds4_gpu_copy_span *spans, uint32_t n) {
 
 static bool spec_frontier_snapshot(ds4_spec_frontier *f, ds4_session *s) {
     s->dspark_rewind_end = 0;
+    s->dspark_rewind_end_cause = "snapshot";
     memset(f, 0, sizeof(*f));
     ds4_gpu_graph *g = &s->graph;
     if (!metal_graph_dspark_cache_current_window_valid(g)) return false;
@@ -64179,6 +64185,7 @@ static bool spec_frontier_commit_prefix1(ds4_session *s) {
 static void dspark_rewind_begin(ds4_session *s, const ds4_spec_frontier *frontier,
                                 int start, int rows) {
     s->dspark_rewind_end = 0;
+    s->dspark_rewind_end_cause = "begin";
     s->dspark_rewind_frontier = *frontier;
     s->dspark_rewind_start = start;
     s->dspark_rewind_prefixes = (uint32_t)(rows - 1);
@@ -64192,6 +64199,7 @@ static void dspark_rewind_begin(ds4_session *s, const ds4_spec_frontier *frontie
 
 static void dspark_rewind_keep(ds4_session *s) {
     s->dspark_rewind_end = s->checkpoint.len;
+    s->dspark_rewind_end_cause = "armed";
 }
 
 static void session_greedy_splitkv_reset(ds4_session *s) {
@@ -75282,6 +75290,37 @@ static bool ds4_dspark_stats_enabled(void) {
     return env && env[0] && strcmp(env, "0") != 0;
 }
 
+/* Tolerance for serving a rewind whose verify window is armed but no longer
+ * ends at the live frontier.  Nothing about the snapshotted state depends on
+ * the frontier - the restore rewinds to the block-start snapshot and replays
+ * from the retained checkpoint - yet every single-token decode used to destroy
+ * the window (ds4_session_eval_internal cleared dspark_rewind_end), and the
+ * exact-sampling resample path rewinds and then replays a token through that
+ * same function.  So the first resample of a turn stranded every later
+ * crossing, and each stranded crossing re-prefilled the whole kept context:
+ * measured at 601 s for 212,546 tokens, twice in one turn.  Off by default
+ * until A/B'd; with it unset the engine behaves exactly as before. */
+static bool dspark_rewind_window_tolerance(void) {
+    const char *env = getenv("DS4_REWIND_RESUME");
+    return env && env[0] && strcmp(env, "0") != 0;
+}
+
+/* Single predicate shared by the rewind gate and by the restore it guards, so
+ * the two can never disagree: an armed window covers [start, end), and the live
+ * frontier moving a few tokens past end does not invalidate that coverage.
+ * The bound is about the verifier's support ring, not about the token list:
+ * dspark_cache_cap is raw_cap rows (4352 here) and the snapshot copies only
+ * compressor state, so rows inside [start, end) are safe while the frontier has
+ * advanced by far fewer than a full ring - one block at most.  NOTE: TP leader
+ * and worker are separate processes and must be given DS4_REWIND_RESUME
+ * identically, or their windows diverge and every mirrored rewind invalidates. */
+static bool dspark_rewind_covered_after_move(const ds4_session *s) {
+    if (s->dspark_rewind_end == s->checkpoint.len) return true;
+    const int moved = s->checkpoint.len - s->dspark_rewind_end;
+    return dspark_rewind_window_tolerance() &&
+           moved > 0 && moved <= DS4_DSPARK_MAX_BLOCK_SIZE;
+}
+
 static void ds4_format_len_hist(
         char           *buf,
         size_t          buflen,
@@ -78311,7 +78350,7 @@ static int ds4_session_sync_lockstep(ds4_session *s, const ds4_tokens *prompt,
  * here instead of as a gate timeout mid-decode. */
 int ds4_session_sync(ds4_session *s, const ds4_tokens *prompt, char *err, size_t errlen) {
 #ifndef DS4_NO_GPU
-    if (s) s->dspark_rewind_end = 0;
+    if (s) { s->dspark_rewind_end = 0; s->dspark_rewind_end_cause = "sync"; }
 #endif
     if (s && s->checkpoint_valid && !ds4_session_vision_prefix_matches(
                      s, s->sync_images, s->sync_image_count)) {
@@ -80712,7 +80751,14 @@ static int ds4_session_eval_internal(ds4_session *s, int token, bool probe_mtp,
                                      char *err, size_t errlen) {
     if (!s) return 1;
 #ifndef DS4_NO_GPU
-    s->dspark_rewind_end = 0;
+    /* One more token at the frontier: the window stays valid as a covered
+     * range, and the rewind gate compares it against the frontier.  Destroying
+     * it here is what forced a full re-prefill after the first resample of a
+     * turn; DS4_REWIND_RESUME keeps the old behaviour when unset. */
+    if (!dspark_rewind_window_tolerance()) {
+        s->dspark_rewind_end = 0;
+        s->dspark_rewind_end_cause = "eval";
+    }
 #endif
     if (s->distributed) {
         if (!s->checkpoint_valid) {
@@ -89082,7 +89128,7 @@ int ds4_session_restore_speculative_prefix(ds4_session *s, int pos) {
 #endif
     if (!s || !s->checkpoint_valid || !s->dspark_rewind_logits ||
         s->dspark_rewind_end <= s->dspark_rewind_start ||
-        s->dspark_rewind_end != s->checkpoint.len ||
+        !dspark_rewind_covered_after_move(s) ||
         pos < s->dspark_rewind_start || pos >= s->dspark_rewind_end ||
         (uint32_t)(pos - s->dspark_rewind_start) > s->dspark_rewind_prefixes)
         return 1;
@@ -89117,10 +89163,13 @@ static ds4_rewind_reason dspark_rewind_gate(const ds4_session *s, int pos) {
     if (!s->checkpoint_valid) return DS4_REWIND_NO_CHECKPOINT;
     if (!s->dspark_rewind_logits) return DS4_REWIND_NO_BOUNDARY_LOGITS;
     if (s->dspark_rewind_end <= s->dspark_rewind_start) return DS4_REWIND_NO_WINDOW;
-    if (s->dspark_rewind_end != s->checkpoint.len) return DS4_REWIND_WINDOW_MOVED;
+    /* Same predicate the restore uses - gate and restore cannot disagree. */
+    if (!dspark_rewind_covered_after_move(s)) return DS4_REWIND_WINDOW_MOVED;
     if (pos < s->dspark_rewind_start) return DS4_REWIND_TARGET_STALE;
     if (pos >= s->dspark_rewind_end) return DS4_REWIND_TARGET_AHEAD;
-    if (s->checkpoint.len - s->dspark_rewind_start > DS4_DSPARK_MAX_BLOCK_SIZE)
+    /* With the window armed at the frontier this is the same expression the
+     * gate has always checked (end == checkpoint.len there). */
+    if (s->dspark_rewind_end - s->dspark_rewind_start > DS4_DSPARK_MAX_BLOCK_SIZE)
         return DS4_REWIND_WINDOW_TOO_WIDE;
     if (s->engine->tp.active && !ds4_session_tp_leader(s))
         return DS4_REWIND_NOT_TP_LEADER;
@@ -89161,6 +89210,7 @@ static bool dspark_rewind_recent(ds4_session *s, int pos) {
         s->checkpoint.len = pos;
         s->checkpoint_valid = false;
         s->dspark_rewind_end = 0;
+        s->dspark_rewind_end_cause = "rewind-fail";
         return false;
     }
     for (int i = 0; i < replay; i++) {
@@ -89235,6 +89285,7 @@ ds4_rewind_reason ds4_session_rewind_reason(const ds4_session *s, int pos,
     state->window_end = s->dspark_rewind_end;
     state->has_boundary_logits = s->dspark_rewind_logits != NULL;
     state->prefixes = s->dspark_rewind_prefixes;
+    state->end_cause = s->dspark_rewind_end_cause;
 #endif
     return reason;
 }

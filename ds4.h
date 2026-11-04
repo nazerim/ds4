@@ -537,6 +537,7 @@ typedef struct {
     bool has_boundary_logits;
     uint32_t prefixes;           /* verifier-prefix states kept for the window */
     int max_window;              /* widest span one verifier block can replay */
+    const char *end_cause;       /* site that last cleared window_end, or "armed" */
 } ds4_session_rewind_state;
 
 ds4_rewind_reason ds4_session_rewind_reason(const ds4_session *s, int pos,
