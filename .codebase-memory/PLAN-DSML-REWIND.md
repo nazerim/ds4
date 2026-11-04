@@ -189,6 +189,102 @@ started it that way (same argv byte-for-byte, same 14 env vars, parity dir
 preserved). If the operator wants the pre-M0 binary instead, that is a rebuild +
 one more restart window; say which.
 
+### M0 LABEL CAPTURED - production, first real rebuild (1104 19:28:26)
+
+    generation rewind rebuild ctx=210468..210889:421 window_owner=dspark-window
+    route=mode-boundary resample=1 reason=no-verify-window
+    requested=212547 truncate=212546 window=212547..0 window_max=16 prefixes=4
+    logits=1 frontier=212551 checkpoint_valid=1 common=0 kept_tokens=212546
+    est_s=607 exact=1
+
+Read it carefully, because it kills the doc's guess and points at a much
+cheaper fix than M1/M2 as scoped:
+
+- `reason=no-verify-window`, NOT `window-moved-past-frontier` and NOT
+  `target-behind-window`. The gate that fired is
+  `dspark_rewind_end <= dspark_rewind_start`, with `window=212547..0`:
+  **start is live (212547) but end is 0.**
+- The restore state needed was still present: `logits=1`, `prefixes=4`,
+  `checkpoint_valid=1`, and the target `requested=212547` equals
+  `window_start` exactly - the cheapest possible restore (prefix 0, memcpy the
+  saved boundary logits). Instead 212,546 tokens were re-prefilled.
+- Why end is 0 while start isn't: `dspark_rewind_begin()` (ds4.c:64179) sets
+  `end = 0` up front and the window is only armed by `dspark_rewind_keep()`
+  (ds4.c:64193, `end = checkpoint.len`). There are **five** keep sites
+  (ds4.c:84046, 84122, 84571, 84922, 84960) but the verify paths have more
+  exits than that. Two of them commit tokens and return **without arming the
+  window**:
+    - the prefix-extended commit (ds4.c:84134-84192): rolls back to `start`,
+      commits `DS4_SPEC_PREFIX_SLOTS + 1` drafts, `spec_frontier_free`,
+      `return n_accept` - no keep.
+    - the reject-then-replay commit (ds4.c:84193 onward): restores the frontier
+      at `start`, replays `replayed_drafts` tokens one by one,
+      `return n_accept` - no keep either.
+  After either exit, `dspark_rewind_start/prefixes/logits/dspark_rewind_frontier`
+  still describe the old block while `checkpoint.len` has moved on, and `end`
+  stays 0. `frontier=212551 = start+4` in the line above is exactly that
+  residue.
+- Which of the two exits fired is derivable from the same line, and it is NOT
+  the prefix-extended one: `prefixes=4` means `dspark_rewind_begin` got
+  `rows = draft_n = 5`, and that exit only fires at `commit_drafts ==
+  DS4_SPEC_PREFIX_SLOTS + 1 == 6`, impossible for a 5-token block. A partial
+  commit of 4 of 5 would have gone through the direct-partial path, which DOES
+  keep (ds4.c:84122) - so reaching a non-keeping exit with 4 tokens committed
+  means `prefix_ok` failed there and control fell through to the
+  reject-then-replay path (ds4.c:84193+), which replays the accepted drafts
+  with one-token evals and returns without ever arming the window. So the
+  sticky state can be entered by a *single* failed row read / prefix commit,
+  and once entered it persists.
+- Counter gap worth closing while M2 is designed: `replay_fallbacks` is
+  incremented only in the prefix-extended path (ds4.c:84168), not in the
+  reject-then-replay path that actually strands the window here. Both the
+  private-instance run (4530 cycles) and the production stats sample read
+  `replay_fallbacks=0` - which is consistent with the prefix-extended path never
+  firing and inconsistent with "no fallback happened". Attributing session
+  stickiness from stats alone is therefore unsafe today; the M0 line is the only
+  instrument that sees it.
+- Consequence = the sticky ladder from the census. Once a session leaves the
+  keeping paths, every later mode-boundary resample sees
+  `end <= start` -> `no-verify-window` -> full rebuild, until some block happens
+  to commit through a keeping path again. A session that lives in
+  partial/reject territory (EXACT sampling at temperature > 0, DSML payload
+  tokens the drafter keeps losing) never re-arms: one rebuild per turn, with
+  cost rising as ctx rises - which is precisely the
+  `99,856 -> 106,934 -> ... -> 201,327` staircase, and tonight's 212k turn at
+  ~607 s estimated.
+
+### What this changes about the milestones
+- M1 (truncation-aware resume from a common prefix) is the WRONG target: the
+  engine never got a chance to use any prefix state, because a *liveness flag*
+  was zero. Nothing about DEEPSEEK4 truncation needed to be solved here.
+- M2 as scoped (extra snapshot coverage / memory sizing) is also not the first
+  move: the state to serve this rewind was already in hand (`logits=1`,
+  `prefixes=4`, target == window_start). The ~11.6 MiB question is moot for the
+  observed failure.
+- New M1' (minimal, to be reviewed, not assumed): arm the window on the two
+  exits that skip `dspark_rewind_keep()`. It looks semantically sound because
+  `dspark_rewind_recent()` is *built* to restore at `start` and replay the few
+  tokens up to `pos`, and the gate already caps the span at
+  `DS4_DSPARK_MAX_BLOCK_SIZE`. It must be reviewed for the TP worker path
+  (`ds4_tp_send_verify_commit` ordering) and for capture invalidation
+  (`ds4_session_dspark_capture_invalidate` already runs in those paths) before
+  it is trusted - a wrong `end` would claim coverage the ring may not have.
+- First M1' step before any patch: add the counter/diagnostic that would prove
+  the diagnosis, i.e. count the reject-then-replay exit that commits tokens
+  while leaving `dspark_rewind_end == 0` (a "window stranded" counter next to
+  the existing stats, plus its `DS4_DSPARK_STATS` field). Without it the fix is
+  unfalsifiable: today `replay_fallbacks=0` and a stranded session are
+  indistinguishable in the stats, and only a rebuild line reveals the state.
+- New M2' (fallback if M1' is unsound): let the gate serve `pos ==
+  dspark_rewind_start` when `checkpoint.len - dspark_rewind_start` is small,
+  restoring + replaying those few tokens instead of the whole context. Note the
+  hazard already documented: the window validator checks geometry only, so any
+  relaxation needs an explicit bound on how far the ring may have moved.
+- Frequency correction stands the other way from the earlier note: bails ARE
+  rare per-turn in healthy sessions (9/9 window-served before this one) but
+  *once a session falls out of the keeping paths they become per-turn*, so
+  neither "never" nor "the norm" was right - it is bimodal per session.
+
 ### Follow-ups this milestone surfaced (not done here)
 - `server_log()` has no `__attribute__((format(printf, 2, 3)))`, so `-Wall`
   never validates any `server_log` format string - the three new lines were
@@ -236,3 +332,10 @@ tokens because the previous turn's checkpoint was live; another hit disk KV at
 exactly what the deployed line will label on the next real occurrence. Harvest
 it passively: the instrument is in the running binary, so no synthetic traffic
 and no extra restart is needed to get the label.
+
+(This prediction was WRONG, and the record stays: the first real rebuild that
+evening came from a turn that had just prefilled 80,612 tokens onto a live
+checkpoint with no cache event at all, and the label was
+`reason=no-verify-window` - a dead liveness flag, not a moved window. Lesson
+for M2: the census can correlate cost with ctx, but only the instrument can
+name the trigger.)
