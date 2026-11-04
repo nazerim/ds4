@@ -62953,11 +62953,12 @@ static bool ds4_session_is_ds41(const ds4_session *s) {
     return s && s->engine && DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_DEEPSEEK41;
 }
 
-static void ds4_session_dspark_capture_invalidate(ds4_session *s) {
+static void ds4_session_dspark_capture_invalidate_impl(ds4_session *s,
+                                                      const char *why) {
 #ifndef DS4_NO_GPU
     if (!s) return;
     s->dspark_rewind_end = 0;
-    s->dspark_rewind_end_cause = "capture-invalidate";
+    s->dspark_rewind_end_cause = why;
     s->dspark_draft_valid = false;
     s->dspark_draft_len = 0;
     s->dspark_tp_proposal = false;
@@ -62965,8 +62966,18 @@ static void ds4_session_dspark_capture_invalidate(ds4_session *s) {
     metal_graph_dspark_capture_invalidate(&s->graph);
 #else
     (void)s;
+    (void)why;
 #endif
 }
+
+/* This helper clears the draft/capture state, and as a side effect drops the
+ * speculative-rewind window - which is a much bigger deal, because losing the
+ * window turns the next mode-boundary rewind into a full-context re-prefill
+ * (measured at 601 s for 212k tokens).  There are two dozen call sites, and the
+ * rebuild line needs to say which route stranded the window, so __func__ is
+ * captured at each one instead of guessing from the generic tag. */
+#define ds4_session_dspark_capture_invalidate(s) \
+    ds4_session_dspark_capture_invalidate_impl((s), __func__)
 
 static void ds4_session_dspark_capture_note_checkpoint(ds4_session *s) {
 #ifndef DS4_NO_GPU
