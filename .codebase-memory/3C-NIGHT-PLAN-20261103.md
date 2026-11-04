@@ -574,3 +574,23 @@ engine-form head seeded from s4full recipe as NEXT research item.
   fix; fresh sessions stay clean until their first big draft-accept
   window. Silent phase has TWO shapes, both inside session_sync_internal:
   unlogged pass at ds4.c:79564 + the logged chunked rebuild at 79489.
+- 14:2x ROOT-CAUSE STATUS CORRECTION (honest narrowing): the 14:02
+  "pin 200,704" evidence is CONTAMINATED by the user's compaction
+  (compact rewrites history -> rebuild-from-pin expected, not bug
+  proof). CLEAN evidence = pre-compact pair only: FULL 344,064 store
+  existed (12:45, no delta chaining, budget healthy) yet 13:11 AND
+  13:45 turns both stopped matching at ~204,800 (same pin twice).
+  Eviction/delta-chaining RULED OUT (full file, 38 s old). Survivors:
+  (A) prompt re-render drift around token ~204,800 - engine's own
+  warning names the suspect class: '4 message(s) first_role=tool
+  contain structural syntax, rendered verbatim' (raw DSML round-trip
+  in tool messages; DS4_KV_DEBUG rejects stores with named reasons
+  e.g. tail-render-mismatch - ds4_server.c:12850s); EXACT+DSpark =
+  CORRELATION via tool traffic, not proven cause; (B) engine-side
+  lineage bug (exact-mode commit/rewind) - no mechanism found yet
+  (rewind rewrites tail pre-emission only). PLAN: DS4_KV_DEBUG=1 on
+  next collect boot (env-only); compacted fresh session = control
+  (stall recurs -> B patch lineage; clean -> A client render drift);
+  patch regardless: session_sync rebuild progress + 'prefix
+  divergence at token N' log w/ both shas. Question pending user:
+  does the agent/proxy repair/rewrite older messages?
