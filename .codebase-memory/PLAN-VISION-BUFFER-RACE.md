@@ -23,6 +23,19 @@ stats dump for that boot (PID 19257). Disk KV store survived: after restart,
 | 18 (FAULTING) | `client_main → parse_chat_request → request_tokenize_multimodal_prompt → server_encode_image → ds4_engine_vision_encode_memory → ds4_gpu_deepseek4_vision_encode → glm53_vision_dispatch_rows → ds4_gpu_compute_encoder` | `inference_mu` (ds4_server.c:4002) |
 | 1 | `ds4_gpu_queue_keepalive_thread` — sleeping; has its own queue (ds4_metal.m:10524) so not the culprit | – |
 
+## Verified: generation holds NO lock while it uses the GPU
+`generate_job` takes `model_mu` only around job entry/exit (ds4_server.c:17412-17414,
+17420-17423) and calls `generate_job_inner` **outside** it. Inside that function
+`inference_mu` is acquired at 15639 and 15747 and released at **15761** — while the
+token loop that calls `ds4_session_eval_speculative` is at **16522**. So the decode path
+touches the GPU with no server lock held, and is kept safe only by the one-decode-thread
+discipline (`s.decode_thread` at 18743, `slot->decode_in_flight` at 15381/15530).
+
+Consequence: "unify the locks" is not a fix, because there is no lock on the generation
+side to unify with. Any GPU work from another thread — the client thread's vision encode,
+or a rewind under `inference_mu` — is free to collide with a running decode.
+
+
 ## Root cause
 The Metal layer's batch section is **process-global and caller-serialized by
 assumption**:
@@ -79,16 +92,26 @@ Anything doing GPU work outside the generation lock. Found by grep, not by incid
 ## Fix options
 | # | change | kills the crash | fixes the class | cost / risk |
 |---|---|---|---|---|
-| A | server-side: take `model_mu` (or the generation lock) around parse-time vision encode | yes, for this path | no (rewind path remains) | ~2 lines; no `model_mu → inference_mu` inversion exists, so deadlock risk is low; adds latency behind a busy decode |
+| A | ~~server-side: vision encode takes the generation lock~~ | **invalid** | no | generation holds no lock during GPU work (see above), so there is nothing to take; making it hold one across the decode loop serializes the engine |
 | B | run vision encode as a queued job instead of on the client thread | yes for vision | partial | touches the request lifecycle; images parsed late means the 409/length checks move |
 | C | **thread-local batch section state** (`_Thread_local` on `g_batch_cb`/`g_batch_enc` + friends) | yes | yes | small diff, big semantic change: cross-thread ordering becomes the caller's problem; must audit `g_pending_cbs`, `g_transient_buffers`, the stream-expert service thread (847/853) and the TP paths; more command buffers |
 | D | mutex inside the Metal layer around the whole section | yes | yes | serializes all GPU work to one thread at a time — defeats `--batched-session` throughput, which is the feature it exists for |
 | E | assertion, not a fix: record the section's owner thread and log a clear engine error (instead of a driver abort) when another thread joins it | converts abort→diagnostic | no | ~10 lines, precedent already in the file (`g_stream_expert_service_thread`) |
 
-Recommendation: **A now** (unblocks the benchmark, minimal, reviewable), **E alongside it**
-(so any remaining violator names itself instead of killing the engine), then **C** as a
-separately-reviewed change with the `race` mode as its gate — it is the only option that
-fixes the rewind path too. Do not do D.
+Recommendation, in order:
+1. **Tonight, no code, no restart:** do not let an image-bearing request overlap a
+   running decode — run the vision part of a batch serially, or text-only runs without
+   `--vision`. The crash needs exactly that overlap.
+2. **Safety net (small, reviewable):** thread-affinity on the batch section. Record the
+   owner at `ds4_gpu_begin_commands()` (precedent already in the file:
+   `g_stream_expert_service_thread`, 847/853) and in `ds4_gpu_command_buffer()` hand a
+   *foreign* thread an owned buffer plus a one-time log naming the thread. For
+   independent work like a vision encode that is correct and removes the abort; it does
+   NOT make same-session ops safe (an uncommitted batch's writes would be read stale), so
+   those paths must be logged and then fixed properly rather than silently forked off.
+3. **Real fix:** option C (thread-local batch state), gated by the `race` mode, with
+   `g_pending_cbs` / `g_transient_buffers` / stream-expert / TP auditing. That is the only
+   option that makes multi-thread use correct rather than merely non-fatal.
 
 ## Operational mitigation until then
 Do not overlap image-bearing requests with generation. Concretely: run the vision part of
