@@ -89,12 +89,39 @@ def _note(key, wait_ms=0):
                 _stats["max_wait_ms"] = max(_stats["max_wait_ms"], wait_ms)
 
 
+def _png_chunks(raw):
+    """Walk the chunk stream: (type, declared_length) per chunk.
+
+    A payload can carry correct magic AND a correct IEND trailer while its IDAT
+    length fields are nonsense - which is what happened on the first run of this
+    diagnostic: a hand-copied base64 string lost 16 characters mid-stream, so the
+    old "complete" flag was true while libpng was right to reject the file. Parsing
+    the chunk structure is what separates 'arrived corrupt' from 'valid PNG the
+    engine should have decoded'.
+    """
+    if not raw.startswith(_PNG_MAGIC):
+        return None
+    i, chunks, end_ok = 8, [], False
+    while i + 8 <= len(raw):
+        ln = int.from_bytes(raw[i:i + 4], "big")
+        typ = raw[i + 4:i + 8].decode("latin-1", "replace")
+        chunks.append(typ)
+        if ln > len(raw):                       # declared size larger than the body
+            return {"chunks": chunks, "trailer": typ == "IEND", "aligned": False}
+        i += 8 + ln + 4                          # header + data + CRC
+        if typ == "IEND":
+            end_ok = True
+            break
+    return {"chunks": chunks, "trailer": end_ok, "aligned": i == len(raw)}
+
+
 def _image_payload_diagnostics(body):
     """Describe every image the client actually sent, as bytes we hold.
 
-    Returns a list of dicts; the fields answer the one question the engine cannot:
-    was the payload complete? `magic` + `not IEND` = truncated body, which is
-    exactly what makes the engine say "invalid or unsupported PNG image".
+    The `verdict` field answers the question the engine cannot: TRUNCATED (no
+    IEND), BROKEN (chunk stream does not add up - the corrupt-in-transit case),
+    or SOUND (a well-formed PNG that the engine rejected for its own reasons,
+    which IS a real engine bug).
     """
     out = []
     try:
@@ -112,24 +139,37 @@ def _image_payload_diagnostics(body):
         url = ((p.get("image_url") or {}).get("url")) or ""
         m = re.match(r"data:([^;,]+)[^,]*;base64,(.*)$", url, re.S)
         if not m:
-            out.append({"kind": "url-or-unparsed", "chars": len(url)})
+            out.append({"kind": "url-or-unparsed", "chars": len(url), "verdict": "UNPARSED"})
             continue
         mime, b64 = m.group(1), m.group(2)
         try:
             raw = base64.b64decode(b64, validate=False)
         except Exception as e:
-            out.append({"mime": mime, "decode": f"base64 failed: {e}"})
+            out.append({"mime": mime, "verdict": "BASE64-DECODE-FAILED",
+                        "detail": str(e)[:60]})
             continue
-        head = raw[:8].hex()
-        tail = raw[-12:].hex()
-        out.append({
-            "mime": mime, "b64_chars": len(b64), "bytes": len(raw),
-            "magic": "PNG" if raw.startswith(_PNG_MAGIC) else (
-                "JPEG" if raw.startswith(b"\xff\xd8\xff") else "other"),
-            "complete": tail.endswith("49454e44ae426082") if raw.startswith(_PNG_MAGIC)
-                        else None,     # PNG must finish with IEND + its CRC
-            "head": head, "tail": tail,
-        })
+        rec = {"mime": mime, "b64_chars": len(b64), "bytes": len(raw),
+               "head": raw[:8].hex(), "tail": raw[-12:].hex()}
+        if raw.startswith(_PNG_MAGIC):
+            rec["magic"] = "PNG"
+            info = _png_chunks(raw)
+            rec["chunk_types"] = info["chunks"] if info else None
+            if info is None or not info["trailer"]:
+                rec["verdict"] = "TRUNCATED (no IEND)"
+            elif not info["aligned"]:
+                rec["verdict"] = "BROKEN (chunk lengths do not add up - corrupt in transit)"
+            elif "IHDR" not in rec["chunk_types"] or "IDAT" not in rec["chunk_types"]:
+                rec["verdict"] = "BROKEN (missing IHDR/IDAT)"
+            else:
+                rec["verdict"] = "SOUND (well-formed PNG; the rejection is an engine problem)"
+        elif raw.startswith(b"\xff\xd8\xff"):
+            rec["magic"] = "JPEG"
+            rec["verdict"] = ("SOUND-JPEG (EOI present)" if raw.endswith(b"\xff\xd9")
+                              else "TRUNCATED (no EOI)")
+        else:
+            rec["magic"] = "other"
+            rec["verdict"] = "UNSUPPORTED-TYPE (no PNG/JPEG signature)"
+        out.append(rec)
     return out
 
 
@@ -215,12 +255,9 @@ class Handler(BaseHTTPRequestHandler):
             for i, d in enumerate(diag):
                 self.log_message("IMG-REJECT payload[%d/%d] %s", i + 1, n,
                                  json.dumps(d, sort_keys=True))
-            # The engine cannot see any of this; this is the whole point of the line.
-            self.log_message("IMG-REJECT request_bytes=%d verdict=%s", len(req_body),
-                             "TRUNCATED (magic present, no IEND)" if any(
-                                 d.get("magic") == "PNG" and d.get("complete") is False
-                                 for d in diag) else
-                             "COMPLETE payload - decode failed for another reason")
+            # The engine cannot see any of this; this line is the whole point.
+            self.log_message("IMG-REJECT request_bytes=%d verdicts=%s", len(req_body),
+                             "; ".join(d.get("verdict", "?") for d in diag) or "no image parts")
 
     def do_GET(self):
         if not self._authorized():

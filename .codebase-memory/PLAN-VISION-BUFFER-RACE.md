@@ -215,3 +215,48 @@ while the engine holds the model. Any patch here must be written and reviewed no
 and validated when collection is idle or in a named window. The guard deployed at 06:41:43 stands
 as the interim measure; the operational mitigation (do not overlap image jobs with generation) is
 now *more* strongly justified than before, because of the retain-list race above.
+
+---
+
+## Semaphore deployed and proven (07:19-07:30) - the crash trigger is now removed for LAN traffic
+
+`auth_proxy.py`: single-flight semaphore (`MAX_CONCURRENT_UPSTREAM=1`),
+`UPSTREAM_TIMEOUT` 600 -> 3600 s, chunked-body decoding, and image-rejection
+diagnostics that walk the PNG chunk stream. Deployed via `./ds4-server.sh restart-proxy`
+(PID 53098); key read from the canonical 0600 file, live path verified 200 over urllib
+AND a raw socket.
+
+Decisive experiment (their step 1-3), with a PNG generated locally so nobody's
+transcription is in the loop:
+
+    idle slot, valid red PNG      -> 200 in  1.2s
+    occupy 45.5 s, same request    -> 200 in 38.5s   (proxy logged: QUEUED waited_ms=37443)
+    engine afterwards               -> pid 47991 alive, tripwire lines 0, rebuilds 0
+
+So: vision works, the mid-turn caller waits instead of racing, and **the engine never
+had two threads in GPU code** - which is the point: `guard tripwire = 0` is positive
+evidence the semaphore removes the trigger, not merely an absence of crashes.
+
+### Consequence for the engine-side work, stated plainly
+The proxy was the *supplier* of the concurrency that reached the unsynchronised GPU
+submit path. With it serialised, proxy-borne traffic can no longer exercise the engine
+race - so `diverted`/`unguarded` will stay 0 for LAN clients, and the engine guard's
+field evidence now has to come from clients that hit `:8001` directly (local agents,
+my own probes) or from a deliberately concurrent test. The engine fix is still needed:
+the proxy only closes one door, and `:8001` is loopback-open by design.
+
+### Also: their command C payload is itself broken
+The base64 in `MBP-DS-vision-handoff.md` line 108 decodes to 156 bytes = `IHDR,IDAT`
+with **no IEND** - a truncated copy. Re-running their one-shot repro therefore
+"reproduces" a decoder rejection that is really a transcription artifact. The new
+classifier names it (`BROKEN`/`TRUNCATED`) instead of letting it look like an engine
+bug; the same trap bit my first run of this test, which is why the payload is now
+generated in-script.
+
+### Corrections from this run, for the record
+- Two of my own test artifacts were wrong before they were right: a masked
+  `Authorization` literal made every request 401 (and made an auth *failure* look like
+  a pass because the negative case also 401'd), and the first queue implementation
+  passed `QUEUE_TIMEOUT/1000` against a value already in seconds, so a "45 s" limit
+  rejected callers after 45 ms - the exact fail-fast the semaphore exists to remove.
+  Both were caught by running the tests, not by reading the code.
