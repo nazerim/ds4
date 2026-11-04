@@ -711,3 +711,46 @@ engine-form head seeded from s4full recipe as NEXT research item.
   buffers. Spine (resample 16727 -> rewind 16736 -> RESET 79564 -> law)
   NEVER affected. Lesson logged: reviewer folds need the same
   adversarial check as builder claims - caught by the NEXT reader.
+- 20:4x PLAN-DSML-REWIND agent session 2 - M0 LANDED, ROOT CAUSE FOUND,
+  FIX DEPLOYED. Owns entries above (14:5x-16:2x) as background only; every
+  claim below re-verified against source + live logs by me.
+  M0 (b0b4966, reviewed 2x): gate condition extracted verbatim into
+  dspark_rewind_gate(), exposed read-only as ds4_session_rewind_reason();
+  server logs reason/requested/truncate/window/kept_tokens/est_s BEFORE the
+  rebuild + elapsed_s/rate_tps AFTER + end_state= (which of 7 sites last
+  cleared or armed the window). Zero behavior change.
+  LABEL (live, first real rebuild): reason=no-verify-window, window=212547..0
+  with logits=1 prefixes=4 checkpoint_valid=1 and requested==window_start -
+  i.e. the restore state EXISTED and only the liveness flag was dead.
+  Measured: 212,546 tokens in 601.4s = 353 t/s (est_s was 607; rc=2 = client
+  had already disconnected, so the rebuild produced NOTHING). Second rebuild
+  63s later, same turn. Census from ordinary logs: 24 rebuild chunks, 150 GPU
+  min lost, 29.9% of pre-fix deep turns over 64s.
+  ROOT CAUSE: ds4_session_eval_internal() cleared dspark_rewind_end on EVERY
+  token, and the exact-sampling resample rewinds then replays its boundary
+  token through that same function -> the first resample of a turn strands
+  every later crossing. Explains the per-turn census ladder AND why my
+  synthetic repro produced zero bails. NOT the verify-tail theory in the
+  entry above: ruled out by the session's own counters (replay_fallbacks=0,
+  verifier_unavailable=0, full==direct_full).
+  FIX (265679b + 1ea1fec, DS4_REWIND_RESUME default ON): one predicate
+  dspark_rewind_covered_after_move() shared by the gate AND
+  ds4_session_restore_speculative_prefix() (also the TP worker's check).
+  Review history matters: first attempt relaxed ONLY the gate -> SMASH
+  (restore re-checked equality, so nothing was served while the log claimed
+  reason=ok); fixed by sharing the predicate -> PASS_WITH_MINORS. Env OFF is
+  decision-identical to the prior commit (verified: gate, restore, span check,
+  eval site). TP: both ranks need the same env value.
+  DEPLOYED: live engine PID 9304 since 20:13 (operator-authorized window;
+  argv byte-identical, all 14 original env vars preserved, parity dir intact
+  for the conf-head A/B). Interim: 0 rebuilds, 9 rewind events all
+  reason=ok end_state=armed, deepest served 226,719 tokens. p=0.02 vs the
+  >64s class but p=0.21 vs the strict >300s class - NOT yet conclusive;
+  ~25 clean deep turns or the fixed-seed A/B closes it. Rollback:
+  DS4_REWIND_RESUME=0 ./ds4-server.sh restart-collect.
+  FOR THE 3c LANE: replay_fallbacks cannot see a stranded window (the
+  clearing site is invisible in stats) - use the M0 line's end_state= instead.
+  Collection correctness is unaffected either way (exact semantics preserved;
+  this is latency only). Docs written back: PLAN-DSML-REWIND.md +
+  ISSUE-EXACT-DSML-REWIND-REBUILD-20261104.md (corrections 3-6 recorded,
+  including two of MY OWN claims retracted same evening).
