@@ -78,14 +78,17 @@ BATCH_DIVERTED='GPU batch section touched by a foreign thread at (command_buffer
 # Baselines for the five failure signals, plus the counters that decide whether
 # the fixes are being exercised at all (a silent engine and a fixed engine look
 # identical until a rewind event happens).
-base_rebuild=0; base_edge=0; base_discard=0; base_fail=0; base_div=0; base_batchu=0
+base_rebuild=0; base_edge=0; base_discard=0; base_fail=0; base_div=0
+base_divreal=0; base_batchu=0; base_contra=0
 prev_lines=0
 set_baseline() {
 	base_rebuild=$(cnt "generation rewind rebuild ctx=")
 	base_edge=$(cnt "target-ahead-of-window")
-	base_discard=$(cnt "kv cache discarded")
+	base_discard=$(cnt "kv cache discarded reason=prefill-failed")
+	base_contra=$(cnt "kv cache discarded reason=frontier-contradicted")
 	base_fail=$(cnt "prefill failed")
-	base_div=$(cnt_i "divergence")
+	base_div=$(cnt "divergence anchor")          # informational bookkeeping only
+	base_divreal=$(cnt_i "divergence detected\\|head divergence\\|lineage mismatch\\|kv head divergence")
 	base_batchu=$(cnt_e "$BATCH_UNGUARDED")
 }
 
@@ -164,9 +167,10 @@ report() {
 	turn_times
 	python3 .codebase-memory/stall_census.py "$LOG" 2>/dev/null | head -2
 	echo "kv: hit=$(cnt 'kv cache hit') stored=$(cnt 'kv cache stored') evicted=$(cnt 'kv cache evicted')"
-	echo "    discarded=$(cnt 'kv cache discarded')  (frontier-superseded evictions are normal"
+	echo "    discarded prefill-failed=$(cnt 'kv cache discarded reason=prefill-failed')   stale-entry drops=$(cnt 'kv cache discarded reason=frontier-contradicted')"
 	echo "    after a restart; they cost a future re-prefill, not correctness)"
-	echo "prefill failed: $(cnt 'prefill failed')   divergence lines: $(cnt_i 'divergence')"
+	echo "prefill failed: $(cnt 'prefill failed')   divergence anchors (informational): $(cnt 'divergence anchor')"
+	echo "divergence DETECTED lines (what actually alerts): $(cnt_i "divergence detected\|head divergence\|lineage mismatch\|kv head divergence")"
 
 	# Collection liveness for the corpus lane.  A short health probe does NOT
 	# produce a record (verified: the 23:08 probe left train/parity mtimes at the
@@ -201,7 +205,7 @@ END=$((SECONDS + MINUTES * 60))
 set_baseline
 echo "sentinel armed $(date '+%H:%M:%S') for ${MINUTES}m on $LOG (port $PORT, every ${INTERVAL}s)."
 echo "baselines: rebuild=$base_rebuild edge=$base_edge discard=$base_discard"
-echo "           prefill-fail=$base_fail divergence=$base_div"
+echo "           prefill-fail=$base_fail divergence-anchors=$base_div"
 
 # fire LABEL GREP-ARGS...  - prints the two most recent matching lines and exits 1.
 fire() {
@@ -231,15 +235,28 @@ while [ $SECONDS -lt $END ]; do
 	[ "$r" -gt "$base_rebuild" ] && fire "NEW REBUILD" "generation rewind rebuild"
 	e=$(cnt "target-ahead-of-window")
 	[ "$e" -gt "$base_edge" ] && fire "EDGE REFUSAL RECURRED (ecef491 missed a case)" "target-ahead-of-window"
-	d=$(cnt "kv cache discarded")
-	[ "$d" -gt "$base_discard" ] && fire "KV DISCARDED (store integrity)" "kv cache discarded"
+	d=$(cnt "kv cache discarded reason=prefill-failed")
+	# Split by REASON, not by count: ds4_server.c only ever writes two values here.
+	# frontier-contradicted is the store noticing a stale entry and dropping it - the
+	# self-healing path working (seen 6x in a boot with no guard and no mutex, so it
+	# predates tonight's changes; my own concurrency test provoked 4 by firing two
+	# holders with an IDENTICAL prompt, i.e. same conversation, same slot).
+	# prefill-failed means a cached entry was thrown away because prefill errored -
+	# that one is a real fault and alerts.
+	[ "$d" -gt "$base_discard" ] && { echo "ALERT: kv cache discarded reason=prefill-failed at $(date '+%H:%M:%S'):"; grep "kv cache discarded reason=prefill-failed" "$LOG" | tail -2 | cut -c1-200; exit 1; }
+	dc=$(cnt "kv cache discarded reason=frontier-contradicted")
+	[ "$dc" -gt "$base_contra" ] && echo "note $(date '+%H:%M:%S'): $((dc - base_contra)) stale-entry drop(s) (frontier-contradicted, self-healing; total $dc)"
 	f=$(cnt "prefill failed")
 	[ "$f" -gt "$base_fail" ] && fire "PREFILL FAILED" "prefill failed"
-	v=$(cnt_i "divergence")
-	# -i plus the pattern, in that order: fire() shifts its label away and hands the
-	# rest to grep, so passing only "-i" here would leave grep with no pattern and
-	# it would block reading stdin - a watcher that hangs is a watcher that is deaf.
-	[ "$v" -gt "$base_div" ] && fire "DIVERGENCE LINE" -i "divergence"
+	# The first version alerted on `grep -i divergence`, which was WRONG and proved
+	# it by firing at 07:40:43 during a healthy run: ds4_server.c contains no
+	# "divergence detected" message at all - the only lines carrying the word are
+	# "divergence anchor requested/stored", routine KV bookkeeping. Counting those
+	# is useful; alerting on them makes the watcher a crying wolf, and a wolf that
+	# cries also stops watching (the exit ended the shift before the real signals).
+	v=$(cnt_i "divergence detected\|head divergence\|lineage mismatch\|kv head divergence")
+	[ "$v" -gt "$base_divreal" ] && fire "DIVERGENCE DETECTED" -i "divergence"
+	echo "  (info) divergence anchor bookkeeping: $(cnt 'divergence anchor')" > /dev/null
 	# Cross-thread batch joins that the guard could NOT divert: direct g_batch_cb
 	# users and ownership transfers.  These still share the buffer by design, so a
 	# hit means the pre-crash interleaving is live on a path the guard only logs.
