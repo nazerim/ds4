@@ -167,3 +167,51 @@ an image request arriving while a decode is mid-batch — which is exactly what 
    concurrency, not thread safety: it cannot be switched on to fix this, and a
    cross-thread join would end another thread's encoder mid-batch — the silent
    corruption mode rather than the clean abort.
+
+---
+
+## AUDIT RESULTS (06:50-06:57) — read-only, engine untouched; the plan changed
+
+### Threading facts, settled from code (they split "the real fix" in two)
+- **Non-batched (the live Vision-Exp profile):** `else if (pthread_create(&worker, ... worker_main ...))`
+  (ds4_server.c:18766) — **exactly one** generation thread. So cross-thread GPU joins come from
+  client threads (parse-time vision) and TP/stream-expert helpers, not from concurrent sessions.
+- **Batched (`--batched-session N`, the Qwen profile):** a single **decode coordinator**
+  (`decode_worker_main`, 15487, arrays sized by `slot_count` — one batched step over N sessions)
+  **plus** N `slot_threads[i]` (18750), and `share_session_prefill_workspace = batched_sessions > 0`
+  (18568). So batched mode deliberately shares state across threads; naive
+  "`_Thread_local` on the section" would take that sharing away.
+
+### The cluster is bigger than the section, and one member is a live second race
+| state | mutation sites | synchronized? | verdict |
+|---|---|---|---|
+| `g_batch_cb`, `g_batch_enc`, `g_batch_has_work`, `g_batch_encoder_concurrent` | ~112 refs, 10 writes | **no** | guarded for accessor users by d5b4a12; 6 direct users log-only |
+| `g_pending_cbs` (NSMutableArray) | 3 adds (9778, 10409, 11678), iterate 1688, removeAll 1691 | **no** | batch-commit list; owner-only by today's flow, but unprotected |
+| **`g_transient_buffers` (NSMutableArray)** | **~20 sites**: add at 2616 (`ds4_gpu_new_transient_buffer`), 2685/2686, 13217, 20894 (`router_project_select_fused_tensor`), 45503/45693/45714 (`hc_rms_norm_mix_split_norm_f16_tensor`, `hc_expand_add_...`), removeAll at 9787/10413/10421/10430/11683-11700/11781/11836/1691/1810 | **no lock at any site** (checked: no mutex/@synchronized/os_unfair/atomic near them) | **a second, independent race on process-wide mutable state**, reached by generic kernel helpers used by both decode and vision paths |
+
+**Finding that corrects my own deployed fix:** d5b412 removes the *fail-fast*. Before it, a foreign
+op hit the encoder assertion and the process died loudly; now a foreign op proceeds on a private
+buffer - and while doing so calls the same `ds4_gpu_*` helpers that append to `g_transient_buffers`
+from two threads. NSMutableArray is not thread-safe, so the exposure moved from "instant abort"
+to "possible corruption or an ObjC-level crash with no diagnostic attached". That is a real
+regression in *observability* introduced by my own guard, and it is the reason the next change
+should be the mutex, not the thread-local sections.
+
+### Revised order (was: thread-local sections next)
+1. **Mutex the two retain lists** (`g_transient_buffers`, `g_pending_cbs`) - mechanical, small,
+   closes the race that is now the *frontier* failure mode, and is independent of every other
+   design question. Must be measured for cost on the hot path (adds at 2616 are per-buffer
+   allocations) before shipping: if it shows up, use a striped/atomic-intrusive-list retain pool
+   instead of one global lock.
+2. Convert the 6 direct `g_batch_cb` users to the accessor + `owned` handling, so the log-only
+   tripwire becomes an actual guard.
+3. Only then decide the section design (thread-local vs owner-refuses), **with upstream's answer**
+   in hand, because batched mode's `share_session_prefill_workspace` may depend on shared state.
+
+### Constraint on doing any of this while the benchmark runs
+Box is at 479 MiB unused / 100 GiB wired by the engine. Editing and compiling are fine; **running
+GPU test binaries (`race`, `test_session_state_gpu`) is not** - they create a second Metal context
+while the engine holds the model. Any patch here must be written and reviewed now, built at most,
+and validated when collection is idle or in a named window. The guard deployed at 06:41:43 stands
+as the interim measure; the operational mitigation (do not overlap image jobs with generation) is
+now *more* strongly justified than before, because of the retain-list race above.
