@@ -16,8 +16,14 @@ traffic overnight (user asleep). Model server remote; all compute local.
   unshackled (expert stacks resident f16 ~13 GB). Bonuses: pid60838 cycles join
   the conf pool; stop only when log quiet (no `chat` line in last ~3 min).
 - RESTORE 07:15 HARD DEADLINE (unconditional, even if all gates red):
-  ./ds4-server.sh restart-collect -> verify banner `exact: 1` in log/ds4.log
-  (capture banners are lazy - fire on first tool-bearing request, do not probe).
+  ./ds4-server.sh restart-collect -> verify TWO ways (close-out review
+  MAJOR 2: `exact: 1` exists ONLY in the script's TERMINAL banner, echo
+  ~416 - it NEVER appears in log/ds4.log, a log grep is unsatisfiable):
+  (1) log/ds4.log line 1 shows 'DSpark support model detected:
+  gguf/DeepSeek-V4-Flash-Vision-Exp-DSpark-support.gguf (stages=3 …
+  invalid=0…)'; (2) ps -o command of the NEW pid shows '--dspark
+  --mtp-exact-sampling --dspark-confidence 0.45'. Capture banners are
+  lazy - do NOT probe.
 
 ## STANDING GUARANTEES
 1. Engine up + collect-armed by 07:15, or restore attempt = first morning line.
@@ -265,9 +271,12 @@ Preemption under time slip: 4 early start -> 1b -> NEVER 0/2.5/3/2.
   ENGAGEMENT definition + keep-.45 conservative-gate watch. bench script
   E2E-parse-tested offline; NEVER executed against live engine tonight.
 - R: RESTORE HELD ~07:15 per operator (window open; engine never stopped
-  tonight, PID 60838, day-14 collection live). On signal:
-  restart-collect -> verify 'exact: 1' banner in log/ds4.log only (no
-  probes). See PROGRESS LOG 07:1x + NIGHT REPORT.
+  tonight, PID 60838 lstart Nov-3 20:32 proven via close-out review,
+  day-14 collection live). On signal: restart-collect -> log line 1
+  'DSpark support model detected' + ps flags (--dspark
+  --mtp-exact-sampling --dspark-confidence 0.45); NO log grep for
+  'exact: 1' (terminal-only banner), no probes. See PROGRESS LOG 07:1x
+  + NIGHT REPORT.
 
 ## DECISIONS
 ### D-S0 (FINAL 23:15 - amended per independent review; probe repro 241/241)
@@ -426,12 +435,30 @@ pos-unique. Probe A4 gap_accept column formulaic at d=0 (annotated in code).
   66d12ae) PASS ~07:0x: hist decode verified in BOTH field orders, p
   ruling: builder's p=0.28 correct, reviewer's 1.0 was a formula floor;
   2 minors fixed (A1b file name, *_PARTIAL.json gitignore).
+- 07:2x CLOSE-OUT REVIEW (night report + minors commits):
+  PASS_WITH_MINORS. Claim audit: EVERY number traces (confcal2 .8523
+  set, shas incl. official full shasum re-verify, s4full set, 'beyond
+  seed noise' + provisional-pending-live wording compliant); 'engine
+  NEVER stopped' PROVEN (pid 60838 lstart Nov-3 20:32:11, no new log
+  snapshot, live traffic same pid). MAJOR 1 '36/36 goldens' -> RE-
+  RUN SETTLED IT: suite 36/36 PASS (07:2x), goldens FILE = 6 tests /
+  3 pinned - both stated precisely in NIGHT REPORT item 3. MAJOR 2
+  'exact: 1' NOT in log/ds4.log (terminal-banner-only string; log grep
+  unsatisfiable) -> R procedure rewritten in policy + SLOTS:R + PROGRESS
+  LOG 07:1x + AB-PROTOCOL (verify = log line 1 'DSpark support model
+  detected' + ps -o command flags --dspark --mtp-exact-sampling
+  --dspark-confidence 0.45; still NO probes). MINOR: review-history
+  wording now credits the S6 REWORK cycle. RESTORE-GO: restart-collect
+  safe as recorded; no repo state change needed.
 - 07:1x R: engine NEVER STOPPED tonight (preempt/seal path never
   triggered - all jobs fit the memory envelope; PID 60838 serving
   continuously, day-14 collection still live/UNSEALED). Restore held
   per operator ("window open past 07:15, will signal"). On signal:
-  ./ds4-server.sh restart-collect -> grep 'exact: 1' banner in
-  log/ds4.log ONLY (capture banners are lazy - NO probe requests);
+  ./ds4-server.sh restart-collect -> verify log line 1 'DSpark support
+  model detected: …Vision-Exp-DSpark-support.gguf (…invalid=0…)' +
+  ps -o command of new pid shows '--dspark --mtp-exact-sampling
+  --dspark-confidence 0.45' (NO grep for 'exact: 1' - terminal banner
+  only, close-out MAJOR 2; NO probe requests);
   day-14 seal = morning follow-up (stop->td_validate->seal->manifest->
   rsync->loops --audit), NOT part of R.
 
@@ -452,16 +479,22 @@ at the offline level; deployment decision deferred to the morning A/B.
    indistinguishable from each other (-0.13pp p=0.28) -> beyond seed
    noise; max delta_from_h .3275. Engine keeps official w1/w2.
 3. TOOLING: Gate A torch mirror port green (gradcheck 8/8, Gate A rerun
-   6-dp identical); repack tool + q8_0 goldens (36/36 tests); bench
+   6-dp identical); repack tool + q8_0 goldens green (test_gguf_dq.py:
+   6 tests, 3 q8_0 goldens pinned; FULL trainer suite 36/36 re-run
+   07:2x morning - the '36/36' in early drafts was the suite count,
+   not the goldens file); bench
    client parse-complete vs real engine stats format; AB-PROTOCOL v3
    pre-registered (arms, shas, P0 probe gate, engagement-based
    coverage, keep-.45 conservative-gate watch).
 4. HYGIENE: official GGUF sha 0807a67f.. unchanged (verified after every
    proof run); day-3 holdout frozen; NO live A/B executed, NO probes;
    corpus/blade artifacts never committed; secrets never echoed; all
-   slots independently reviewed before closure (every review
-   PASS/PASS_WITH_MINORS, zero BLOCKERS survived the night).
-MORNING TODO: (a) R restore on operator signal + banner verify; (b) day-
+   slots independently reviewed before closure (closures all
+   PASS/PASS_WITH_MINORS; one REWORK cycle - S6 v1 - resolved in place;
+   zero BLOCKERS survived the night).
+MORNING TODO: (a) R restore on operator signal + verify (log line 1
+'DSpark support model detected' + ps flags; NOT a grep - see policy);
+(b) day-
 14 seal when convenient; (c) run AB-PROTOCOL v3: P0 probe gate FIRST
 (DS4_DSPARK_STATS=1 both arms, tool-bearing prompt, cycles>0), then
 A->B->A->B; (d) if B advances: iterate conf training on growing pool +

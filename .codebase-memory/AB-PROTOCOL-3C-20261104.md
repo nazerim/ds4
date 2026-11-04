@@ -58,8 +58,10 @@ DS4_DSPARK_STATS=1 bash /tmp/ds4-server-ab.sh restart-collect   # ARM B
 `DS4_DSPARK_STATS=1` MUST appear in BOTH arms' boot commands (engine gate
 `ds4_dspark_stats_enabled`, ds4.c:75280; ZERO 'ds4: DSpark stats' lines
 exist in log history — the env was never set). Banner must show
-`support: <path>, confidence: 0.45, exact: 1` (echo at ~416). Record
-banner line + pid + both shas in the ledger. Rollback = plain
+`support: <path>, confidence: 0.45, exact: 1` (echo at ~416 — TERMINAL
+banner only; it is NOT written to log/ds4.log, do not grep the log for
+it; log-side confirmation = line-1 'DSpark support model detected: …').
+Record banner line + pid + both shas in the ledger. Rollback = plain
 `./ds4-server.sh restart-collect` (pristine script boots the official
 path; verified).
 
