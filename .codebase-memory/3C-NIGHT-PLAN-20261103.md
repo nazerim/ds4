@@ -678,3 +678,18 @@ engine-form head seeded from s4full recipe as NEXT research item.
   This (3c) lane stays on collection/training/A-B; stalls are latency-
   only (exactness preserved) so tonight's plan is unaffected. AGENTS.md
   workstreams line added.
+- 15:1x QUEUE REVIEW (flash lane) PASS_WITH_MINORS, corrections folded:
+  MAJOR attribution fix - the cited bail clause pos<verify_start/
+  rewind_end is DS4.1-ONLY; live session class qwen4 bails via
+  dspark_rewind_recent gates (ds4.c:89113) + snap exact-miss (89216);
+  which clause fires is UNPROVEN -> M0 must log the field set and
+  classify from live lines before M2 sizing. Also fixed: parity-disable
+  is UNSET DS4_TD_PARITY (MAX=0 coerces to 4096); 'no log' nuance =
+  progress plumbing exists but emitter unwired on rewind path; law
+  table honest 195-600 t/s spread (282s@117k = 415, not 331); M1 chunk-
+  alignment tolerance protocol + cost budget added; second silent route
+  (kept<ntok && !resample) must print resample=. RETRACTION for 14:4x:
+  during the stall pattern DS4_KV_DEBUG stitch lines are NOT expected
+  (disk rehydrate full-hits; the instrument for THIS bug is
+  DS4_DSPARK_STATS replay_fallbacks + the future M0 line). Tree clean
+  at 2a88826 + this fold = handoff base for the PLAN agent.

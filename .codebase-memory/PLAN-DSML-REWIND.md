@@ -20,9 +20,13 @@ correctness is preserved; cost is latency + invisibility.
    it is serving collection + a pending A/B. Deploy of any rebuilt binary
    happens ONLY at an operator-signaled restart.
 2. Run your private instance on **port 8011+** with ISOLATED state:
-   `DS4_LOCK_FILE=/tmp/ds4-fix.lock`, `DS4_TRAIN_DUMP=/tmp/ds4-fix-train`
-   (or unset), `DS4_TD_PARITY_MAX=0`/unset parity dir, distinct log path.
-   Synthetic repro cycles must NEVER enter the real corpus.
+   `DS4_LOCK_FILE=/tmp/ds4-fix.lock` (honored: ds4.c:61747),
+   `DS4_TRAIN_DUMP=/tmp/ds4-fix-train` (or unset), parity capture off
+   by LEAVING `DS4_TD_PARITY` UNSET (ds4.c:76169; NOTE: setting
+   DS4_TD_PARITY_MAX=0 does NOT disable - 0 is coerced to 4096,
+   ds4.c:76172), distinct log path, and **ctx ~131072 not 1048576**
+   (memory courtesy; 80k repro fits). Synthetic repro cycles must NEVER
+   enter the real corpus.
 3. Model ggufs on disk are read-only shared inputs; ctx 1048576 instances are
    memory-heavy — run YOUR instance only while measured, stop when idle,
    respect operator's memory (engine may not be interrupted; yours may be).
@@ -35,12 +39,20 @@ correctness is preserved; cost is latency + invisibility.
 ## Milestones (each: implement -> review -> commit)
 ### M0 — Observability (log-only, land first)
 In `server_generation_rewind` slow path, before the rebuild sync, emit one
-DS4_LOG_KVCACHE line: target pos, common-prefix depth vs prefix.len, and
-rebuild token count + est seconds (`/350`). No behavior change. Acceptance:
-grep-able line appears in your private instance's log exactly at the stall.
-Optionally also wire the existing `rebuild_progress` SSE-keepalive pattern
-(ds4_server.c:15179+) IF the generation-rewind context permits (headers may
-not be sent — decide after reading the call flow; when in doubt, log-only).
+DS4_LOG_KVCACHE line: `resample=` (a second SILENT route exists -
+`kept < ntok && !resample` reaches the slow path without any mode
+boundary; do not miscount those as boundary bails), target pos,
+common-prefix depth vs prefix.len, rebuild token count + est seconds,
+AND the bail-reason field set: `dspark_rewind_start/end/logits/prefixes`,
+`checkpoint(.len|valid)`, snap_pos x3 (qwen4 live fields - NOT the
+ds41-only verify_start/rewind_end). No behavior change. Acceptance:
+grep-able line appears in your private instance's log exactly at the
+stall. OPTIONALLY also wire the existing `rebuild_progress` SSE-keepalive
+pattern (ds4_server.c:15176+) IF the generation-rewind context permits
+(headers may not be sent - decide after reading the call flow; when in
+doubt, log-only).
+**Gate M2 on data**: classify which bail clause actually fires from a
+live session's M0 lines BEFORE sizing snapshot coverage.
 
 ### M1 — Truncation-aware resume (the pragmatic fix)
 Goal: when the rewind target is a PREFIX of a still-valid checkpoint,
@@ -55,12 +67,24 @@ Investigation first (timeboxed — report findings even if no patch):
   ds4_session_rewind_to_prefix_resume() API) to call
   metal_graph_prefill_chunked_range(session, start=common_depth, len=rest)
   and only fall back to full reset when the state genuinely cannot resume.
+  PARITY CAVEAT: resume must align to ABSOLUTE chunk boundaries (engine
+  precedent: compressor/indexer rows must finalize in the same order as a
+  cold prompt - see the continuation-branch comment ds4.c:~79462 and
+  metal_graph_resume_prefill_min_tokens() at ds4.c:79480) or reduction
+  order changes and bitwise-identical acceptance becomes unattainable.
+  Pre-commit a tolerance protocol: byte-diff transcripts, report ANY
+  divergence with its position, and distinguish parity-affecting diffs
+  from known reduction-order artifacts before calling M1 broken.
 - Gate behavior behind env `DS4_REWIND_RESUME=1` (default OFF) until A/B'd.
 Acceptance (measurable): repro recipe (issue doc) on YOUR private instance
 at ctx>=80k: slow-path wall time drops from ~ctx/350 to ~(ctx-common)/350
 with common >= 90% of ctx on typical DSML turns; token-for-token output
 identical vs default path on 20 fixed-seed repro prompts (diff transcripts;
-exact-sampling determinism makes this strict).
+exact-sampling determinism makes this strict - subject to the parity caveat
+above). COST BUDGET: each slow-path sample is ~3-7 min GPU (a >80k prompt
+= ~350-500 KB text + multi-KB tool payload); the 20-prompt matrix is
+~1.5-2.5 h sequential - run while the machine is idle, STOP your instance
+between sample batches (guardrail 3).
 
 ### M2 — Snapshot coverage (only if M1 insufficient)
 Extend snap0/verify-window machinery so long payload spans keep a
