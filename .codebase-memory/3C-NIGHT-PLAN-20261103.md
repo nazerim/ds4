@@ -827,3 +827,27 @@ engine-form head seeded from s4full recipe as NEXT research item.
   the operator has not named a window. Rollback for both changes remains
   DS4_REWIND_RESUME=0 (with it unset, both fixes reduce byte-identically to
   pre-fix behaviour; pinned by the test).
+- 23:5x CORRECTION #4 (my own instrumentation lied to me): the DSpark shutdown
+  counters sample_cycles / sample_full / sample_partial / sample_rejects had NO
+  writers - declared and printed, never incremented. Both times I read
+  "sample_cycles=0" and concluded the sampled driver never ran, and I wrote that
+  into 18fa4f8's commit message, the 21:1x ledger entry, and the PLAN. Retracted;
+  full correction in PLAN-DSML-REWIND.md.
+  With writers added (stats-only, inside if (stats_enabled)), the same 2-minute
+  workload shows sample_cycles=1022 of 1058 cycles and sample_partial=228: the
+  branch 18fa4f8 fixes runs constantly under temperature-0.8 DSML tool traffic,
+  with replay_fallbacks=0 and errors=0. First field proof the patched path is hot
+  and healthy. Arm B (DS4_REWIND_RESUME=0, same seeds): sample_cycles=6300,
+  rebuilds=0 - the internal restore path serves regardless of the tolerance, so
+  the tolerance only matters for the server-side rewind route.
+  That route stayed unreachable synthetically (4 attempts, generation rewind count
+  0): echo-back keeps the prefix, byte-perturbation makes a NEW session (cold
+  prefill, 22.8 s gap), and prefix branch replays hit disk KV (28.9 s, gap 0.0).
+  So resample=1 is still unobserved post-fix; real traffic is the test, and the
+  sentinel counts it.
+  ENGINE STATE: restored to the real collect profile at 23:51:33, PID 19257,
+  DS4_REWIND_RESUME=1, argv MATCH, capture -> /Volumes/FireCuda520/ds4-train/active
+  and ds4-parity/20261103-s3. The test ran with capture redirected to a scratch
+  dir, so NO synthetic rows entered the corpus (394 MB scratch deleted after).
+  THIRD parity discontinuity marker: the binary now in service also carries the
+  stats writers (behavior-neutral) - deploy boundary 23:51:33.

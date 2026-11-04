@@ -84475,6 +84475,11 @@ static int ds4_session_eval_dspark_speculative_stochastic(
     if (stats_enabled) {
         s->dspark_stats.cycles++;
         if (n_accept > 0) s->dspark_stats.first_tokens++;
+        /* sample_cycles was declared and printed but never written anywhere, so
+         * the shutdown dump always read sample_cycles=0 - which I (and anyone
+         * reading that line) would misread as "the sampled driver never ran".
+         * This is the only honest place to count its invocation. */
+        s->dspark_stats.sample_cycles++;
     }
     if (!s || !rng || !s->dspark_draft_valid ||
         !s->dspark_stochastic_draft || s->dspark_draft_len == 0) {
@@ -84651,6 +84656,7 @@ static int ds4_session_eval_dspark_speculative_stochastic(
             if (stats_enabled) {
                 s->dspark_stats.full_accepts++;
                 s->dspark_stats.direct_full_commits++;
+                s->dspark_stats.sample_full_accepts++;
                 s->dspark_stats.accepted_draft_tokens += (uint64_t)emitted;
                 ds4_dspark_stats_note_len(s->dspark_stats.accepted_len_hist,
                                           (uint32_t)emitted);
@@ -84666,6 +84672,7 @@ static int ds4_session_eval_dspark_speculative_stochastic(
     }
 
     if (!ok || replacement < 0) {
+        if (stats_enabled) s->dspark_stats.sample_rejects++;
         if (verifier_may_have_mutated) {
             s->checkpoint.len = start;
             ds4_session_dspark_capture_invalidate(s);
@@ -84711,6 +84718,11 @@ static int ds4_session_eval_dspark_speculative_stochastic(
             }
             s->checkpoint_valid = true;
             ds4_session_dspark_capture_note_checkpoint(s);
+            /* Names this branch, which the shutdown dump used to report as zero
+             * whatever happened: sample_partial_accepts had no writer at all.
+             * Counting it is what turns "the rewind fix is deployed" into "the
+             * patched branch executed N times", which is the evidence it lacks. */
+            if (stats_enabled) s->dspark_stats.sample_partial_accepts++;
             /* Arm the rewind window for the block just committed, exactly as the
              * argmax driver's direct-partial path does (ds4.c:84122).  Without it
              * this path leaves dspark_rewind_end at the 0 that the capture

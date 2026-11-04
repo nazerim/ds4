@@ -524,3 +524,54 @@ all three, with an end-to-end alert test in its header:
    because the baseline echo printed doubled numbers - print what you compare on.
 Rule for this lane: a sentinel is a hypothesis until its alert path has been
 fired deliberately against it.
+
+## CORRECTION #4 + first field evidence for the arming fix (restart window, 23:35-23:51)
+The shutdown stats line I used as evidence twice tonight is printed from counters
+that **had no writers**: `sample_cycles`, `sample_full_accepts`,
+`sample_partial_accepts`, `sample_rejects` are declared (ds4.c:61806-61815) and
+printed (75420/75442-75445) but were never incremented anywhere in the tree. They
+can only ever print 0.
+
+Therefore these of my earlier claims are retracted:
+- "the private repro instance reported sample_cycles=0, so the stochastic driver
+  never ran" (18fa4f8 commit message, 3c ledger 21:1x entry, PLAN) - the counter
+  could not have shown anything else.
+- "no per-turn DSpark stats in the log, so I cannot prove the patched path ran" -
+  stats DO print, at shutdown, with live values for the other fields.
+- "the repro never rejected a draft and then crossed a mode boundary in the same
+  turn" - half right (`sample_rejects=0`, see the naming note below), half wrong
+  (the driver is nowhere near idle).
+
+With writers added (stats-only, all four inside `if (stats_enabled)`), the same
+workload measures the truth in two minutes:
+
+    ARM A (REWIND_RESUME=1): cycles=1058 sample_cycles=1022 sample_full=421
+      sample_partial=228 replay_fallbacks=0 invalid=0 errors=0 accept_rate=82.36%
+      boundary restores=9  rebuilds=0  client worst gap 5.4s
+    ARM B (REWIND_RESUME=0): cycles=6499 sample_cycles=6300 sample_full=1833
+      sample_partial=1324 replay_fallbacks=0 errors=0 accept_rate=76.00%
+      boundary restores=30 rebuilds=0
+
+So the branch `18fa4f8` patches is not rare: it ran 228 times in 1058 cycles under
+temperature-0.8 DSML tool traffic, 97% of all speculative cycles were the sampled
+driver, and nothing fell back or errored. That is the first field proof that the
+patched path is hot and healthy. `sample_rejects` counts only verifier failure
+(`!ok || replacement < 0`); an ordinary partial accept leaves `ok` true with a
+replacement token, so 0 rejects alongside a 76% accept rate is expected - the name
+is narrower than it looks.
+
+What the window did NOT achieve, and why it is hard: no synthetic request shape
+reached the server's rewind route at all - `generation rewind` line count stayed 0
+across four attempts (baseline echo, byte-perturbed tool arguments, thinking
+enabled, prefix branch replays). Reasons now measured rather than guessed:
+1. echoing the server's own tool-call rendering back keeps the stored prefix, so
+   nothing needs truncating;
+2. perturbing the bytes makes the request hash to a NEW session, so the cost shows
+   up as a cold prefill (a 22.8 s gap on the first turn) rather than a truncate;
+3. re-sending the earliest history was served from the disk KV cache (28.9 s, gap
+   0.0) - it never touched a live slot's tail.
+
+`resample=1` therefore remains unobserved in the field post-fix (0 events in three
+boots). The geometry IS proven model-free (tests/test_session_state.c), and real
+traffic is what exercises the route: the sentinel counts it, and the pre-fix base
+rate was ~1 per 40 min of deep-DSML traffic.
