@@ -203,3 +203,36 @@ one more restart window; say which.
   produced a bail. Next experiment should force the cross-turn re-sync path
   (disk-KV rehydrate or tool-checkpoint canonicalization between turns) and read
   `reason=` off the line.
+
+### Historical stall census (same day, mined from `log/ds4.log*` — no GPU needed)
+Method: a rebuild appears in the ordinary decode progress line as one 50-token
+chunk whose measured rate collapses (`decoding chunk=<rate> t/s` with rate
+< 1 t/s at 30 t/s normal). Parse those lines, subtract the 50 tokens' normal
+cost, and compare `ctx / stall_seconds` against the prefill band.
+
+    stall chunks (rebuilds): 24      GPU time lost: 150.1 min
+    median stall 311 s       max 832 s
+    implied rebuild rate = ctx/stall_s: median 407 t/s, p10 226, p90 478 (n=24)
+    stall ctx 49,164 - 201,327;  gen at stall 100 - 6,800
+    worst single boot (log ending 18:33 today): 98.9 min lost
+
+Why this is the strongest evidence in the doc set: `ctx/stall` lands inside the
+independently measured prefill band (350-600 t/s at 50k-200k ctx) for 24/24
+events, so every one of them is a full-context re-prefill - derived from
+ordinary logs, not from an interpretation of a stack trace. Shape of each event:
+one slow 50-token chunk then an immediately normal chunk (one rebuild per
+crossing, decode resumes), always inside `TOOLS DSML_START`, several also
+stalling on the chunk that closes the block (`DSML_END`) - i.e. both mode-line
+crossings cost a rebuild. Some turns stall twice ~3 min apart (repeated bails).
+
+Correction to M0's estimate constant: measured median is 407 t/s, so
+`SERVER_REWIND_REBUILD_TPS 350.0` overestimates duration by ~15% - conservative,
+left as-is deliberately.
+
+Trigger candidate sharpened from the same mining: the stalling turns are
+continuation turns that began from a reused frontier (one case prefilled 8
+tokens because the previous turn's checkpoint was live; another hit disk KV at
+40,960 tokens) - consistent with `reason=window-moved-past-frontier`, which is
+exactly what the deployed line will label on the next real occurrence. Harvest
+it passively: the instrument is in the running binary, so no synthetic traffic
+and no extra restart is needed to get the label.
