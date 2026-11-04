@@ -540,3 +540,24 @@ engine-form head seeded from s4full recipe as NEXT research item.
       traffic) -> DSpark workstream issue, candidate for ADR/DS4FORK.
       Runbook note: graceful stop IMPOSSIBLE mid-prefill (drain times
       out -> force kill; KV self-heal absorbs it) - stop only in gaps.
+- 14:0x ROOT-CAUSE (user hypothesis EXACT+DSPARK CONFIRMED at
+  mechanism level): stall windows = sample-proven inside
+  generate_job_inner -> ds4_session_sync_internal (ds4.c:79564) ->
+  metal_graph_prefill_chunked_range waitUntilCompleted, 715/715
+  samples, GPU 90%+: an UN-INSTRUMENTED full-prompt rebuild pass
+  runs EVERY turn before generation (no 'prefill chunk' lines =
+  looks exactly like a hang; morning's 282s request = same pass
+  inside-request). Why full every turn: stored KV past ~200k is not
+  re-hydratable despite existing (stored 344,064; rehydrate boundary
+  REGRESSED 204,800 -> 200,704) = prompt-prefix token-text-sha keys
+  stop matching past the first DSpark draft-accept windows under
+  exact-sampling (EXACT disables seed-batch direct-commit at
+  ds4.c:62051 -> accepts go replay-fallback 84694; exact rewinds +
+  resamples at sampling-mode boundaries, comment ds4.c:58719 -
+  stalls land exactly at DSML_START boundaries). ENGINE BUGS TO
+  FILE: (1) instrument sync_internal rebuild passes (progress lines
+  + a warning when >N s); (2) EXACT+DSpark lineage: per-turn
+  degradation of disk-KV prefix reuse on tool traffic; interim user
+  mitigation: big tool-heavy sessions run clean WITHOUT --dspark (or
+  without exact-sampling) until fixed. KV_SIZE=524288 stays (removes
+  secondary pressure; cache untouched).
