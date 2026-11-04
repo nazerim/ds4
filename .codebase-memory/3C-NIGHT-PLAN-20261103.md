@@ -594,3 +594,26 @@ engine-form head seeded from s4full recipe as NEXT research item.
   patch regardless: session_sync rebuild progress + 'prefix
   divergence at token N' log w/ both shas. Question pending user:
   does the agent/proxy repair/rewrite older messages?
+- 14:3x CONTROL RESULT - hypothesis v3 (canonical-vs-raw DSML drift)
+  FALSIFIED on the fresh compacted session: 3 consecutive tool-call
+  commits (14:30:13, 14:31:17, 14:31:46) each followed by FULL
+  rehydrate (406/468/209-tok micro-prefills, 1.2-2.0s, continuous
+  ctx) - raw_tool_text=1 round-trips through
+  append_dsml_tool_calls_text's raw-replay branch (ds4_server.c:3101)
+  byte-stably. The 344k drift therefore requires a session-specific
+  trigger. Live candidates: (i) OSCILLATING client-side re-render of
+  specific old messages (user: opencode1 rewrote; opencode2 'not sure
+  if it still does'; same-pin-twice + clean turn between fits an
+  alternating A/B rendering of one message); (ii) engine-side era
+  boundary in that session's checkpoint chain (lived through
+  60838->2109 restart + macOS update). SECOND PHENOMENON logged:
+  mid-DSML decode collapse on the fresh session (16 tokens in 176s,
+  chunk 0.09 t/s, inside DSML_START..DSML_END, self-recovered) -
+  candidate: EXACT disables seed-batch direct-commit (ds4.c:62051)
+  -> per-block replay-fallback re-prefill over the tool span;
+  measurable via DS4_DSPARK_STATS=1 (replay_fallbacks, prop_* timers).
+  INSTRUMENTATION COMMITTED (925c2cc, reviewed PASS_WITH_MINORS):
+  partial-stitch forensics in kvstore. NEXT operator-signaled boot:
+  DS4_KV_DEBUG=1 + DS4_DSPARK_STATS=1 (both env-only). On next drift
+  event the log names the first divergent BYTE + both windows ->
+  client-vs-engine settled by data, not archaeology.
