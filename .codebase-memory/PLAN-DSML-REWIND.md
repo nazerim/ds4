@@ -365,9 +365,23 @@ duration, measured against the pre-fix boot's own distribution:
     PRE-FIX boot (14:37-18:33, 67 deep turns at ctx>=100k):
         over 64 s: 20 (29.9%)   min 68 s, median 128 s, max 483 s
         over 300 s (rebuild-class): 9 (13.4%)
-    POST-FIX boot (20:13 onward, 11 deep turns):
+    POST-FIX boot (20:13 onward, 11 deep turns at ctx>=100k):
         over 64 s: 0   max observed 64 s   median 27 s (unchanged)
-        rebuild lines: 0        slow-path entries: 0
+        rebuild lines: 0
+        slow-path entries: 9, every one `reason=ok end_state=armed`
+        stall chunks by census: none
+        deepest served truncation: kept_tokens=226,719
+
+Correction to the first draft of this section, which said "slow-path entries: 0"
+- asserted without measuring and wrong: there are 9 such lines, all cheap
+truncations.  The number that matters is 0 rebuild lines.
+
+`end_state=armed` is the new field doing its job: it says the window was still
+armed when the server reached the slow path.  Pre-fix that could not survive a
+resample, because the resample's own replay token passed through
+`ds4_session_eval_internal` and cleared it.  The deepest event served this way is
+226,719 tokens - deeper than either pre-fix rebuild (212,546 and 212,525), where
+the pre-fix engine paid ~600 s each.
 
 Significance, stated honestly because the two thresholds give different answers:
   - against the >64 s class: P(0 of 11 by chance) = 0.020 -> already significant,
