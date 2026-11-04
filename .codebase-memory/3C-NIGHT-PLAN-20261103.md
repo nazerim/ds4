@@ -617,3 +617,20 @@ engine-form head seeded from s4full recipe as NEXT research item.
   DS4_KV_DEBUG=1 + DS4_DSPARK_STATS=1 (both env-only). On next drift
   event the log names the first divergent BYTE + both windows ->
   client-vs-engine settled by data, not archaeology.
+- 14:4x STALL BRANCH PINNED + INSTRUMENTED RESTART: live DSML-stuck
+  sample (1691/1691 in ds4_session_sync_internal+2528 -> chunked
+  prefill) maps to ds4.c:79547 branch: prompt cannot EXTEND the
+  session's in-memory checkpoint (79520 push-loop) -> session reset
+  (79546) -> FULL re-prefill metal_graph_prefill_chunked(prompt->len).
+  Arithmetic fits all three sightings: 176s@90k, 2.5min@90k live,
+  ~10-12min@144k. Disk-KV rehydrate is NOT the failure (209-468 tok
+  logged deltas after). Question now sharp: why does a DSML-committed
+  turn make the in-RAM checkpoint un-extendable while the on-disk
+  prefix matches? Restart EXECUTED graceful (no force-kill this
+  time) -> PID 4051 with DS4_KV_DEBUG=1 + DS4_DSPARK_STATS=1 +
+  KV_SIZE=524288, all env verified in ps eww; missing=0 invalid=0;
+  flags+banner exact:1. NEXT occurrence prints divergence byte +
+  windows + replay_fallback counters. Follow-up patch candidate:
+  one log line at ds4.c:79546 naming WHY the extend failed (token
+  index where prompt != checkpoint) - completes the picture without
+  byte-forensics.
