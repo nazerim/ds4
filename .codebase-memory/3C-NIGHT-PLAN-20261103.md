@@ -785,3 +785,24 @@ engine-form head seeded from s4full recipe as NEXT research item.
   Two engine restarts tonight were force-kills mid-rebuild; the disk KV store
   survived (229,376-token entry hit in 651.8 ms after the first), so no rehydrate
   damage observed - but that is one sample, worth watching on the next deep turn.
+
+## 3c LANE ACTIONS from the DSML-REWIND deploy (21:12:17, agent's fix 18fa4f8)
+- VERIFIED 21:56: 23x 'truncated without rebuild', 0 rebuilds, 0 decode
+  collapses since deploy; one 752s prompt-done = post-restart cold
+  re-prefill (expected, not a rewind).
+- ERA SPLIT for day-14 corpus: pid files 60838/73479/2109/3106/4051 =
+  PRE-FIX (stall-era: serve vs rebuild NOT bit-identical - reduction
+  order; agent marks the 4 stall-labeled turns known-divergent if a
+  parity diff spans the boundary). pid11552+ = POST-FIX. S1a/S1b slab
+  builders: treat the deploy as an era line (like the pid>=53508
+  exact-era split); re-baseline parity from 21:12:17.
+- PLAN docs supersession: ISSUE/PLAN root-cause = 'gate bails'
+  hypothesis; ACTUAL = stochastic direct-prefix commit never armed the
+  window (agent ledger 1a57259). M0 DONE (fcad472+); fix landed via
+  M2-flavor arming, not M1 resume - M1 now likely moot; M3 upstream
+  write-up still open.
+- Night-plan note: tonight's A/B (if operator greenlights) runs on the
+  FIXED binary - arm A/B shas unaffected (support ggufs untouched);
+  confcal2 gate unaffected. Bonus: post-fix turns are cheaper AND the
+  A/B accept stats no longer contaminated by stall-era truncation
+  differences (post-deploy data is the clean era).
