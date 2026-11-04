@@ -806,3 +806,24 @@ engine-form head seeded from s4full recipe as NEXT research item.
   confcal2 gate unaffected. Bonus: post-fix turns are cheaper AND the
   A/B accept stats no longer contaminated by stall-era truncation
   differences (post-deploy data is the clean era).
+- 22:5x ROUTE #3, and a SECOND parity discontinuity (action for the corpus lane).
+  The watcher fired at 22:43:00 with `end_state=armed` — proof the 21:12 arming fix
+  held, and proof of a separate gate defect: a truncation target equal to the
+  window's END was refused as target-ahead-of-window and re-prefilled 70,614 tokens
+  (172.5 s of silence in a live turn; ~670 s at 230k depth), with prefixes=4,
+  logits=1, start and checkpoint_valid all intact. Two events in the same session
+  25/55 s earlier served the same geometry one position earlier (truncate = end-1),
+  so this is an off-by-one at the inclusive edge, not a state problem.
+  Fixed + tested in ecef491 (shared predicate for gate AND restore; new
+  test_rewind_window_gate in tests/test_session_state.c, model-free, RED→GREEN in
+  both GPU and no-GPU builds). Independent review PASS_WITH_MINORS; its MEDIUM
+  (pos == end == frontier would be served as a pointless re-replay) is fixed in the
+  same commit and pinned by the sweep.
+  *** PARITY: this is a SECOND numeric-route discontinuity at a SECOND deploy.
+  The 22:43 event class changes from full re-prefill to snapshot+1-replay. It must
+  be marked separately from the 21:12:17 marker — do NOT fold it in. Blast radius
+  ~1 observed event in all logs. ecef491 is committed but NOT DEPLOYED: the engine
+  still runs 18fa4f8 (PID 11552), because deploying kills an in-flight session and
+  the operator has not named a window. Rollback for both changes remains
+  DS4_REWIND_RESUME=0 (with it unset, both fixes reduce byte-identically to
+  pre-fix behaviour; pinned by the test).

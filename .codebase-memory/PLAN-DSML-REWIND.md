@@ -449,3 +449,61 @@ checkpoint with no cache event at all, and the label was
 `reason=no-verify-window` - a dead liveness flag, not a moved window. Lesson
 for M2: the census can correlate cost with ctx, but only the instrument can
 name the trigger.)
+
+## ROUTE #3 (22:43:00 live) — armed window, edge position refused. FIXED ecef491, NOT YET DEPLOYED
+
+    generation rewind rebuild ctx=69776..69971:195 route=truncation resample=0
+    reason=target-ahead-of-window requested=70614 truncate=70614 window=70611..70614
+    end_state=armed reason_try=- window_max=16 prefixes=4 logits=1 frontier=70615
+    checkpoint_valid=1 common=0 kept_tokens=70614 est_s=202 exact=1
+
+`end_state=armed` — not a stranding exit. The arming fix (18fa4f8) held; this is a
+different gate branch. Same session, two events 25 and 55 s earlier, both served:
+truncate = end-1 (22:42:05 window 68648..68650 truncate 68649; 22:42:35 window
+69773..69777 truncate 69776). The failure is the identical geometry one position
+further: truncate == window end. Cost measured: 172.551 s of silence
+(`chunk=0.28 t/s`, turn total 173.7 s) at only 70k depth; ~670 s at 230k.
+
+Cause: `dspark_rewind_end` is `checkpoint.len` *as of keep()*, so the state it
+names is reachable by the very mechanism interior positions use (rewind to start,
+re-commit the verifier batch's prefix, replay ONE token). The gate bounded
+`pos >= end` → TARGET_AHEAD while prefixes=4, logits=1, start, checkpoint_valid
+were all intact. Base rate: 1 refusal at the edge vs 114 served rewinds today;
+~4% of truncation-route events in that window (1 of 23). `window-moved` has never
+appeared in any log; the 4 pre-fix rebuilds were all `no-verify-window`.
+
+Fix: one shared predicate `dspark_rewind_covers()` used by BOTH the gate and
+`ds4_session_restore_speculative_prefix` (the design rule the first SMASH
+demanded — a relax the restore doesn't mirror fails inside the restore, and
+`dspark_rewind_recent()` then destroys the checkpoint: worse than refusing).
+The edge additionally requires `end < checkpoint.len`: `pos == end == frontier`
+is not a rewind (it would re-replay the committed token and consume the window);
+no caller asks for it today, but the contract now lives in the predicate instead
+of in caller arithmetic three files away.
+
+Test: `test_rewind_window_gate()` in tests/test_session_state.c — no model, no
+engine, ms to run, coexists with the live engine. RED before the patch, GREEN
+after, in both the DS4_NO_GPU and Metal builds. Pins the real 22:43:00 and
+21:03:30 numbers, both env arms, the four other reason branches, and a
+width x prefixes x moved sweep asserting algebraically that every position the
+gate admits also passes the restore's own list after recent()'s clamp (and that
+replay fits the fixed int[16]).
+
+## The actual shape of this bug (three routes, one missing invariant)
+Routes: (1) eval-site clearing of `dspark_rewind_end`, (2) stochastic direct-prefix
+commit that never armed it, (3) gate bounding a servable position. All three are
+projections of: *"at every return that leaves `checkpoint_valid == true`, either
+the window is armed and truthful for every position the gate will later admit, or
+it was deliberately cleared."* Instrumentation finds members of that set one
+incident at a time. Review recommends the systematic pass, in priority order:
+1. Every `return` in the two token-committing drivers (argmax ~84109-84169,
+   stochastic 84628/84690 + the 84746 tail eval that makes the 84690 arm depend on
+   straight-line order) and the TP worker cycle (~84971/85009): armed? truthful?
+   what does the gate admit from that state?
+2. All seven `dspark_rewind_end` writers vs the (start, end, len) states they leave
+   (now that `__func__` per-site labels make each writer name itself).
+3. The `pos < checkpoint.len` contract at every speculative entry.
+4. The DS4.1 twin window (rejects `pos >= d->rewind_end` unconditionally, no
+   covers/predicates): either port the one-predicate rule or record the family
+   divergence as a decision in the ADR — today it is an accident of line placement.
+5. Convert the property sweep into the standing suite (`make test-session-state`).
