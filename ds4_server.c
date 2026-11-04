@@ -14663,11 +14663,43 @@ static bool append_rendered_suffix_to_live_session(server *s, server_slot *slot,
 /* A recurrent cache cannot always be truncated in place. Match the agent's
  * boundary handling and rebuild the retained prefix when rewind invalidates
  * it, retaining image conditioning as well. */
+/* Observed prefill rate for the rebuild estimate in the log line below: the
+ * stall law is seconds ~= rebuilt_tokens / rate, with 195-600 t/s measured
+ * across rebuilds and ~350 t/s as the geometric middle (see
+ * ISSUE-EXACT-DSML-REWIND-REBUILD-20261104.md).  The completion line reports
+ * the real elapsed time, so this constant only ever sizes an expectation. */
+#define SERVER_REWIND_REBUILD_TPS 350.0
+
+/* Which mechanism can actually recover a rewind on this engine.  Only the
+ * generic DSpark window's gates are reported by ds4_session_rewind_reason();
+ * Qwen3.8 recovers from verify snapshots and DS4.1 keeps its own window, so
+ * the log line names whose window the numbers belong to rather than letting a
+ * reader assume the wrong family. */
+static const char *rewind_window_owner(ds4_engine *e) {
+    if (ds4_engine_is_qwen4(e)) return "qwen4-verify-snapshots";
+    if (ds4_engine_is_deepseek41(e)) return "deepseek41-window";
+    if (ds4_engine_is_glm_dsa(e)) return "glm-mtp";
+    return "dspark-window";
+}
+
 static int server_generation_rewind(server *s, server_slot *slot,
                                      const request *r, int pos,
                                      bool resample, int last_token,
+                                     const char *ctx,
                                      char *err, size_t errlen) {
     pthread_mutex_lock(&s->inference_mu);
+    /* Read the window before touching it: a rejected rewind truncates the
+     * checkpoint and clears the window, so the reason the fast path refused is
+     * only observable here.  With resample unset the server's own pre-attempt is
+     * skipped, but ds4_session_rewind() re-tries speculation itself on every
+     * route, so this is the same answer that attempt gets - not a hypothetical. */
+    ds4_session_rewind_state win;
+    const ds4_rewind_reason reason =
+        ds4_session_rewind_reason(slot->session, pos, &win);
+    /* The target the caller asked for, kept for the log: resample rewinds one
+     * token further back to replay across the boundary, so a line quoting the
+     * decremented position would contradict the window the reason came from. */
+    const int requested = pos;
     /* A mode change only needs logits at the retained boundary. Replaying the
      * previous token can cross before the verifier snapshot in exact mode. */
     if (resample && ds4_session_rewind_speculative(slot->session, pos)) {
@@ -14678,11 +14710,73 @@ static int server_generation_rewind(server *s, server_slot *slot,
     ds4_session_rewind(slot->session, pos);
     ds4_tokens prefix = {0};
     ds4_tokens_copy(&prefix, ds4_session_tokens(slot->session));
-    bool rebuild = ds4_session_common_prefix(slot->session, &prefix) != prefix.len;
+    const int common = ds4_session_common_prefix(slot->session, &prefix);
+    const bool rebuild = common != prefix.len;
+    /* The kept context is re-prefilled whole on the rebuild path, so its
+     * length is the cost.  Captured before the sync frees the list. */
+    const int kept_tokens = prefix.len;
     pthread_mutex_unlock(&s->inference_mu);
+    double started = 0.0;
+    if (rebuild) {
+        /* A full re-prefill of the kept context is minutes of GPU work with no
+         * output.  Say what is happening, and roughly how long it will take,
+         * before it starts (PLAN-DSML-REWIND M0). */
+        server_log(DS4_LOG_KVCACHE,
+                   "ds4-server: generation rewind rebuild ctx=%s window_owner=%s route=%s resample=%d reason=%s requested=%d truncate=%d window=%d..%d window_max=%d prefixes=%u logits=%d frontier=%d checkpoint_valid=%d common=%d kept_tokens=%d est_s=%.0f exact=%d",
+                   ctx && ctx[0] ? ctx : "-",
+                   rewind_window_owner(s->engine),
+                   resample ? "mode-boundary" : "truncation",
+                   resample ? 1 : 0,
+                   ds4_rewind_reason_name(reason),
+                   requested,
+                   pos,
+                   win.window_start,
+                   win.window_end,
+                   win.max_window,
+                   win.prefixes,
+                   win.has_boundary_logits ? 1 : 0,
+                   win.frontier,
+                   win.checkpoint_valid ? 1 : 0,
+                   common,
+                   kept_tokens,
+                   (double)kept_tokens / SERVER_REWIND_REBUILD_TPS,
+                   ds4_engine_mtp_exact_sampling(s->engine) ? 1 : 0);
+        started = now_sec();
+    } else {
+        /* Truncation left a usable state behind, so nothing is rebuilt.  The
+         * DSpark path is not expected to reach this (a rejected rewind always
+         * invalidates the checkpoint); log it so the assumption stays evidence
+         * rather than folklore. */
+        server_log(DS4_LOG_KVCACHE,
+                   "ds4-server: generation rewind truncated without rebuild ctx=%s window_owner=%s route=%s resample=%d reason=%s requested=%d truncate=%d window=%d..%d frontier=%d common=%d kept_tokens=%d",
+                   ctx && ctx[0] ? ctx : "-",
+                   rewind_window_owner(s->engine),
+                   resample ? "mode-boundary" : "truncation",
+                   resample ? 1 : 0,
+                   ds4_rewind_reason_name(reason),
+                   requested,
+                   pos,
+                   win.window_start,
+                   win.window_end,
+                   win.frontier,
+                   common,
+                   kept_tokens);
+    }
     int rc = rebuild ? server_session_sync_multimodal(s, slot, &prefix,
         r->images, r->image_count, err, errlen) : 0;
     ds4_tokens_free(&prefix);
+    if (rebuild) {
+        const double elapsed = now_sec() - started;
+        /* rate_tps=-1 means the rebuild was too fast to time, not that it
+         * stalled; quoting 0 would read like a failed prefill. */
+        server_log(DS4_LOG_KVCACHE,
+                   "ds4-server: generation rewind rebuild done ctx=%s kept_tokens=%d elapsed_s=%.1f rate_tps=%.0f rc=%d",
+                   ctx && ctx[0] ? ctx : "-",
+                   kept_tokens,
+                   elapsed,
+                   elapsed > 0.0 ? (double)kept_tokens / elapsed : -1.0,
+                   rc);
+    }
     if (rc == 0 && resample)
         rc = server_eval_token(s, slot, last_token, err, errlen);
     return rc;
@@ -16734,7 +16828,8 @@ decode_again:
             trace_event(s, trace_id, "speculative boundary rewind: from=%d to=%d",
                         ds4_session_pos(slot->session), pos);
             if (server_generation_rewind(s, slot, &j->req, pos,
-                    resample, kept ? toks[kept - 1] : 0, err, sizeof(err)) != 0) {
+                    resample, kept ? toks[kept - 1] : 0, ctx_span,
+                    err, sizeof(err)) != 0) {
                 finish = "error";
                 stop_decode = true;
             } else {

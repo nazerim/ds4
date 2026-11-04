@@ -114,3 +114,92 @@ exact state that blocks it; M3 drafted. Hand every finding back into
 guardrails (live engine untouchable, private instance on 8011 with isolated
 DS4_LOCK_FILE/TRAIN_DUMP), start with M0, commit at milestones, and request
 independent review before marking anything done."
+
+## M0 RESULT (20261104, agent session 2) — instrument landed, and it falsified two claims
+
+Instrument: `ds4_session_rewind_reason()` + `ds4_rewind_reason_name()` (ds4.c:
+the old `dspark_rewind_recent` gate condition extracted verbatim, so the reason
+cannot drift from the real gates) and two `DS4_LOG_KVCACHE` lines in
+`server_generation_rewind` (ds4_server.c) — one BEFORE the rebuild naming the
+refusal reason and the cost, one AFTER with measured elapsed + `rate_tps`, plus
+a third line for the no-rebuild truncation case. Zero behavior change;
+independent review PASS_WITH_MINORS, all five findings fixed (off-by-one
+`target` was the real one: it would have made the line contradict itself).
+
+Validation, private instance (port 8011, ctx 131072, `DS4_LOCK_FILE=/tmp/ds4-fix.lock`,
+no TRAIN_DUMP/parity — verified 0 capture banners — own KV dir, own log),
+Vision-Exp + `--dspark --mtp-exact-sampling --dspark-confidence 0.45`:
+
+    generation rewind truncated without rebuild ctx=8192..76084:67892
+    window_owner=dspark-window route=truncation resample=0 reason=ok
+    requested=77607 truncate=77607 window=77606..77608 frontier=77608
+    common=77607 kept_tokens=77607
+
+The line fires exactly at the rewind event. What did NOT happen: **the stall.**
+Three tool-heavy turns on a 76,084-token prompt (tool payloads 4.7 KB, 18.4 KB,
+and a 2-turn cycle of 10.4 KB + 9.6 KB) produced 1 slow-path event, 0 rebuilds,
+`replay_fallbacks=0` across 4530 verify cycles, worst inter-chunk gap 5.5 s
+(prefill, not rebuild). Harness: `.codebase-memory/repro_dsml_rewind.py`,
+`.codebase-memory/repro_toolcycle_dsml.py`.
+
+### Corrections to this doc set (3rd and 4th today — both from the instrument)
+1. **"With `resample` unset the fast path is never tried" is wrong.**
+   `ds4_session_rewind()` calls `ds4_session_rewind_speculative()` itself
+   (ds4.c:89264) on every route; the server's `resample &&` test is only a
+   pre-attempt for the logits-only case. Observed above: a `resample=0` rewind
+   served from the window (`reason=ok`) with no rebuild and no replay.
+2. **"Long DSML argument spans make a bail plausible as the NORM" is
+   unsupported — measured bail rate is zero** in synthetic traffic, and the one
+   `DSpark stats` sample the production engine emitted (cycles=31598) also had
+   `replay_fallbacks=0`. Open question is bail *frequency*, not bail cost: the
+   four production stalls with stack traces are real, so the trigger is
+   something the synthetic shape lacks (leading candidate: a cross-turn
+   re-sync — tool-checkpoint canonicalization or disk-KV rehydrate — leaving
+   `dspark_rewind_end != checkpoint.len`, i.e. `reason=window-moved-past-frontier`).
+3. M1's premise stays dead for this family (confirmed in code, not inherited):
+   `state_ok` recovery exists only behind `ds4_session_is_qwen4` /
+   `ds4_session_is_glm` (ds4.c:89272-89307), so a *real* fast-path bail always
+   rebuilds. The observed non-rebuild event had `reason=ok` — the fast path, not
+   a truncation that survived.
+
+### M2 sizing + the actual blocker (measured from the allocators)
+Frontier = `ds4_spec_frontier` (ds4.c:61791): per layer, `attn_state_kv` +
+`attn_state_score` (and for ratio-4 layers the two indexer tensors), sizes
+`(coff*512) x (coff*ratio) x 4 B`. On this shape (43 layers, head_dim 512,
+indexer 128, ratio 4 on even layers / 128 on odd, 0 on layers 0-1):
+21 ratio-4 layers x 80 KiB = 1.64 MiB + 20 ratio-128 layers x 512 KiB = 10 MiB
+=> **~11.6 MiB per frontier per session**. The `spec_*` shadow slot already costs
+this, `spec_prefix1_*` costs 5x (~58 MiB). Against a 93.25 GiB planned boot the
+memory fear in the issue doc is NOT the blocker.
+
+The blocker is a silent-corruption hazard: `metal_graph_dspark_cache_window_valid()`
+(ds4.c:29603) validates only GEOMETRY (`raw_start == token_start % cap`,
+`len <= cap`) — it cannot know the ring rows were recycled. `dspark_cache_cap =
+raw_cap` = 4352 rows on both profiles, so a frontier anchored more than ~4352
+generated tokens back restores a self-consistent-looking window over overwritten
+rows and produces wrong state with no error. Any durable anchor must therefore be
+snapshotted where the verifier window is empty (`dspark_cache_len == 0`, the one
+case the validator always accepts) or copy the ring rows alongside it.
+
+### Gate that now needs the operator
+The `reason=` classification that gates M2's design must come from production
+traffic: 20 synthetic turns cannot produce a dataset the repro does not trigger.
+That means the live engine running the M0 binary — my post-test restore already
+started it that way (same argv byte-for-byte, same 14 env vars, parity dir
+preserved). If the operator wants the pre-M0 binary instead, that is a rebuild +
+one more restart window; say which.
+
+### Follow-ups this milestone surfaced (not done here)
+- `server_log()` has no `__attribute__((format(printf, 2, 3)))`, so `-Wall`
+  never validates any `server_log` format string - the three new lines were
+  checked by hand (18/18, 12/12, 5/5 conversions). Adding the attribute is a
+  repo-wide change touching ~hundreds of call sites; do it as its own commit,
+  not inside this fix.
+- The `done` line's `elapsed` covers the sync plus `ds4_tokens_free`; the free
+  is microseconds, so the measured `rate_tps` is honest as-is. Do not "fix" this
+  by moving the timer start.
+- M1 needs a trigger, not a patch: no synthetic shape used so far (single turn
+  4.7 KB / 18.4 KB payloads, 2-turn cycle 10.4 KB + 9.6 KB, 76k-token prompt)
+  produced a bail. Next experiment should force the cross-turn re-sync path
+  (disk-KV rehydrate or tool-checkpoint canonicalization between turns) and read
+  `reason=` off the line.

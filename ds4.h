@@ -504,6 +504,44 @@ ds4_session_rewrite_result ds4_session_rewrite_from_common(
         char *err, size_t errlen);
 int ds4_session_common_prefix(ds4_session *s, const ds4_tokens *prompt);
 bool ds4_session_checkpoint_valid(const ds4_session *s);
+/* Read-only view of the shared DSpark verify window, for rewind diagnostics.
+ * On the DSpark path a rewind target this window cannot serve is rebuilt by
+ * re-prefilling the whole kept context, which on a long session is minutes of
+ * GPU work that looks like a stall; reason + state let the caller say which
+ * check refused and how much work that costs.  Families that recover a rewind
+ * another way (Qwen3.8 verify snapshots, DS4.1's own window, GLM MTP) are not
+ * modelled here, so a caller logging this should say whose window it reports.
+ * Never mutates the session.  DS4_REWIND_OK means this window's static gates
+ * all pass for pos; the dspark tail of ds4_session_rewind_speculative() can
+ * still fail at runtime (TP restore round-trip, frontier replay, probe eval),
+ * so reason=ok plus a rebuild is a real, informative combination. */
+typedef enum {
+    DS4_REWIND_OK = 0,
+    DS4_REWIND_TARGET_UNBOUNDED,     /* no session, or a negative target */
+    DS4_REWIND_UNSUPPORTED,          /* build without a verifier window */
+    DS4_REWIND_NO_CHECKPOINT,        /* live checkpoint already invalid */
+    DS4_REWIND_NO_BOUNDARY_LOGITS,   /* no logits saved at the boundary */
+    DS4_REWIND_NO_WINDOW,            /* no verify window covers any position */
+    DS4_REWIND_WINDOW_MOVED,         /* window end is no longer the frontier */
+    DS4_REWIND_TARGET_STALE,         /* target sits behind the window */
+    DS4_REWIND_TARGET_AHEAD,         /* target sits at or past the window end */
+    DS4_REWIND_WINDOW_TOO_WIDE,      /* span exceeds one verifier block */
+    DS4_REWIND_NOT_TP_LEADER,        /* TP workers restore only on command */
+} ds4_rewind_reason;
+
+typedef struct {
+    int frontier;                /* ds4_session_pos(): checkpoint length */
+    bool checkpoint_valid;
+    int window_start;            /* first position the window can restore */
+    int window_end;              /* exclusive; 0 when no window is live */
+    bool has_boundary_logits;
+    uint32_t prefixes;           /* verifier-prefix states kept for the window */
+    int max_window;              /* widest span one verifier block can replay */
+} ds4_session_rewind_state;
+
+ds4_rewind_reason ds4_session_rewind_reason(const ds4_session *s, int pos,
+                                            ds4_session_rewind_state *state);
+const char *ds4_rewind_reason_name(ds4_rewind_reason reason);
 /* Test helpers (ds4-test): allocate a session shell holding only the given
  * checkpoint tokens, for server-side routing/probe unit tests.  Not usable
  * for inference; free with ds4_session_free_test_checkpoint(). */

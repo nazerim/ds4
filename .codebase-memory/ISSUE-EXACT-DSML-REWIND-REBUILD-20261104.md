@@ -110,3 +110,29 @@ Fork-local first (per DS4FORK.md workflow), then offer upstream with
 the repro + this analysis. Interim operator guidance: stalls scale with
 context - compact early / keep giant sessions tool-light is NOT needed
 for correctness, only for latency today.
+
+## MEASURED CORRECTIONS (20261104 18:3x, M0 instrument on a private instance)
+The M0 instrument (see PLAN-DSML-REWIND.md "M0 RESULT") ran on this engine
+family with the documented repro shape. Two claims here are wrong and one is
+unconfirmed; keep them corrected so nobody re-derives them:
+1. "Mechanism" step 1/3: the fast path is NOT only reached through the server's
+   `resample` flag. `ds4_session_rewind()` tries
+   `ds4_session_rewind_speculative()` on every route (ds4.c:89264), so a
+   `kept < ntok && !resample` truncation IS served from the verify window when
+   the window still covers the target. Measured: `route=truncation resample=0
+   reason=ok` with `common == kept_tokens` (no rebuild, no replay).
+2. "Fix options" 1 and "Repro recipe" 3: bail frequency is not established.
+   Three tool-heavy turns at a 76k-token prompt (payloads 4.7 KB / 18.4 KB /
+   10.4 KB+9.6 KB, 4530 verify cycles) gave **zero** fast-path bails and
+   `replay_fallbacks=0`; the production engine's single stats sample
+   (cycles=31598) also read `replay_fallbacks=0`. The four measured production
+   stalls still stand (stack traces captured 4x), but "long DSML span + big
+   context" alone does not trigger a bail — the leading difference is a
+   cross-turn re-sync (tool-checkpoint canonicalization or disk-KV rehydrate)
+   leaving `dspark_rewind_end != checkpoint.len`, which the M0 line reports as
+   `reason=window-moved-past-frontier`.
+3. "Mechanism" step 4 stands, now code-confirmed rather than inferred: for the
+   DEEPSEEK family `ds4_session_rewind()` has no `state_ok` recovery (only the
+   qwen4/glm branches), so a genuine bail always ends in the RESET branch.
+Everything else (stall law, stack, the un-wired progress emitter) was
+re-verified against source and the live log and still holds.

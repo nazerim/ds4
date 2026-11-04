@@ -89108,15 +89108,29 @@ int ds4_session_restore_speculative_prefix(ds4_session *s, int pos) {
 }
 
 #ifndef DS4_NO_GPU
+/* Why a rewind target cannot be served from the live verify window, in the
+ * order the gates are checked.  ds4_session_rewind_reason() reports this to the
+ * server so a full-context rebuild names the gate that rejected the target
+ * instead of appearing as an unexplained stall. */
+static ds4_rewind_reason dspark_rewind_gate(const ds4_session *s, int pos) {
+    if (!s || !s->engine || pos < 0) return DS4_REWIND_TARGET_UNBOUNDED;
+    if (!s->checkpoint_valid) return DS4_REWIND_NO_CHECKPOINT;
+    if (!s->dspark_rewind_logits) return DS4_REWIND_NO_BOUNDARY_LOGITS;
+    if (s->dspark_rewind_end <= s->dspark_rewind_start) return DS4_REWIND_NO_WINDOW;
+    if (s->dspark_rewind_end != s->checkpoint.len) return DS4_REWIND_WINDOW_MOVED;
+    if (pos < s->dspark_rewind_start) return DS4_REWIND_TARGET_STALE;
+    if (pos >= s->dspark_rewind_end) return DS4_REWIND_TARGET_AHEAD;
+    if (s->checkpoint.len - s->dspark_rewind_start > DS4_DSPARK_MAX_BLOCK_SIZE)
+        return DS4_REWIND_WINDOW_TOO_WIDE;
+    if (s->engine->tp.active && !ds4_session_tp_leader(s))
+        return DS4_REWIND_NOT_TP_LEADER;
+    return DS4_REWIND_OK;
+}
+
 /* Recover a recent boundary with at most one verifier block of replay. Keep
  * the old invalidation/rebuild contract for arbitrary or stale rewinds. */
 static bool dspark_rewind_recent(ds4_session *s, int pos) {
-    if (!s->checkpoint_valid || !s->dspark_rewind_logits ||
-        s->dspark_rewind_end <= s->dspark_rewind_start ||
-        s->dspark_rewind_end != s->checkpoint.len ||
-        pos < s->dspark_rewind_start || pos >= s->dspark_rewind_end ||
-        s->checkpoint.len - s->dspark_rewind_start > DS4_DSPARK_MAX_BLOCK_SIZE ||
-        (s->engine->tp.active && !ds4_session_tp_leader(s))) return false;
+    if (dspark_rewind_gate(s, pos) != DS4_REWIND_OK) return false;
 
     const int start = s->dspark_rewind_start;
     int base = pos == start ? start : pos - 1;
@@ -89196,6 +89210,50 @@ bool ds4_session_rewind_speculative(ds4_session *s, int pos) {
 #endif
     return s && s->engine && pos >= 0 && dspark_rewind_recent(s, pos);
 #endif
+}
+
+/* Read-only view of the shared DSpark verify window (see ds4.h).  Covers the
+ * window this build's dspark_rewind_* fields describe; the DS4.1 variant keeps
+ * its own window on ds41_dspark and is not reported here. */
+ds4_rewind_reason ds4_session_rewind_reason(const ds4_session *s, int pos,
+                                            ds4_session_rewind_state *state) {
+    ds4_rewind_reason reason = DS4_REWIND_UNSUPPORTED;
+#ifndef DS4_NO_GPU
+    reason = dspark_rewind_gate(s, pos);
+#else
+    (void)pos;
+#endif
+    if (!state) return reason;
+    memset(state, 0, sizeof(*state));
+    state->max_window = DS4_DSPARK_MAX_BLOCK_SIZE;
+    if (!s) return reason;
+    state->frontier = s->checkpoint.len;
+    state->checkpoint_valid = s->checkpoint_valid;
+#ifndef DS4_NO_GPU
+    /* The window fields only exist where the verifier keeps them. */
+    state->window_start = s->dspark_rewind_start;
+    state->window_end = s->dspark_rewind_end;
+    state->has_boundary_logits = s->dspark_rewind_logits != NULL;
+    state->prefixes = s->dspark_rewind_prefixes;
+#endif
+    return reason;
+}
+
+const char *ds4_rewind_reason_name(ds4_rewind_reason reason) {
+    switch (reason) {
+    case DS4_REWIND_OK: return "ok";
+    case DS4_REWIND_TARGET_UNBOUNDED: return "unbounded-target";
+    case DS4_REWIND_UNSUPPORTED: return "no-gpu-window";
+    case DS4_REWIND_NO_CHECKPOINT: return "checkpoint-invalid";
+    case DS4_REWIND_NO_BOUNDARY_LOGITS: return "no-boundary-logits";
+    case DS4_REWIND_NO_WINDOW: return "no-verify-window";
+    case DS4_REWIND_WINDOW_MOVED: return "window-moved-past-frontier";
+    case DS4_REWIND_TARGET_STALE: return "target-behind-window";
+    case DS4_REWIND_TARGET_AHEAD: return "target-ahead-of-window";
+    case DS4_REWIND_WINDOW_TOO_WIDE: return "window-too-wide";
+    case DS4_REWIND_NOT_TP_LEADER: return "not-tp-leader";
+    }
+    return "unknown";
 }
 
 void ds4_session_rewind(ds4_session *s, int pos) {
