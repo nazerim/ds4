@@ -57,11 +57,28 @@ cnt_i() {
 	[ -z "$n" ] && n=0
 	printf '%s\n' "$n"
 }
+cnt_e() {
+	n=$(grep -cE "$1" "$LOG" 2>/dev/null)
+	[ -z "$n" ] && n=0
+	printf '%s\n' "$n"
+}
+
+# The batch-buffer guard (d5b4a12) logs every cross-thread touch, and the two kinds
+# mean opposite things:
+#   diverted  - command_buffer / tensor_copy refused the join and handed back a
+#               private buffer or failed cleanly.  Expected, safe, worth counting.
+#   unguarded - compute_encoder / blit_encoder / close_batch / recreate_batch are the
+#               DIRECT g_batch_cb users (TP gate encode, expert-cache fill) and the
+#               ownership-transfer edges.  Those still share the buffer by design, so
+#               the pre-00:23:14 interleaving is live - alert, because that is exactly
+#               the shape that produced a driver assertion.
+BATCH_UNGUARDED='GPU batch section touched by a foreign thread at (compute_encoder|blit_encoder|close_batch|recreate_batch)'
+BATCH_DIVERTED='GPU batch section touched by a foreign thread at (command_buffer|tensor_copy)'
 
 # Baselines for the five failure signals, plus the counters that decide whether
 # the fixes are being exercised at all (a silent engine and a fixed engine look
 # identical until a rewind event happens).
-base_rebuild=0; base_edge=0; base_discard=0; base_fail=0; base_div=0
+base_rebuild=0; base_edge=0; base_discard=0; base_fail=0; base_div=0; base_batchu=0
 prev_lines=0
 set_baseline() {
 	base_rebuild=$(cnt "generation rewind rebuild ctx=")
@@ -69,6 +86,7 @@ set_baseline() {
 	base_discard=$(cnt "kv cache discarded")
 	base_fail=$(cnt "prefill failed")
 	base_div=$(cnt_i "divergence")
+	base_batchu=$(cnt_e "$BATCH_UNGUARDED")
 }
 
 # ---------------------------------------------------------------- report ------
@@ -138,6 +156,8 @@ report() {
 	echo "rebuilt (the stall): $(cnt 'generation rewind rebuild ctx=')"
 	echo "edge-target serves (truncate == window end, reason=ok): $(edge_serves)"
 	echo "edge refusals (must stay 0 post-ecef491): $(cnt 'target-ahead-of-window')"
+	echo "cross-thread batch joins: diverted $(cnt_e "$BATCH_DIVERTED")  unguarded $(cnt_e "$BATCH_UNGUARDED")"
+	echo "  (unguarded > 0 means a direct g_batch_cb user is mid-join; alert path exists, d5b4a12)"
 	echo "resample=1 mode-boundary events: $(cnt 'resample=1')"
 	echo "  ^ still 0 means the arming fix's decisive observation has not landed;"
 	echo "    the model-free gate test (tests/test_session_state.c) covers that geometry."
@@ -220,6 +240,11 @@ while [ $SECONDS -lt $END ]; do
 	# rest to grep, so passing only "-i" here would leave grep with no pattern and
 	# it would block reading stdin - a watcher that hangs is a watcher that is deaf.
 	[ "$v" -gt "$base_div" ] && fire "DIVERGENCE LINE" -i "divergence"
+	# Cross-thread batch joins that the guard could NOT divert: direct g_batch_cb
+	# users and ownership transfers.  These still share the buffer by design, so a
+	# hit means the pre-crash interleaving is live on a path the guard only logs.
+	bu=$(cnt_e "$BATCH_UNGUARDED")
+	[ "$bu" -gt "$base_batchu" ] && fire "UNGUARDED CROSS-THREAD BATCH JOIN" "GPU batch section touched by a foreign thread at"
 	sleep "$INTERVAL"
 done
 
