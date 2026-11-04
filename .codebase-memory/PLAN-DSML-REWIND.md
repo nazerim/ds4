@@ -253,7 +253,60 @@ cheaper fix than M1/M2 as scoped:
   `99,856 -> 106,934 -> ... -> 201,327` staircase, and tonight's 212k turn at
   ~607 s estimated.
 
-### What this changes about the milestones
+### Measured outcome of that rebuild (19:38:28)
+
+    generation rewind rebuild done ctx=210468..210889:421 kept_tokens=212546
+    elapsed_s=601.4 rate_tps=353 rc=2
+
+- `est_s=607` vs actual `601.4 s`: the 350 t/s estimate constant was accurate to
+  0.9% at 212k ctx.  The census median of 407 t/s is the mid-depth value; depth
+  really does slow prefill (195-600 band, ~353 t/s here), so keep the constant
+  conservative rather than retuning it to 407.
+- `rc=2` is `DS4_SESSION_SYNC_INTERRUPTED` (ds4.h:447), and the next log line is
+  `chat ctx=210468..210889:421 client disconnected`.  So 601 s of GPU produced
+  **nothing** for the user: the client gave up while the rebuild ran, the turn
+  died, and the retry after it prefilled only 2,197 tokens in 10.2 s (the partial
+  checkpoint survived, as ds4.h:427 documents).  The cost of this bug is not only
+  latency - at deep ctx it converts working requests into failed ones, and the
+  wasted work is invisible unless the rc is printed.
+
+### Stickiness: measured twice, and it disproved my own correction
+I told the operator a stranded session is "stuck for the rest of its life"; then I
+"corrected" that to recurrent-not-terminal because 11 `reason=ok` entries appeared
+after the first rebuild. Both readings were wrong in the same way - the truth is
+worse and it took a second live sample 63 s later to show it:
+
+    19:39:31 generation rewind rebuild ctx=211941..212138:197 route=mode-boundary
+    resample=1 reason=no-verify-window requested=212526 truncate=212525
+    window=212525..0 window_max=16 prefixes=4 logits=1 frontier=212530
+    checkpoint_valid=1 common=0 kept_tokens=212525 est_s=607 exact=1
+
+Same session, same turn, second full rebuild of 212,525 tokens - so the window
+does NOT stay re-armed; it gets stranded again within the turn.  The census
+already contained this shape (20261103 20:26:47 and 20:29:57: two stalls ~3 min
+apart inside one turn).  Pattern per sample: `prefixes = draft_n - 1`, `end = 0`,
+`frontier - start = tokens committed since begin` (4 then, 5 now).
+
+That second arithmetic is what pins the exit.  With `draft_n=5` and 5 tokens
+committed, the direct-full path would have kept, and it only skips keeping when
+`final_logits_ok` is false; the partial path needs `commit_drafts < draft_n` (no)
+and the prefix-extended path needs `commit_drafts == 6` (impossible).  So control
+reaches the rollback-then-replay tail (ds4.c:84193+), which restores the frontier
+at `start`, replays the accepted drafts one token at a time, and returns
+`n_accept` **without ever arming the window**.  `dspark_verify_read_row()`
+(ds4.c:~84240) is the failure that routes there - `metal_graph_read_spec_logits_row`
+returning false for row `draft_n-1`.
+
+Why calling `dspark_rewind_keep()` on that tail is *probably* correct, and what
+M1' must still prove: after the replay, the ring rows covering `[start, end)`
+were written by the replay itself in order, and `s->dspark_rewind_frontier` (the
+snapshot taken at `begin`) still describes `start`, which is precisely the
+"restore at start, replay up to pos" contract `dspark_rewind_recent()` implements
+("at most one verifier block of replay").  Unproven parts to review: TP worker
+commit ordering on that path, whether the capture invalidation that already runs
+there is compatible with an armed window, and why the row read fails at all (a
+cap, a wrap, or a transient - if it is systematic at depth, the strand is not
+rare and every deep session pays it).
 - M1 (truncation-aware resume from a common prefix) is the WRONG target: the
   engine never got a chance to use any prefix state, because a *liveness flag*
   was zero. Nothing about DEEPSEEK4 truncation needed to be solved here.
