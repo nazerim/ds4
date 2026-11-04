@@ -3551,7 +3551,14 @@ static int kv_cache_find_text_prefix_skip(ds4_kvstore *kc, const char *prompt_te
     /* Verdict fix #4: on a miss, name the mechanism - first divergent byte
      * of the deepest memory-plausible candidate vs the query, both windows.
      * This is what the drift investigation had to reconstruct by hand. */
-    if (best < 0 && best_mem >= 0 && kv_debug_enabled()) {
+    /* PARTIAL-DRIFT EXTENSION (20261104): a deeper candidate can miss while a
+     * shallower entry still matches - rehydration then silently stops at the
+     * shallow pin and rebuilds the rest (observed: FULL 344k store, rehydrate
+     * pinned at 204,800 EVERY turn). Run the same divergence forensics
+     * whenever a deeper plausible candidate missed than the entry that won. */
+    if (best_mem >= 0 && kv_debug_enabled() &&
+        (best < 0 ||
+         kc->entry[best_mem].text_bytes > kc->entry[best].text_bytes)) {
         const ds4_kvstore_entry *m = &kc->entry[best_mem];
         FILE *fp = m->path ? fopen(m->path, "rb") : NULL;
         if (fp) {
