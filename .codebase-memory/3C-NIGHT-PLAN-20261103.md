@@ -669,3 +669,12 @@ engine-form head seeded from s4full recipe as NEXT research item.
   ANSWER to 'do we need DSpark for collection?': YES (recs/parity ARE
   DSpark cycle logs, EXACT = mirror-valid era) -> fix ds4 (2)+(3) is
   the pragmatic pair; (1) is the real win.
+- 15:0x HANDOFF: fix workstream SPLIT OUT per operator -
+  PLAN-DSML-REWIND.md (new agent owns M0 observability -> M1 truncation-
+  resume -> M2 snapshot coverage -> M3 upstream; guardrails: live engine
+  untouchable, private instance port 8011 + isolated DS4_LOCK_FILE/
+  TRAIN_DUMP, synthetic cycles NEVER into real corpus). ISSUE-EXACT-DSML-
+  REWIND-REBUILD-20261104.md = full evidence + repro recipe + fix law.
+  This (3c) lane stays on collection/training/A-B; stalls are latency-
+  only (exactness preserved) so tonight's plan is unaffected. AGENTS.md
+  workstreams line added.
