@@ -1,0 +1,109 @@
+{
+ "version": 3,
+ "rule": {
+  "depth_gt": 15.0,
+  "min_pairs": 300,
+  "span_geometry": "pos [B+G-T, B+G]; pid-per-line; segment-intersected"
+ },
+ "segments": {
+  "20261029-day1/train_pid72805": [
+   5284
+  ],
+  "20261029-day2/train_pid73865": [
+   7619,
+   14161,
+   27932,
+   46114,
+   59513
+  ],
+  "20261102-day9/train_pid19990": [
+   27267,
+   85301
+  ],
+  "20261103-day12/train_pid50920": [
+   7181
+  ]
+ },
+ "segment_detail": [
+  {
+   "day": "20261029-day1",
+   "stem": "train_pid72805",
+   "start": 5284,
+   "pairs": 12066,
+   "uniq": 525,
+   "depth": 23.0
+  },
+  {
+   "day": "20261029-day2",
+   "stem": "train_pid73865",
+   "start": 7619,
+   "pairs": 6541,
+   "uniq": 333,
+   "depth": 19.6
+  },
+  {
+   "day": "20261029-day2",
+   "stem": "train_pid73865",
+   "start": 14161,
+   "pairs": 13770,
+   "uniq": 210,
+   "depth": 65.6
+  },
+  {
+   "day": "20261029-day2",
+   "stem": "train_pid73865",
+   "start": 27932,
+   "pairs": 6024,
+   "uniq": 190,
+   "depth": 31.7
+  },
+  {
+   "day": "20261029-day2",
+   "stem": "train_pid73865",
+   "start": 46114,
+   "pairs": 13398,
+   "uniq": 363,
+   "depth": 36.9
+  },
+  {
+   "day": "20261029-day2",
+   "stem": "train_pid73865",
+   "start": 59513,
+   "pairs": 23022,
+   "uniq": 271,
+   "depth": 85.0
+  },
+  {
+   "day": "20261102-day9",
+   "stem": "train_pid19990",
+   "start": 27267,
+   "pairs": 44800,
+   "uniq": 414,
+   "depth": 108.2
+  },
+  {
+   "day": "20261102-day9",
+   "stem": "train_pid19990",
+   "start": 85301,
+   "pairs": 82178,
+   "uniq": 438,
+   "depth": 187.6
+  },
+  {
+   "day": "20261103-day12",
+   "stem": "train_pid50920",
+   "start": 7181,
+   "pairs": 9106,
+   "uniq": 197,
+   "depth": 46.2
+  }
+ ],
+ "spans": [
+  [
+   5853,
+   59620,
+   "manual",
+   50920
+  ]
+ ]
+}

@@ -851,3 +851,33 @@ engine-form head seeded from s4full recipe as NEXT research item.
   dir, so NO synthetic rows entered the corpus (394 MB scratch deleted after).
   THIRD parity discontinuity marker: the binary now in service also carries the
   stats writers (behavior-neutral) - deploy boundary 23:51:33.
+
+## DAY-14 BANK EXECUTED 20261105 06:2x (runbook complete, engine LEFT DOWN)
+- Trigger: rewind-lane HANDOFF-BANK-20261105.md (quiet 03:30:58 -> clean
+  stop at 06:2x, no force-kill; their Metal fix (PLAN-VISION-BUFFER-RACE,
+  P0) waits for the down window - deploy is THEIRS on their signal).
+- Sealed: /Volumes/FireCuda520/ds4-train/20261105-day14 = 13 pids,
+  128,710 recs, 1,808 dropped (98.6% keep) vs day13's 30,609/98.7 ->
+  4.2x HARVEST. td_validate: ALL chain=100.0%, inbreaks=0 (crash-
+  truncated pid19257 tail = data gap not corruption: lost <=128-record
+  ring only). Backup rsync'd -> ds4-train/backups/20261105-day14 (1.5G).
+  active/ recreated empty.
+- MANIFEST --note encodes THREE semantic era boundaries (supersedes my
+  22:00 single-era-line note): PRE-FIX (8 pids incl. unattributed
+  6848/9304, era by mtime, binary unverified) | FIX1 18fa4f8 21:12:17
+  (arm window) | FIX2 ecef491 23:07:18 (edge serves) + 6f1d38e stats
+  boundary + 19257 CRASH tail + 21663 MIS-PROFILED (VERDICT: KEPT but
+  flagged - consumers may drop by pid; 712 recs) | ERA-FIXED 21843
+  (115/115/0 rebuilds). Test boots 18926/19037 = scratch-only, pid gaps
+  expected. Two admitted tiny health probes: no records materialized
+  (their mtime check + our smallest-conv scan both clean).
+- loops --audit --manual LOOP-MANUAL-20261103.json -> LOOP-QUARANTINE-
+  20261105.json: 9 legacy segments (210,905 pairs, days 1/2/9/12) + 1
+  manual span; ZERO day-14 additions. Quarantine committed.
+- POOL MATH for next iterations: draft pool 457,371 -> ~584k pairs
+  (+28%); conf pool 30,205 -> ~157k cycles (5.2x, spans MANY pids and
+  both engine eras - the single-pid caveat dissolves for confcal3);
+  post-fix era (21843, 55,956 recs) is the bit-identical-serve data;
+  PRE-FIX turns on sampled-temp tool paths carry the serve-vs-rebuild
+  reduction caveat (marked in manifest). Rollback lever for any parity
+  diffing: DS4_REWIND_RESUME=0 (pinned by tests/test_session_state.c).
