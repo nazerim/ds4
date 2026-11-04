@@ -357,6 +357,30 @@ lose it:
   processes; they must get the same value or their windows diverge and every
   mirrored rewind invalidates.
 
+### Post-deploy evidence (interim, ~25 min of live traffic)
+Rebuild lines are only half the test: a *served* rewind leaves no line at all, so
+"no lines" alone is absence of evidence.  The independent sensor is completed-turn
+duration, measured against the pre-fix boot's own distribution:
+
+    PRE-FIX boot (14:37-18:33, 67 deep turns at ctx>=100k):
+        over 64 s: 20 (29.9%)   min 68 s, median 128 s, max 483 s
+        over 300 s (rebuild-class): 9 (13.4%)
+    POST-FIX boot (20:13 onward, 11 deep turns):
+        over 64 s: 0   max observed 64 s   median 27 s (unchanged)
+        rebuild lines: 0        slow-path entries: 0
+
+Significance, stated honestly because the two thresholds give different answers:
+  - against the >64 s class: P(0 of 11 by chance) = 0.020 -> already significant,
+    but that class includes legitimately slow work (long generations, big
+    prefills), so it over-credits the fix.
+  - against the strict >300 s rebuild class (13.4%): P(0 of 11) = 0.21 -> NOT yet
+    significant.  Roughly 25 clean deep turns would put it near p=1e-4.
+Also note traffic mix is not controlled between the two windows (different task
+sizes), so part of the shift could be workload rather than the patch - which is
+why the fixed-seed A/B remains the confirmation test, and why the log line
+carries `end_state=`/`reason_try=` so a surviving rebuild names its own cause.
+A 4 h sentinel watches for any post-deploy rebuild line.
+
 ### Follow-ups this milestone surfaced (not done here)
 - `server_log()` has no `__attribute__((format(printf, 2, 3)))`, so `-Wall`
   never validates any `server_log` format string - the three new lines were
