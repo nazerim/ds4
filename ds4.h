@@ -524,7 +524,9 @@ typedef enum {
     DS4_REWIND_NO_WINDOW,            /* no verify window covers any position */
     DS4_REWIND_WINDOW_MOVED,         /* window end is no longer the frontier */
     DS4_REWIND_TARGET_STALE,         /* target sits behind the window */
-    DS4_REWIND_TARGET_AHEAD,         /* target sits at or past the window end */
+    DS4_REWIND_TARGET_AHEAD,         /* target sits past the window's edge (with
+                                      * DS4_REWIND_RESUME the edge itself is
+                                      * servable: end-1 + one replay) */
     DS4_REWIND_WINDOW_TOO_WIDE,      /* span exceeds one verifier block */
     DS4_REWIND_NOT_TP_LEADER,        /* TP workers restore only on command */
 } ds4_rewind_reason;

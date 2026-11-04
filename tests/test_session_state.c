@@ -160,6 +160,155 @@ static void test_rewind(void) {
     ds4_session_free(s);
 }
 
+/* Verifier-window gate geometry, pinned from lines the running server actually
+ * printed: these are measurements, not taste.  test_rewind() above never arms a
+ * window, which is how a whole class of rewind bugs (an armed window that
+ * cannot be served, or a servable position the gate refuses) stayed invisible
+ * in this suite.  The gate reads only scalars plus engine->tp.active, so a
+ * stack engine and a calloc'd session exercise it with no model and no GPU
+ * work.  Requires the GPU build because dspark_rewind_gate is compiled out of
+ * DS4_NO_GPU. */
+#ifndef DS4_NO_GPU
+static void test_rewind_gate_reason(ds4_session *s, int pos,
+                                    ds4_rewind_reason want) {
+    const ds4_rewind_reason got = dspark_rewind_gate(s, pos);
+    if (got != want)
+        fprintf(stderr, "rewind gate(%d) = %s, expected %s\n", pos,
+                ds4_rewind_reason_name(got), ds4_rewind_reason_name(want));
+    assert(got == want);
+}
+
+static void test_rewind_window_gate(void) {
+    const char *raw = getenv("DS4_REWIND_RESUME");
+    char prior[16];
+    const bool had_env = raw != NULL;
+    if (had_env) snprintf(prior, sizeof(prior), "%s", raw);
+    ds4_engine e = { .backend = DS4_BACKEND_METAL };
+    ds4_session *s = calloc(1, sizeof(*s));
+    assert(s);
+    s->engine = &e;                  /* e.tp.active is zero: single-GPU box */
+    float logits = 0.0f;             /* the gate tests this pointer's value,
+                                      * never its contents, so one float stands
+                                      * in for the DS4_N_VOCAB row a real
+                                      * dspark_rewind_begin() would have copied
+                                      * and this test never reads back. */
+    s->dspark_rewind_logits = &logits;
+    s->checkpoint_valid = true;
+
+    /* 22:43:00 live event: window armed 70611..70614, the frontier then moved
+     * one token to 70615, and a truncation request targeted exactly 70614.  The
+     * gate refused it as target-ahead-of-window and the server re-prefilled
+     * 70,614 tokens (~202 s) with prefixes=4 and logits=1 intact.  The state
+     * needed to serve 70614 was there: restore the snapshot at end-1 (offset 2
+     * of 4) and replay one token - the same single-token replay the 22:42:05 and
+     * 22:42:35 events used, just one position further. */
+    s->dspark_rewind_start = 70611;
+    s->dspark_rewind_end = 70614;
+    s->dspark_rewind_prefixes = 4;
+    s->checkpoint.len = 70615;
+
+    /* Rollback arm: env unset means a frontier past end invalidates the window,
+     * so this rebuilds either way and that is the point of the arm. */
+    unsetenv("DS4_REWIND_RESUME");
+    test_rewind_gate_reason(s, 70614, DS4_REWIND_WINDOW_MOVED);
+    /* And with the frontier exactly on the edge (no move at all), the rollback
+     * arm must still refuse it: that is the pre-fix behaviour, byte-for-byte,
+     * which is what makes DS4_REWIND_RESUME=0 a real rollback and not a mix. */
+    s->checkpoint.len = 70614;
+    test_rewind_gate_reason(s, 70614, DS4_REWIND_TARGET_AHEAD);
+    s->checkpoint.len = 70615;
+
+    /* Deployed arm: the move is tolerated, positions inside the window serve. */
+    setenv("DS4_REWIND_RESUME", "1", 1);
+    test_rewind_gate_reason(s, 70613, DS4_REWIND_OK);
+    test_rewind_gate_reason(s, 70611, DS4_REWIND_OK);   /* == start: saved logits */
+    test_rewind_gate_reason(s, 70610, DS4_REWIND_TARGET_STALE);
+    /* The edge position: this is the one the 22:43 stall cost. */
+    test_rewind_gate_reason(s, 70614, DS4_REWIND_OK);
+    /* Past the live frontier there is nothing to restore from, so it stays
+     * refused - and a target equal to checkpoint.len needs no rewind at all. */
+    test_rewind_gate_reason(s, 70615, DS4_REWIND_TARGET_AHEAD);
+    test_rewind_gate_reason(s, 70616, DS4_REWIND_TARGET_AHEAD);
+    /* And the genuine no-op: window edge exactly AT the live frontier is not a
+     * rewind, serving it would re-replay the committed token and consume the
+     * window.  The predicate refuses it on its own, rather than relying on a
+     * caller's arithmetic (this is the case that made the sweep above fail). */
+    s->checkpoint.len = 70614;
+    test_rewind_gate_reason(s, 70614, DS4_REWIND_TARGET_AHEAD);
+    s->checkpoint.len = 70615;
+    test_rewind_gate_reason(s, 70614, DS4_REWIND_OK);
+
+    /* 21:03:30 live event, the stranding that arming the stochastic
+     * direct-prefix commit fixed: a capture invalidation zeroed end while start
+     * stayed put, so no position was covered and 234,683 tokens were
+     * re-prefilled (~671 s).  Pinned so the "no window at all" shape can never
+     * be mistaken for an off-by-one again. */
+    s->dspark_rewind_start = 234684;
+    s->dspark_rewind_end = 0;
+    s->checkpoint.len = 234688;
+    test_rewind_gate_reason(s, 234684, DS4_REWIND_NO_WINDOW);
+
+    /* A window wider than one verifier block cannot be replayed inside the
+     * fixed-size buffer in dspark_rewind_recent(), however well armed it is. */
+    s->dspark_rewind_start = 1000;
+    s->dspark_rewind_end = 1000 + DS4_DSPARK_MAX_BLOCK_SIZE + 1;
+    s->checkpoint.len = s->dspark_rewind_end;
+    test_rewind_gate_reason(s, 1005, DS4_REWIND_WINDOW_TOO_WIDE);
+
+    /* Cross-function invariant, deliberately not a restatement of the gate's
+     * own arithmetic: dspark_rewind_recent() hands the restore a CLAMPED base,
+     * so every position the gate admits must also survive
+     * ds4_session_restore_speculative_prefix()'s predicate list, and the replay
+     * count must fit recent()'s fixed int[DS4_DSPARK_MAX_BLOCK_SIZE].  Sweeping
+     * width x prefixes x moved covers states no single live event hit, and pins
+     * the exact defect shape this feature keeps producing: a relaxation the
+     * restore does not mirror makes recent() destroy the checkpoint on the way
+     * out, which is worse than refusing. */
+    s->dspark_rewind_logits = &logits;
+    s->checkpoint_valid = true;
+    for (int width = 1; width <= DS4_DSPARK_MAX_BLOCK_SIZE; width++) {
+        for (uint32_t prefixes = 0; prefixes <= DS4_SPEC_PREFIX_SLOTS; prefixes++) {
+            for (int moved = 0; moved <= DS4_DSPARK_MAX_BLOCK_SIZE; moved++) {
+                s->dspark_rewind_start = 1000;
+                s->dspark_rewind_end = 1000 + width;
+                s->dspark_rewind_prefixes = prefixes;
+                s->checkpoint.len = s->dspark_rewind_end + moved;
+                for (int pos = 999; pos <= s->checkpoint.len + 1; pos++) {
+                    if (dspark_rewind_gate(s, pos) != DS4_REWIND_OK) continue;
+                    int base = pos == s->dspark_rewind_start
+                                   ? s->dspark_rewind_start : pos - 1;
+                    if (base - s->dspark_rewind_start > (int)prefixes)
+                        base = s->dspark_rewind_start + (int)prefixes;
+                    assert(base >= s->dspark_rewind_start &&
+                           base < s->dspark_rewind_end);
+                    assert((uint32_t)(base - s->dspark_rewind_start) <= prefixes);
+                    assert(pos >= base &&
+                           pos - base <= DS4_DSPARK_MAX_BLOCK_SIZE);
+                    /* pos == end == frontier is not a rewind at all; the
+                     * predicate rejects it rather than trusting the arithmetic
+                     * of a caller three files away. */
+                    assert(pos < s->checkpoint.len);
+                }
+            }
+        }
+    }
+
+    /* The two invalidations the log line had to learn to tell apart. */
+    s->checkpoint_valid = false;
+    test_rewind_gate_reason(s, 1005, DS4_REWIND_NO_CHECKPOINT);
+    s->checkpoint_valid = true;
+    s->dspark_rewind_logits = NULL;
+    test_rewind_gate_reason(s, 1005, DS4_REWIND_NO_BOUNDARY_LOGITS);
+    /* Leave the environment as found: later tests in this binary must not
+     * inherit the tolerance this test switched on, and a developer running the
+     * suite under the deployed profile (DS4_REWIND_RESUME=1) must not have it
+     * silently stripped for the tests that follow. */
+    if (had_env) setenv("DS4_REWIND_RESUME", prior, 1);
+    else unsetenv("DS4_REWIND_RESUME");
+    free(s);
+}
+#endif
+
 static void test_session_memory(void) {
     const uint64_t gib = UINT64_C(1) << 30;
     ds4_engine e = { .backend = DS4_BACKEND_METAL,
@@ -762,6 +911,9 @@ int main(void) {
     test_vision_prefix();
     test_vision_fingerprint_prefix();
     test_rewind();
+#ifndef DS4_NO_GPU
+    test_rewind_window_gate();
+#endif
     test_session_memory();
     test_payload_tokens();
     test_snapshot_bytes();

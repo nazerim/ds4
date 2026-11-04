@@ -75332,6 +75332,39 @@ static bool dspark_rewind_covered_after_move(const ds4_session *s) {
            moved > 0 && moved <= DS4_DSPARK_MAX_BLOCK_SIZE;
 }
 
+/* Does the armed window cover rewind target pos?  The snapshots a verifier
+ * batch leaves behind describe [start, end), and covered_after_move() has
+ * already blessed a frontier that moved past end - but the position end itself
+ * names is reachable too, because keep() set end to checkpoint.len: the
+ * restore rewinds to start and re-commits the verifier batch's prefix up to
+ * end-1, so one replayed token lands exactly on end.
+ * Before that was allowed, a target equal to the window edge was refused while
+ * the state to serve it sat intact: measured live at 22:43:00, window
+ * 70611..70614 with the frontier at 70615 and prefixes=4, refused as
+ * target-ahead-of-window, and 70,614 tokens re-prefilled in ~202 s (the same
+ * shape costs ~671 s at 230k depth).  The edge stays refused unless the
+ * tolerance is on, which keeps the documented rollback arm
+ * (DS4_REWIND_RESUME=0) identical to the pre-fix window.
+ * dspark_rewind_gate() and ds4_session_restore_speculative_prefix() must both
+ * ask this one predicate.  A relaxation the restore does not mirror fails
+ * inside the restore, and dspark_rewind_recent() then truncates the checkpoint
+ * and clears the window on the way out - strictly worse than refusing, because
+ * it turns a fast-path miss into a guaranteed rebuild.
+ * The edge also requires the frontier to sit PAST end: pos == end == frontier
+ * is not a rewind at all, and serving it would truncate to end-1, re-replay the
+ * token the verifier batch just committed, consume the window and replace the
+ * frontier's batch-verified logits with a serial recompute.  No caller asks for
+ * that today (the server entry computes its target strictly inside the retained
+ * tokens, and ds4_session_rewind() returns early for pos >= checkpoint.len),
+ * but a contract enforced by arithmetic three files away is how this feature
+ * produced its last three incidents, so the predicate owns it. */
+static bool dspark_rewind_covers(const ds4_session *s, int pos) {
+    if (pos < s->dspark_rewind_start) return false;
+    if (pos < s->dspark_rewind_end) return true;
+    return dspark_rewind_window_tolerance() && pos == s->dspark_rewind_end &&
+           s->dspark_rewind_end < s->checkpoint.len;
+}
+
 static void ds4_format_len_hist(
         char           *buf,
         size_t          buflen,
@@ -89155,7 +89188,7 @@ int ds4_session_restore_speculative_prefix(ds4_session *s, int pos) {
     if (!s || !s->checkpoint_valid || !s->dspark_rewind_logits ||
         s->dspark_rewind_end <= s->dspark_rewind_start ||
         !dspark_rewind_covered_after_move(s) ||
-        pos < s->dspark_rewind_start || pos >= s->dspark_rewind_end ||
+        !dspark_rewind_covers(s, pos) ||
         (uint32_t)(pos - s->dspark_rewind_start) > s->dspark_rewind_prefixes)
         return 1;
     const uint32_t prefix = (uint32_t)(pos - s->dspark_rewind_start);
@@ -89192,7 +89225,9 @@ static ds4_rewind_reason dspark_rewind_gate(const ds4_session *s, int pos) {
     /* Same predicate the restore uses - gate and restore cannot disagree. */
     if (!dspark_rewind_covered_after_move(s)) return DS4_REWIND_WINDOW_MOVED;
     if (pos < s->dspark_rewind_start) return DS4_REWIND_TARGET_STALE;
-    if (pos >= s->dspark_rewind_end) return DS4_REWIND_TARGET_AHEAD;
+    /* Shared with the restore: the window's inclusive edge is servable, the
+     * position past it is not. */
+    if (!dspark_rewind_covers(s, pos)) return DS4_REWIND_TARGET_AHEAD;
     /* With the window armed at the frontier this is the same expression the
      * gate has always checked (end == checkpoint.len there). */
     if (s->dspark_rewind_end - s->dspark_rewind_start > DS4_DSPARK_MAX_BLOCK_SIZE)
