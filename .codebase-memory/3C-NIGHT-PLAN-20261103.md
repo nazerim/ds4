@@ -524,3 +524,19 @@ MORNING TODO: (a) R restore on operator signal + verify (log line 1
 (DS4_DSPARK_STATS=1 both arms, tool-bearing prompt, cycles>0), then
 A->B->A->B; (d) if B advances: iterate conf training on growing pool +
 engine-form head seeded from s4full recipe as NEXT research item.
+  during user agent turns (342k-ctx session). Cause stack:
+  (1) disk-KV cache 254G vs budget 262G -> constant evictions ->
+      per-turn ~140k-token re-prefills (stored 344,064 but rehydrate
+      stopped 204,800 then 200,704 = BOUNDARY REGRESSION); (2) under
+      pressure single GPU prefill chunks ran minutes (sample:
+      metal_graph_prefill_chunked_range waitUntilCompleted, GPU 90%+,
+      NOT a wedge - my first all-threads-idle read was a grep artifact,
+      corrected by user's GPU observation). MITIGATION: restart with
+      KV_SIZE=524288 (PID 3106, budget line confirmed, nothing wiped,
+      flags+banner verified). OPEN TEST (built into next session turn):
+      if M in 'prefill chunk N/M' ~140k with a fresh cache = user's
+      EXACT+DSpark KV-lineage hypothesis CONFIRMED (draft/verify
+      token-stream rewrite breaks token-text-sha prefix reuse on tool
+      traffic) -> DSpark workstream issue, candidate for ADR/DS4FORK.
+      Runbook note: graceful stop IMPOSSIBLE mid-prefill (drain times
+      out -> force kill; KV self-heal absorbs it) - stop only in gaps.
