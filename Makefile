@@ -233,6 +233,11 @@ test-metal-command-memory: tests/test_metal_command_memory
 	MTL_DEBUG_LAYER=1 ./tests/test_metal_command_memory session
 	MTL_DEBUG_LAYER=1 ./tests/test_metal_command_memory batch
 	MTL_DEBUG_LAYER=1 ./tests/test_metal_command_memory big
+	# Cross-thread batch-section ownership guard (PLAN-VISION-BUFFER-RACE.md).
+	# Forks a child that runs decode-shape and vision-shape GPU work on two threads
+	# at once; before the guard this died with a driver assertion inside the child
+	# (exit 1 from this mode), which is how the engine aborted at 00:23:14.
+	MTL_DEBUG_LAYER=1 ./tests/test_metal_command_memory race
 
 tests/test_deepseek41_metal.o: tests/test_deepseek41_metal.c ds4_gpu.h ds4_deepseek41_gpu.h
 	$(CC) $(filter-out -ffast-math,$(CFLAGS)) -I. -c -o $@ $<
@@ -1198,6 +1203,15 @@ tests/test_tp_tcp.o: tests/test_tp_tcp.c ds4_tp.c ds4_tp.h ds4.h ds4_gpu_tp.h
 
 tests/test_tp_tcp: tests/test_tp_tcp.o $(filter-out ds4_tp.o,$(CPU_CORE_OBJS))
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+.PHONY: test-session-state-gpu
+# GPU build of the session suite.  The dspark verifier-window gate geometry
+# (test_rewind_window_gate, tests/test_session_state.c:171) is inside
+# #ifndef DS4_NO_GPU, so the CPU binary that test-session-state below runs cannot
+# even compile it - which is how the rewind-gate regression test went unrun.
+# Needs a GPU; loads no model; safe to run beside a live engine.
+test-session-state-gpu: tests/test_session_state_gpu
+	./tests/test_session_state_gpu
 
 .PHONY: test-session-state
 test-session-state: tests/test_session_state tests/test_tp_commands tests/test_tp_rdma tests/test_tp_tcp

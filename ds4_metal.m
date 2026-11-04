@@ -59,6 +59,81 @@ static id<MTLComputeCommandEncoder> g_batch_enc;
 static BOOL g_batch_encoder_concurrent;
 static BOOL g_batch_has_work;
 
+/* ---- batch-section ownership (PLAN-VISION-BUFFER-RACE.md) ----
+ * The live batch command buffer and its cached encoder (g_batch_enc) are
+ * process-global and guarded by no lock anywhere in this file: g_timeline_mutex
+ * covers diagnostics and g_tensor_mu covers tensor bookkeeping only.  So the
+ * encoding design implicitly assumes exactly one thread does GPU work at a time,
+ * and the server does not provide that - generation touches the GPU holding no
+ * mutex at all (ds4_server.c releases inference_mu at 15761 while the token loop
+ * runs at 16522), while a multimodal request encodes images on the HTTP client
+ * thread.  When both reached the same buffer the driver aborted:
+ *   -[AGXG17XFamilyCommandBuffer tryCoalescingPreviousComputeCommandEncoder...]:1094
+ *   failed assertion `A command encoder is already encoding to this command buffer'
+ * (ds4-server 00:23:14 crash; reproduced by `tests/test_metal_command_memory race`).
+ *
+ * Ownership is stamped by the thread that (re)creates the live section - every
+ * write to g_batch_cb goes through ds4_gpu_set_batch_cb() so a site cannot forget.
+ * A foreign caller is diverted to an owned buffer instead of joining: callers that
+ * honor `owned` (e.g. glm53_vision_dispatch_rows, which ends with
+ * ds4_gpu_finish_command_buffer(cb, owned, ...)) get correct work, and callers that
+ * require a batch (six sites test `if (!cb || owned) return 0;`) fail cleanly and
+ * visibly.  Both beat an engine-wide abort.
+ *
+ * NOT a full fix: for SAME-session GPU work, a private buffer could read state that
+ * the open batch has not committed yet, so those paths must be serialized, not
+ * forked.  That is what the tripwire below is for - it names any foreign touch of
+ * the shared buffer that bypasses the accessor, so the field reports the remaining
+ * sites instead of us guessing from 112 references. */
+static pthread_t g_batch_cb_owner;
+static BOOL g_batch_cb_owner_valid;
+
+/* Forward: the helpers below log through it, and it is defined after them. */
+static void ds4_gpu_note_foreign_batch(const char *where, const void *caller);  /* fwd, defined below */
+
+static void ds4_gpu_set_batch_cb(id<MTLCommandBuffer> cb) {
+    /* Rule, stated plainly: whoever (re)opens the section owns it, and closing it
+     * releases ownership.  Both edges log when the acting thread is not the
+     * recorded owner - a foreign close is a real event worth naming (it aborts the
+     * other thread's ordering assumptions), even though the new opener is then the
+     * legitimate owner of what it creates.  Recorded ownership is deliberately NOT
+     * sticky across a close, because begin_commands may legitimately be reached by
+     * a different thread than the one that last flushed. */
+    const BOOL foreign = g_batch_cb_owner_valid &&
+                         !pthread_equal(pthread_self(), g_batch_cb_owner);
+    if (cb == nil) {
+        if (foreign)
+            ds4_gpu_note_foreign_batch("close_batch", __builtin_return_address(0));
+        g_batch_cb = nil;
+        g_batch_cb_owner_valid = NO;
+        return;
+    }
+    if (foreign)
+        ds4_gpu_note_foreign_batch("recreate_batch", __builtin_return_address(0));
+    g_batch_cb_owner = pthread_self();
+    g_batch_cb_owner_valid = YES;
+    g_batch_cb = cb;
+}
+
+/* True when a section is open and this thread did not create it. */
+static BOOL ds4_gpu_batch_cb_foreign(void) {
+    return g_batch_cb != nil && g_batch_cb_owner_valid &&
+           !pthread_equal(pthread_self(), g_batch_cb_owner);
+}
+
+static void ds4_gpu_note_foreign_batch(const char *where, const void *caller) {
+    static uint64_t g_foreign_hits;
+    const uint64_t n = __atomic_add_fetch(&g_foreign_hits, 1, __ATOMIC_RELAXED);
+    /* Loud once, then counted: a stream of logs on the hot path would be its own
+     * regression, and silence would hide the violation entirely. */
+    if (n == 1 || n % 1024 == 0)
+        fprintf(stderr,
+            "ds4: GPU batch section touched by a foreign thread at %s (caller %p, "
+            "hit %llu) - diverted or failed rather than joined; see "
+            "PLAN-VISION-BUFFER-RACE.md\n", where, caller,
+            (unsigned long long)n);
+}
+
 /* ---- Encoder timeline diagnostic (DS4_METAL_ENCODER_TIMELINE=<file>) ----
  * Gives every batch dispatch group its own compute pass with stage-boundary
  * GPU timestamps, so one decode token can be read as a per-kernel GPU
@@ -341,6 +416,8 @@ static id<MTLComputeCommandEncoder> ds4_gpu_timeline_new_encoder(
 static id<MTLBlitCommandEncoder> ds4_gpu_blit_encoder(id<MTLCommandBuffer> cb, const char *label,
                                                      uint32_t n_ops) {
     DS4TimelineBatch *b = g_timeline_batch;
+    if (cb == g_batch_cb && ds4_gpu_batch_cb_foreign())
+        ds4_gpu_note_foreign_batch("blit_encoder", __builtin_return_address(0));
     if (!g_timeline_enabled || !b || cb != g_batch_cb) return [cb blitCommandEncoder];
     const uint32_t per_buffer = DS4_TIMELINE_SAMPLES_PER_BUFFER / 2;
     const uint32_t sb_index = b->count / per_buffer;
@@ -1284,8 +1361,17 @@ static void ds4_gpu_stream_expert_cache_note_owned_created(void);
 
 static id<MTLCommandBuffer> ds4_gpu_command_buffer(int *owned) {
     if (g_batch_cb) {
-        *owned = 0;
-        return g_batch_cb;
+        if (!ds4_gpu_batch_cb_foreign()) {
+            *owned = 0;
+            return g_batch_cb;
+        }
+        /* Foreign thread.  Joining the live section is exactly what aborted the
+         * engine at 00:23:14, so hand back a private buffer instead and let the
+         * caller's own `owned` handling decide the outcome: commit-and-finish
+         * (vision encode does this), or refuse-and-fail (six sites test
+         * `if (!cb || owned) return 0`).  Both are defined; the assertion was not. */
+        ds4_gpu_note_foreign_batch("command_buffer",
+                                   __builtin_return_address(0));
     }
     *owned = 1;
     id<MTLCommandBuffer> cb = ds4_gpu_new_command_buffer();
@@ -1295,6 +1381,15 @@ static id<MTLCommandBuffer> ds4_gpu_command_buffer(int *owned) {
 
 static id<MTLComputeCommandEncoder> ds4_gpu_compute_encoder(id<MTLCommandBuffer> cb) {
     if (g_batch_cb && cb == g_batch_cb) {
+        /* Log-only tripwire.  An accessor caller can no longer arrive here while
+         * foreign (it gets a private buffer now), so a hit names a DIRECT
+         * g_batch_cb user - TP gate encode, expert-cache fill - crossing threads.
+         * Behavior is deliberately unchanged: those paths assume ownership, and
+         * field data should decide which one to convert next, not guesswork over
+         * 112 references. */
+        if (ds4_gpu_batch_cb_foreign())
+            ds4_gpu_note_foreign_batch("compute_encoder",
+                                       __builtin_return_address(0));
         g_batch_has_work = YES;
         if (g_timeline_enabled && g_timeline_batch) {
             /* Diagnostic: one timestamped pass per dispatch group. A
@@ -9512,6 +9607,13 @@ int ds4_gpu_tensor_copy(ds4_gpu_tensor *dst, uint64_t dst_offset,
     if (src_offset > s.bytes || bytes > s.bytes - src_offset) return 0;
     if (bytes == 0) return 1;
     if (!g_batch_cb) return 0;
+    if (ds4_gpu_batch_cb_foreign()) {
+        /* This primitive can only blit into the live batch, and the section belongs
+         * to another thread.  Failing is recoverable - every caller of a copy has a
+         * fallback path - whereas joining tripped the driver assertion. */
+        ds4_gpu_note_foreign_batch("tensor_copy", __builtin_return_address(0));
+        return 0;
+    }
 
     /* C inference callers have no surrounding autorelease pool. In particular,
      * validation-layer blit bookkeeping otherwise accumulates across tokens. */
@@ -9648,7 +9750,7 @@ int ds4_gpu_begin_commands(void) {
         ds4_gpu_device_is_pre_m5_apple_silicon() &&
         getenv("DS4_METAL_DISABLE_PRE_M5_HEAD_RMS_ROPE_PIPELINE_STATIC") == NULL;
     g_batch_cb_created_ms = ds4_gpu_now_ms();
-    g_batch_cb = ds4_gpu_new_command_buffer();
+    ds4_gpu_set_batch_cb(ds4_gpu_new_command_buffer());
     g_batch_has_work = NO;
     if (g_batch_cb) ds4_gpu_stream_expert_cache_note_batch_created();
     ds4_gpu_timeline_attach(g_batch_cb);
@@ -9670,13 +9772,13 @@ int ds4_gpu_flush_commands(void) {
 
     ds4_gpu_close_batch_encoder();
     id<MTLCommandBuffer> cb = g_batch_cb;
-    g_batch_cb = nil;
+    ds4_gpu_set_batch_cb(nil);
     g_batch_has_work = NO;
     [cb commit];
     [g_pending_cbs addObject:cb];
     ds4_gpu_stream_expert_cache_note_batch_committed();
 
-    g_batch_cb = ds4_gpu_new_command_buffer();
+    ds4_gpu_set_batch_cb(ds4_gpu_new_command_buffer());
     g_batch_has_work = NO;
     if (g_batch_cb) ds4_gpu_stream_expert_cache_note_batch_created();
     ds4_gpu_timeline_attach(g_batch_cb);
@@ -10296,7 +10398,7 @@ int ds4_gpu_commit_and_wait_selected_readback(uint64_t event_value, const char *
 
         ds4_gpu_close_batch_encoder();
         id<MTLCommandBuffer> cb = g_batch_cb;
-        g_batch_cb = nil;
+        ds4_gpu_set_batch_cb(nil);
         g_batch_has_work = NO;
         [cb commit];
         ds4_gpu_stream_expert_cache_note_batch_committed();
@@ -10320,7 +10422,7 @@ int ds4_gpu_commit_and_wait_selected_readback(uint64_t event_value, const char *
             return 0;
         }
 
-        g_batch_cb = ds4_gpu_new_command_buffer();
+        ds4_gpu_set_batch_cb(ds4_gpu_new_command_buffer());
         g_batch_has_work = NO;
         if (g_batch_cb) ds4_gpu_stream_expert_cache_note_batch_created();
         if (!g_batch_cb) {
@@ -11565,7 +11667,7 @@ static int ds4_gpu_signal_batch_and_wait_event(const char *label) {
 
         ds4_gpu_close_batch_encoder();
         id<MTLCommandBuffer> cb = g_batch_cb;
-        g_batch_cb = nil;
+        ds4_gpu_set_batch_cb(nil);
         const uint64_t value = ++g_selected_readback_event_value;
         [cb encodeSignalEvent:g_selected_readback_event value:value];
         g_batch_has_work = YES;
@@ -11590,7 +11692,7 @@ static int ds4_gpu_signal_batch_and_wait_event(const char *label) {
             return 0;
         }
 
-        g_batch_cb = ds4_gpu_new_command_buffer();
+        ds4_gpu_set_batch_cb(ds4_gpu_new_command_buffer());
         g_batch_has_work = NO;
         if (g_batch_cb) ds4_gpu_stream_expert_cache_note_batch_created();
         if (!g_batch_cb) {
@@ -11602,7 +11704,7 @@ static int ds4_gpu_signal_batch_and_wait_event(const char *label) {
     } else {
         ds4_gpu_close_batch_encoder();
         id<MTLCommandBuffer> cb = g_batch_cb;
-        g_batch_cb = nil;
+        ds4_gpu_set_batch_cb(nil);
         g_batch_has_work = NO;
         if (ds4_gpu_finish_command_buffer(cb, 1, label ? label : "selected-id readback") == 0) {
             return 0;
@@ -11619,7 +11721,7 @@ int ds4_gpu_end_commands(void) {
     ds4_gpu_parallel_ffn_reset_state(YES);
     ds4_gpu_close_batch_encoder();
     id<MTLCommandBuffer> cb = g_batch_cb;
-    g_batch_cb = nil;
+    ds4_gpu_set_batch_cb(nil);
     g_batch_has_work = NO;
     g_stream_expert_cache_owned_seq = g_stream_expert_cache_batch_seq;
     g_stream_expert_cache_batch_seq = 0;
@@ -11700,7 +11802,7 @@ void ds4_gpu_cleanup(void) {
             ds4_gpu_close_batch_encoder();
             [g_batch_cb commit];
             [g_batch_cb waitUntilCompleted];
-            g_batch_cb = nil;
+            ds4_gpu_set_batch_cb(nil);
             if (g_stream_expert_cache_batch_seq > g_stream_expert_cache_done_seq) {
                 g_stream_expert_cache_done_seq = g_stream_expert_cache_batch_seq;
             }

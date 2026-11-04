@@ -3,6 +3,41 @@
 Split out from `PLAN-DSML-REWIND.md`: the crash is unrelated to the rewind fixes, but
 found while monitoring them, and the rewind path is one of the exposed callers.
 
+### STATUS — safety net implemented and gated (2026-11-05 06:30, NOT yet deployed)
+`ds4_metal.m` now records which thread owns the live batch section and refuses to let a
+foreign thread join it:
+
+- `ds4_gpu_set_batch_cb()` replaces the 10 raw `g_batch_cb = ...` writes, so a site cannot
+  forget to stamp/clear ownership (nil clears it; the next opener owns it, and a foreign
+  close/recreate is logged rather than silent).
+- `ds4_gpu_command_buffer()` hands the shared buffer **only** to the owner. A foreign
+  caller gets an owned buffer - correct for independent work like the vision encode, whose
+  path already ends in `ds4_gpu_finish_command_buffer(cb, owned, ...)` - and the six sites
+  that test `if (!cb || owned) return 0` now fail cleanly instead of joining.
+- `ds4_gpu_tensor_copy()` (batch-only by contract) refuses foreign callers with a log.
+- The compute and blit factories carry a **log-only** tripwire for direct `g_batch_cb`
+  users (TP gate encode, expert-cache fill): behavior unchanged on purpose, so the field
+  names the remaining sites instead of us guessing across 112 references.
+
+Proof, same command before and after:
+
+    $ make test-metal-command-memory            # now includes `race`
+    race: rc=1  (child SIGABRT, driver assertion 1094)   BEFORE
+    race: rc=0  (child survived, 0 assertions, diverted+logged)  AFTER
+    default suite + row/session/batch/big TP modes: rc=0 both - owner path untouched
+    make test-session-state-gpu -> rc=0 (new target; closes the CI gap for the rewind gate)
+
+**This is a safety net, not the real fix.** It cannot make same-session GPU work correct:
+if a rewind/restore runs on the rewind thread while a decode holds an uncommitted batch, an
+owned buffer reads state that batch has not written yet. That class needs serialization or
+thread-local sections (option C above). Watch for the log line in `log/ds4.log`:
+`GPU batch section touched by a foreign thread at <site>` - each named site is a real
+cross-thread dependency to fix properly.
+
+Deploy state: binary built and tested at 06:26; **not running** - the engine was stopped
+cleanly at 06:22:09 (by the operator or the bank runbook, not by me) and I have not started
+it, because banking may be mid-flight.
+
 ## Symptom
 `ds4-server` aborted during a live benchmark run. Sentinel alerted 19 s later
 (`ALERT (engine not listening on 8001)`, 00:23:33). Crash report
