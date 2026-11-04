@@ -451,8 +451,32 @@ static id<MTLBlitCommandEncoder> ds4_gpu_blit_encoder(id<MTLCommandBuffer> cb, c
     return enc;
 }
 
+/* Retain-pool entries. Each records the thread that took it, so a finishing
+ * thread can reap its own work and nobody else's (see g_gpu_retain_mu below).
+ * ARC owns the references; the pool is the only thing keeping a CPU-filled
+ * buffer alive between the encode that filled it and the commit that consumes
+ * it, which is why releasing another thread's entry is a use-after-free, not a
+ * leak. */
+@interface DS4GpuTransient : NSObject {
+@public
+    id<MTLBuffer> buffer;
+    pthread_t owner;
+}
+@end
+@implementation DS4GpuTransient
+@end
+
+@interface DS4GpuPendingCB : NSObject {
+@public
+    id<MTLCommandBuffer> cb;
+    pthread_t owner;
+}
+@end
+@implementation DS4GpuPendingCB
+@end
+
 static void ds4_gpu_parallel_ffn_reset_state(BOOL close_encoder);
-static NSMutableArray<id<MTLCommandBuffer>> *g_pending_cbs;
+static NSMutableArray<DS4GpuPendingCB *> *g_pending_cbs;
 static id<MTLSharedEvent> g_selected_readback_event;
 static uint64_t g_selected_readback_event_value;
 static id<MTLComputePipelineState> g_set_rows_f32_i32_pipeline;
@@ -703,7 +727,12 @@ static uint32_t g_decode_pipeline_fast_cache_entries;
 static NSMutableDictionary<NSString *, id<MTLBuffer>> *g_model_buffer_cache;
 static NSMutableDictionary<NSString *, DS4MetalQ4ExpertTable *> *g_q4_expert_table_cache;
 static NSMutableDictionary<NSString *, id> *g_q4_expert_layer_residency_cache;
-static NSMutableArray<id<MTLBuffer>> *g_transient_buffers;
+static NSMutableArray<DS4GpuTransient *> *g_transient_buffers;
+/* Guards BOTH pools. The Metal batch section has no lock at all (see
+ * PLAN-VISION-BUFFER-RACE.md), but these two NSMutableArray instances were
+ * mutated from whatever thread happened to finish a command buffer - a plain
+ * data race on shared mutable state, independent of the encoder problem. */
+static pthread_mutex_t g_gpu_retain_mu = PTHREAD_MUTEX_INITIALIZER;
 static id g_model_residency_set;
 
 typedef struct {
@@ -1683,12 +1712,102 @@ static int ds4_gpu_stream_expert_cache_mark_entries_inflight(
 
 static int ds4_gpu_stream_expert_cache_wait_inflight(const char *label);
 
-static int ds4_gpu_wait_pending_command_buffers(const char *label) {
-    int ok = 1;
-    for (id<MTLCommandBuffer> pending in g_pending_cbs) {
-        if (!ds4_gpu_wait_command_buffer(pending, label)) ok = 0;
+static void ds4_gpu_retain_transient(id<MTLBuffer> buffer) {
+    if (!buffer) return;
+    DS4GpuTransient *entry = [DS4GpuTransient new];
+    entry->buffer = buffer;
+    entry->owner = pthread_self();
+    pthread_mutex_lock(&g_gpu_retain_mu);
+    if (!g_transient_buffers) g_transient_buffers = [NSMutableArray array];
+    [g_transient_buffers addObject:entry];   /* the pool's own insert - calling the
+                                              * public helper here recurses (the
+                                              * rewrite caught it as a warning) */
+    pthread_mutex_unlock(&g_gpu_retain_mu);
+}
+
+/* all_threads is for process-wide teardown/quiescence (cleanup, synchronize);
+ * every per-batch reap uses false so a thread cannot drop buffers another
+ * thread encoded but has not committed yet. */
+static void ds4_gpu_release_transient(BOOL all_threads) {
+    const pthread_t self_thread = pthread_self();
+    pthread_mutex_lock(&g_gpu_retain_mu);
+    for (NSInteger i = (NSInteger)g_transient_buffers.count - 1; i >= 0; i--) {
+        DS4GpuTransient *e = g_transient_buffers[(NSUInteger)i];
+        if (all_threads || pthread_equal(e->owner, self_thread))
+            [g_transient_buffers removeObjectAtIndex:(NSUInteger)i];
     }
-    [g_pending_cbs removeAllObjects];
+    pthread_mutex_unlock(&g_gpu_retain_mu);
+}
+
+static void ds4_gpu_retain_pending_cb(id<MTLCommandBuffer> cb) {
+    if (!cb) return;
+    DS4GpuPendingCB *entry = [DS4GpuPendingCB new];
+    entry->cb = cb;
+    entry->owner = pthread_self();
+    pthread_mutex_lock(&g_gpu_retain_mu);
+    if (!g_pending_cbs) g_pending_cbs = [NSMutableArray array];
+    [g_pending_cbs addObject:entry];         /* ditto: direct insert, not the helper */
+    pthread_mutex_unlock(&g_gpu_retain_mu);
+}
+
+/* Detach (not wait): waiting happens by the caller OUTSIDE the lock, because a
+ * GPU completion wait can take arbitrarily long and must never hold up another
+ * thread's buffer allocations. */
+static NSArray<DS4GpuPendingCB *> *ds4_gpu_take_pending_cbs(BOOL all_threads) {
+    const pthread_t self_thread = pthread_self();
+    NSMutableArray<DS4GpuPendingCB *> *taken = [NSMutableArray array];
+    pthread_mutex_lock(&g_gpu_retain_mu);
+    for (NSInteger i = (NSInteger)g_pending_cbs.count - 1; i >= 0; i--) {
+        DS4GpuPendingCB *e = g_pending_cbs[(NSUInteger)i];
+        if (all_threads || pthread_equal(e->owner, self_thread)) {
+            [taken addObject:e];
+            [g_pending_cbs removeObjectAtIndex:(NSUInteger)i];
+        }
+    }
+    pthread_mutex_unlock(&g_gpu_retain_mu);
+    return taken;
+}
+
+/* Read a still-pending command buffer without dropping the lock mid-scan: the
+ * TP queue-depth throttle needs the oldest entry of THIS thread. The wait itself
+ * is done by the caller, outside the lock. */
+static id<MTLCommandBuffer> ds4_gpu_peek_own_pending_cb(NSUInteger back) {
+    const pthread_t self_thread = pthread_self();
+    id<MTLCommandBuffer> found = nil;
+    NSUInteger seen = 0;
+    pthread_mutex_lock(&g_gpu_retain_mu);
+    for (NSUInteger i = 0; i < g_pending_cbs.count; i++) {
+        DS4GpuPendingCB *e = g_pending_cbs[i];
+        if (!pthread_equal(e->owner, self_thread)) continue;
+        if (seen++ != back) continue;
+        found = e->cb;
+        break;
+    }
+    pthread_mutex_unlock(&g_gpu_retain_mu);
+    return found;
+}
+
+static int ds4_gpu_wait_pending_command_buffers_scoped(const char *label,
+                                                       BOOL all_threads);
+static int ds4_gpu_wait_pending_command_buffers(const char *label) {
+    /* Same-thread semantics as before: today every caller that reaches here owns
+     * its own work, so scoping changes nothing single-threaded and removes the
+     * cross-thread drain for the two-thread case. */
+    return ds4_gpu_wait_pending_command_buffers_scoped(label, NO);
+}
+
+/* Process-wide quiescence: teardown and explicit synchronize must wait for
+ * work submitted by any thread, including the stream-expert service thread. */
+static int ds4_gpu_wait_all_pending_command_buffers(const char *label) {
+    return ds4_gpu_wait_pending_command_buffers_scoped(label, YES);
+}
+
+static int ds4_gpu_wait_pending_command_buffers_scoped(const char *label,
+                                                       BOOL all_threads) {
+    int ok = 1;
+    for (DS4GpuPendingCB *e in ds4_gpu_take_pending_cbs(all_threads)) {
+        if (!ds4_gpu_wait_command_buffer(e->cb, label)) ok = 0;
+    }
     ds4_gpu_stream_expert_cache_note_pending_completed();
     if (!ok) ds4_gpu_invalidate_zero_prefix_prefill_block_maps();
     return ok;
@@ -1803,11 +1922,17 @@ static int ds4_gpu_finish_command_buffer(id<MTLCommandBuffer> cb, int owned, con
     ds4_gpu_stream_expert_cache_note_owned_completed();
     if (getenv("DS4_METAL_CB_TIMES")) {
         uint64_t bytes = 0;
-        for (id<MTLBuffer> b in g_transient_buffers) bytes += [b length];
+        NSUInteger n_transient = 0;
+        pthread_mutex_lock(&g_gpu_retain_mu);
+        for (DS4GpuTransient *e in g_transient_buffers) {
+            bytes += [e->buffer length];
+            n_transient++;
+        }
+        pthread_mutex_unlock(&g_gpu_retain_mu);
         fprintf(stderr, "ds4: transient buffers this batch: %lu (%.1f MiB)\n",
-                (unsigned long)[g_transient_buffers count], bytes / 1048576.0);
+                (unsigned long)n_transient, bytes / 1048576.0);
     }
-    [g_transient_buffers removeAllObjects];
+    ds4_gpu_release_transient(NO);
     ds4_gpu_model_buffer_cache_maybe_evict(label);
     return ok;
 }
@@ -2613,7 +2738,7 @@ static id<MTLBuffer> ds4_gpu_new_transient_buffer(NSUInteger bytes, const char *
      * A local ObjC strong variable is not enough when the encoder function
      * returns before the caller commits the command buffer.
      */
-    [g_transient_buffers addObject:buffer];
+    ds4_gpu_retain_transient(buffer);
     return buffer;
 }
 
@@ -2682,8 +2807,8 @@ ds4_gpu_get_zero_prefix_prefill_mask_cache(
     /* A replaced entry may still be referenced by an uncommitted or in-flight
      * command buffer. Keep its resources alive with the other batch-scoped
      * buffers until command completion instead of mutating or releasing them. */
-    if (entry->mask) [g_transient_buffers addObject:entry->mask];
-    if (entry->blk) [g_transient_buffers addObject:entry->blk];
+    if (entry->mask) ds4_gpu_retain_transient(entry->mask);
+    if (entry->blk) ds4_gpu_retain_transient(entry->blk);
 
     entry->mask = mask;
     entry->blk = blk;
@@ -9775,7 +9900,7 @@ int ds4_gpu_flush_commands(void) {
     ds4_gpu_set_batch_cb(nil);
     g_batch_has_work = NO;
     [cb commit];
-    [g_pending_cbs addObject:cb];
+    ds4_gpu_retain_pending_cb(cb);
     ds4_gpu_stream_expert_cache_note_batch_committed();
 
     ds4_gpu_set_batch_cb(ds4_gpu_new_command_buffer());
@@ -9784,7 +9909,7 @@ int ds4_gpu_flush_commands(void) {
     ds4_gpu_timeline_attach(g_batch_cb);
     if (!g_batch_cb) {
         (void)ds4_gpu_wait_pending_command_buffers("command batch");
-        [g_transient_buffers removeAllObjects];
+        ds4_gpu_release_transient(NO);
         return 0;
     }
     return 1;
@@ -10406,11 +10531,11 @@ int ds4_gpu_commit_and_wait_selected_readback(uint64_t event_value, const char *
         const char *what = label ? label : "selected-id overlap";
         const BOOL signaled =
             [g_selected_readback_event waitUntilSignaledValue:event_value timeoutMS:60000];
-        [g_pending_cbs addObject:cb];
+        ds4_gpu_retain_pending_cb(cb);
         if (!signaled) {
             fprintf(stderr, "ds4: timeout waiting for Metal shared event in %s\n", what);
             (void)ds4_gpu_wait_pending_command_buffers(what);
-            [g_transient_buffers removeAllObjects];
+            ds4_gpu_release_transient(NO);
             return 0;
         }
         if (cb.status == MTLCommandBufferStatusError) {
@@ -10418,7 +10543,7 @@ int ds4_gpu_commit_and_wait_selected_readback(uint64_t event_value, const char *
                     what,
                     [[cb.error localizedDescription] UTF8String]);
             (void)ds4_gpu_wait_pending_command_buffers(what);
-            [g_transient_buffers removeAllObjects];
+            ds4_gpu_release_transient(NO);
             return 0;
         }
 
@@ -10427,7 +10552,7 @@ int ds4_gpu_commit_and_wait_selected_readback(uint64_t event_value, const char *
         if (g_batch_cb) ds4_gpu_stream_expert_cache_note_batch_created();
         if (!g_batch_cb) {
             (void)ds4_gpu_wait_pending_command_buffers(what);
-            [g_transient_buffers removeAllObjects];
+            ds4_gpu_release_transient(NO);
             return 0;
         }
         return 1;
@@ -11365,10 +11490,13 @@ int ds4_gpu_tp_gate_encode(uint32_t layer, uint32_t gate) {
             /* Keep the queue shallow: the firmware only chains what the driver
              * has handed it, and a deep backlog of many-encoder buffers is fed
              * from the CPU with scheduling latency. */
+            /* Depth throttle on this thread's own backlog: index from the end of
+             * the (now owner-tagged) pending list rather than the raw array, which
+             * may interleave other threads' entries. */
             if ([g_pending_cbs count] > DS4_TP_POLL_MAX_INFLIGHT) {
-                id<MTLCommandBuffer> old_cb =
-                    g_pending_cbs[[g_pending_cbs count] - 1u - DS4_TP_POLL_MAX_INFLIGHT];
-                [old_cb waitUntilCompleted];
+                id<MTLCommandBuffer> old_cb = ds4_gpu_peek_own_pending_cb(
+                    (NSUInteger)0);
+                if (old_cb) [old_cb waitUntilCompleted];
             }
             /* The flag is already published by the flushed buffer; stream the
              * next phase's weights into the cache while the exchange runs. */
@@ -11675,12 +11803,12 @@ static int ds4_gpu_signal_batch_and_wait_event(const char *label) {
         ds4_gpu_stream_expert_cache_note_batch_committed();
 
         const BOOL signaled = [g_selected_readback_event waitUntilSignaledValue:value timeoutMS:60000];
-        [g_pending_cbs addObject:cb];
+        ds4_gpu_retain_pending_cb(cb);
         if (!signaled) {
             fprintf(stderr, "ds4: timeout waiting for Metal shared event in %s\n",
                     label ? label : "selected-id readback");
             (void)ds4_gpu_wait_pending_command_buffers(label ? label : "selected-id readback");
-            [g_transient_buffers removeAllObjects];
+            ds4_gpu_release_transient(NO);
             return 0;
         }
         if (cb.status == MTLCommandBufferStatusError) {
@@ -11688,7 +11816,7 @@ static int ds4_gpu_signal_batch_and_wait_event(const char *label) {
                     label ? label : "selected-id readback",
                     [[cb.error localizedDescription] UTF8String]);
             (void)ds4_gpu_wait_pending_command_buffers(label ? label : "selected-id readback");
-            [g_transient_buffers removeAllObjects];
+            ds4_gpu_release_transient(NO);
             return 0;
         }
 
@@ -11697,7 +11825,7 @@ static int ds4_gpu_signal_batch_and_wait_event(const char *label) {
         if (g_batch_cb) ds4_gpu_stream_expert_cache_note_batch_created();
         if (!g_batch_cb) {
             (void)ds4_gpu_wait_pending_command_buffers(label ? label : "selected-id readback");
-            [g_transient_buffers removeAllObjects];
+            ds4_gpu_release_transient(NO);
             return 0;
         }
         return 1;
@@ -11777,8 +11905,8 @@ int ds4_gpu_synchronize(void) {
     if (g_batch_cb) return ds4_gpu_end_commands();
     ds4_gpu_parallel_ffn_reset_state(YES);
     if ([g_pending_cbs count] != 0) {
-        int ok = ds4_gpu_wait_pending_command_buffers("synchronize");
-        [g_transient_buffers removeAllObjects];
+        int ok = ds4_gpu_wait_all_pending_command_buffers("synchronize");
+        ds4_gpu_release_transient(YES);
         ds4_gpu_model_buffer_cache_maybe_evict("synchronize");
         return ok;
     }
@@ -11808,7 +11936,7 @@ void ds4_gpu_cleanup(void) {
             }
             g_stream_expert_cache_batch_seq = 0;
         }
-        (void)ds4_gpu_wait_pending_command_buffers("cleanup");
+        (void)ds4_gpu_wait_all_pending_command_buffers("cleanup");
         if (getenv("DS4_METAL_GPU_BUSY_PROFILE")) {
             const double wall = g_gpu_decode_wall_accum +
                 (g_gpu_decode_phase && g_gpu_decode_phase_t0 > 0.0
@@ -11833,7 +11961,7 @@ void ds4_gpu_cleanup(void) {
         ds4_gpu_label_profile_print("at cleanup");
         g_selected_readback_event = nil;
         g_selected_readback_event_value = 0;
-        [g_transient_buffers removeAllObjects];
+        ds4_gpu_release_transient(YES);
         ds4_gpu_stream_expert_pread_pool_shutdown();
         ds4_gpu_stream_expert_cache_clear_all(1);
         for (uint32_t layer = 0; layer < DS4_METAL_STREAM_EXPERT_CACHE_MAX_LAYER; layer++) {
@@ -13214,7 +13342,7 @@ static id<MTLBuffer> ds4_gpu_wrap_model_exact_range_impl(
             [g_model_buffer_cache setObject:buffer forKey:key];
             ds4_gpu_model_buffer_cache_note_insert(view_bytes);
         } else if (transient_view) {
-            [g_transient_buffers addObject:buffer];
+            ds4_gpu_retain_transient(buffer);
         }
     }
 
@@ -20891,7 +21019,7 @@ int ds4_gpu_router_project_select_fused_tensor(
             [g_dsv4_completion_cache setObject:completion
                                         forKey:completion_key];
         }
-        [g_transient_buffers addObject:completion];
+        ds4_gpu_retain_transient(completion);
         ds4_gpu_f16_matvec_args rargs =
             ds4_gpu_make_f16_mv_args(in_dim, n_expert);
         rargs.nr0 = 2;
@@ -28317,7 +28445,7 @@ static id<MTLBuffer> ds4_gpu_glm_prefill_mask_buffer(
     if (same_shape) return g_glm_flash_attn_mask_buffer;
 
     if (g_glm_flash_attn_mask_buffer) {
-        [g_transient_buffers addObject:g_glm_flash_attn_mask_buffer];
+        ds4_gpu_retain_transient(g_glm_flash_attn_mask_buffer);
         g_glm_flash_attn_mask_buffer = nil;
     }
     g_glm_flash_attn_mask_bytes = 0;
@@ -45500,7 +45628,7 @@ int ds4_gpu_hc_rms_norm_mix_split_norm_f16_tensor(
             g_dsv4_hc_producer_last_mix_offset = mix_offset;
             g_dsv4_hc_producer_last_completion = completion;
         }
-        [g_transient_buffers addObject:completion];
+        ds4_gpu_retain_transient(completion);
 
         ds4_gpu_hc_norm_mix_args mix_args = {
             .n = (int32_t)n,
@@ -45690,7 +45818,7 @@ int ds4_gpu_hc_expand_add_rms_norm_mix_split_norm_f16_tensor(
             g_dsv4_hc_producer_last_mix_offset = mix_offset;
             g_dsv4_hc_producer_last_completion = completion;
         }
-        [g_transient_buffers addObject:completion];
+        ds4_gpu_retain_transient(completion);
         /* Monotonic cross-threadgroup barrier counter for this mix tensor,
          * plus the host-side dispatch count that sets the target. */
         NSString *barrier_key = [NSString stringWithFormat:@"%p:%llu",
@@ -45711,7 +45839,7 @@ int ds4_gpu_hc_expand_add_rms_norm_mix_split_norm_f16_tensor(
             (uint32_t)[[g_dsv4_hc_barrier_gen objectForKey:barrier_key] unsignedIntValue] + 1u;
         [g_dsv4_hc_barrier_gen setObject:@(gen) forKey:barrier_key];
         const uint32_t barrier_target = 6u * gen;
-        [g_transient_buffers addObject:barrier];
+        ds4_gpu_retain_transient(barrier);
         ds4_gpu_hc_expand_args ex = {
             .n_embd = n_embd,
             .n_hc = n_hc,
