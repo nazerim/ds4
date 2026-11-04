@@ -126,9 +126,10 @@ Preemption under time slip: 4 early start -> 1b -> NEVER 0/2.5/3/2.
       (copy-based swap + dual shas; boot-bind restart rule; deployable
       form (now confcal2 engine form); sigmoid>=.45 semantics; judge on
       accept-LEN hist + engagement not AUC; q8_0 goldens green).
-- [ ] R   07:15 ENGINE RESTORE (see policy) + night report section below.
-      STATUS ~07:15: night report WRITTEN (below); RESTORE HELD - engine
-      never stopped (PID 60838), operator signals the restart window.
+- [x] R   07:15 ENGINE RESTORE (see policy) + night report section below.
+      DONE 10:07 (ahead-of-schedule operator signal via stall report):
+      swap-thrash stall -> restart-collect -> PID 73479 verified NEW-WAY
+      (log line 1 + ps flags + terminal banner). Full record in SLOTS:R.
 
 ## SLOTS: RESULTS (fill live)
 - S1a: /Volumes/FireCuda520/ds4-train/labels3c/conf_s1a_20261103.npz
@@ -270,13 +271,21 @@ Preemption under time slip: 4 early start -> 1b -> NEVER 0/2.5/3/2.
   k:count format (17 bins); decision rule v2 + coverage = DSpark
   ENGAGEMENT definition + keep-.45 conservative-gate watch. bench script
   E2E-parse-tested offline; NEVER executed against live engine tonight.
-- R: RESTORE HELD ~07:15 per operator (window open; engine never stopped
-  tonight, PID 60838 lstart Nov-3 20:32 proven via close-out review,
-  day-14 collection live). On signal: restart-collect -> log line 1
-  'DSpark support model detected' + ps flags (--dspark
-  --mtp-exact-sampling --dspark-confidence 0.45); NO log grep for
-  'exact: 1' (terminal-only banner), no probes. See PROGRESS LOG 07:1x
-  + NIGHT REPORT.
+- R: CLOSED 10:07 - operator-reported stall (swap thrash: 282s request,
+  avg 1.10 t/s vs chunk 33, swap 2.9 GB used; stack showed clean
+  __accept-wait, NOT hung) -> restart-collect. Old pid force-killed
+  (in-flight traffic); first boot raced kernel teardown of 60838 and
+  died on stale /tmp/ds4.lock flock; second start CLEAN (PID 73479).
+  Verified NEW-WAY: log line 1 'DSpark support model detected: …Vision-
+  Exp… missing=0 invalid=0' + ps flags --dspark --mtp-exact-sampling
+  --dspark-confidence (0.45) + terminal banner 'support: …, confidence:
+  0.45, exact: 1'. NO probes (operator directive - active jobs
+  reconnect themselves: 117k-ctx session re-prefilling ~400 t/s within
+  90s, kv cache stored lines flowing). Evidence: /tmp/ds4_stall_
+  evidence_20261104.log + /tmp/ds4_stall_sample_20261104.txt. Note for
+  the runbook: stop-with-inflight-traffic -> expect force-kill + stale-
+  lock race; if 'failed to start', just start-collect once more after
+  the old pid fully dies.
 
 ## DECISIONS
 ### D-S0 (FINAL 23:15 - amended per independent review; probe repro 241/241)
@@ -449,7 +458,23 @@ pos-unique. Probe A4 gap_accept column formulaic at d=0 (annotated in code).
   detected' + ps -o command flags --dspark --mtp-exact-sampling
   --dspark-confidence 0.45; still NO probes). MINOR: review-history
   wording now credits the S6 REWORK cycle. RESTORE-GO: restart-collect
-  safe as recorded; no repo state change needed.
+  safe as recorded; no repo state needed changing.
+- 10:0x R INCIDENT + RESTORE EXECUTED: operator flagged stall -> diag:
+  pid alive in __accept (stack sampled), one tool-call request took
+  282.17s (chunk ~33 t/s vs avg 1.10 = inter-chunk stalls), swap 2.9 GB
+  / free 18% -> SWAP THRASH, not hang; recovered pre-restart (the 282s
+  request completed 10:01:59). Evidence /tmp/ds4_stall_{evidence,sample}_
+  20261104.*. restart-collect: stop needed FORCE KILL (in-flight
+  traffic; runbook says stop only when quiet - operator signal took
+  precedence); first boot attempt FAILED on stale /tmp/ds4.lock flock
+  (kernel still tearing down 60838's tens-of-GiB mappings when the
+  script polled) -> second start-collect CLEAN: PID 73479, terminal
+  banner 'support: official, confidence: 0.45, exact: 1', log line 1
+  'DSpark support model detected … missing=0 invalid=0', ps flags
+  confirmed. NO probes per operator; traffic self-resumed (7 chat lines
+  + 117k-ctx session re-prefill ~400 t/s + kv cache stored within 90s).
+  LESSON: force-kill restart may need a SECOND start-collect if the
+  lock-holder teardown races readiness. Queue S0->R now ALL CLOSED.
 - 07:1x R: engine NEVER STOPPED tonight (preempt/seal path never
   triggered - all jobs fit the memory envelope; PID 60838 serving
   continuously, day-14 collection still live/UNSEALED). Restore held
