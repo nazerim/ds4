@@ -84678,6 +84678,21 @@ static int ds4_session_eval_dspark_speculative_stochastic(
             }
             s->checkpoint_valid = true;
             ds4_session_dspark_capture_note_checkpoint(s);
+            /* Arm the rewind window for the block just committed, exactly as the
+             * argmax driver's direct-partial path does (ds4.c:84122).  Without it
+             * this path leaves dspark_rewind_end at the 0 that the capture
+             * invalidation above wrote, so the window reports no-verify-window and
+             * the next mode-boundary resample re-prefills the whole kept context.
+             * Measured live: 234,683 tokens in ~671 s, three times in one evening,
+             * each time with prefixes/logits/start still intact and only this flag
+             * missing.  The stochastic driver is the sampled-temperature path, so
+             * any EXACT-sampling tool session hits it constantly.
+             * Gated on DS4_REWIND_RESUME deliberately: with that env unset the
+             * unconditional tail eval at the bottom of this function clears the
+             * window again, so this call would be a no-op in the rollback arm -
+             * stating the condition keeps that equivalence from depending on code
+             * order if the tail is ever reordered. */
+            if (dspark_rewind_window_tolerance()) dspark_rewind_keep(s);
         }
     }
 
