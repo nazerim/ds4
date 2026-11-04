@@ -634,3 +634,38 @@ engine-form head seeded from s4full recipe as NEXT research item.
   one log line at ds4.c:79546 naming WHY the extend failed (token
   index where prompt != checkpoint) - completes the picture without
   byte-forensics.
+- 14:5x ROOT CAUSE COMPLETE (user hypothesis EXACT+DSpark PROVEN,
+  engine-side, code-localized end to end):
+  1. EXACT sampling resamples at every sampling-mode-boundary crossing
+     inside a verified block (ds4_server.c:16723: next_greedy !=
+     greedy_tool_syntax -> resample=true) - fires constantly around
+     DSML tool payloads (greedy structure vs temperature-sampled args).
+  2. -> server_generation_rewind (ds4_server.c:16736, the exact stack
+     frame in ALL four live samples): fast path
+     ds4_session_rewind_speculative (ds4.c, snapshot restore) BAILS
+     when the boundary pos falls OUTSIDE the last verify window
+     (pos < d->verify_start) - long argument spans advance the window
+     past the block start; DSML turns hit this constantly.
+  3. Slow path: ds4_session_rewind + rebuild sync of the truncated
+     prefix -> ds4_session_sync_internal RESET branch (ds4.c:79564)
+     -> FULL GPU re-prefill of the entire kept context (the snap0
+     comment at ds4.c:58719 warns of exactly this cost).
+  LAW: stall_seconds ~= context_tokens / ~350 t/s: 83k->176s,
+  90k->2.5min, 107k->302s, 117k->282s (morning), 144k->742s,
+  344k-era pins -> 10-12min EVERY DSML turn. Same-pin-twice explained:
+  pin = session's first DSML commit position; oscillation = turns
+  whose boundary happened to stay inside the verify window (clean).
+  Disk-KV was NEVER the problem; my v3 client-drift and v2 eviction
+  theories both falsified by this. FIX MENU (owner's call):
+  (1) extend spec-snapshot coverage so rewind_speculative succeeds
+      across long DSML spans (verify windows per payload block);
+  (2) truncation-aware sync in ds4_session_sync_internal: when
+      prompt is a PREFIX of valid checkpoint, truncate instead of
+      reset+replay (precedent: ds4_session_glm_cap_dense_cache);
+  (3) observability NOW: log 'rewind slow-path: boundary pos=%d
+      verify_start=%u rewind_end=%u -> full rebuild of %d tokens' +
+      progress via the existing rebuild_progress plumbing (currently
+      silent for minutes -> false-outage reports all day).
+  ANSWER to 'do we need DSpark for collection?': YES (recs/parity ARE
+  DSpark cycle logs, EXACT = mirror-valid era) -> fix ds4 (2)+(3) is
+  the pragmatic pair; (1) is the real win.
