@@ -693,3 +693,21 @@ engine-form head seeded from s4full recipe as NEXT research item.
   (disk rehydrate full-hits; the instrument for THIS bug is
   DS4_DSPARK_STATS replay_fallbacks + the future M0 line). Tree clean
   at 2a88826 + this fold = handoff base for the PLAN agent.
+- 16:2x SECOND CORRECTION (the PLAN agent was RIGHT, my reviewer was
+  wrong): 'qwen4 branch' attribution re-verified against source and
+  RE-RECTIFIED. Truth: snap0/1/2 machinery is double-gated
+  (#ifdef DS4_HAS_QWEN4_GPU + ds4_session_is_qwen4 = QWEN4_EXP family -
+  the 8002 qwen profile) and the ds41 branch is DEEPSEEK41-gated; the
+  STALLING engine is DeepSeek-V4-Flash = DEEPSEEK4 family -> BOTH cited
+  mechanisms are DEAD for it. Live fast path = unconditional tail
+  ds4.c:89197 -> dspark_rewind_recent (89113, family-agnostic session
+  fields from dspark_rewind_begin 64178). AMPLIFIER newly identified:
+  DEEPSEEK4 has NO state_ok=true fallback in ds4_session_rewind (only
+  qwen4 + glm branches set it) -> every dspark_rewind_recent bail
+  (missing logits | end!=checkpoint.len | pos outside window | span>16
+  =DS4_DSPARK_MAX_BLOCK_SIZE 2914) becomes a FULL rebuild. M0 field
+  list corrected to the live generic set; fix option 1 re-scoped to
+  build a family-correct restore via the existing dspark_rewind_frontier
+  buffers. Spine (resample 16727 -> rewind 16736 -> RESET 79564 -> law)
+  NEVER affected. Lesson logged: reviewer folds need the same
+  adversarial check as builder claims - caught by the NEXT reader.

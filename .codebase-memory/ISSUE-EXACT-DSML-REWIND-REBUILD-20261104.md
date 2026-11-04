@@ -35,22 +35,25 @@ generate_job_inner (ds4_server.c:16736)          <- server_generation_rewind cal
    line constantly (structural tokens greedy, argument payloads
    temperature-sampled).
 2. -> `server_generation_rewind` (ds4_server.c:14666). Fast path =
-   `ds4_session_rewind_speculative` -> `dspark_rewind_recent` (ds4.c:
-   89113) restores from the last verify window, gated by: logits
-   present, `dspark_rewind_end == checkpoint.len`, `pos` inside
-   [rewind_start, rewind_end), window span <= DS4_DSPARK_MAX_BLOCK_SIZE.
-   For exact-position rewinds, the snap0/snap1/snap2 verify-snapshot
-   restore (ds4.c:89216-89243; own comment: "anything else resets the
-   recurrent state and the kept tokens are replayed on the next eval").
-   NOTE: `verify_start/rewind_end` belong to the DS4.1 (ds41) variant -
-   this session class is qwen4/Vision-Exp (M0 must log the
-   dspark_rewind_* set; classify which clause actually bails from live
-   M0 lines before sizing M2).
-3. Fast path BAILS when the rewind target is stale w.r.t. the last
-   verify window (`pos < dspark_rewind_start` when the window has
-   advanced past the block start, `dspark_rewind_end != checkpoint.len`,
-   or the window-cap) - long DSML argument spans make a bail plausible
-   as the NORM; which exact clause fires is UNPROVEN - M0 answers it.
+   `ds4_session_rewind_speculative`: ds41-family branch (verify_start/
+   rewind_end fields) and the snap0/1/2 block inside ds4_session_rewind
+   are BOTH model-family-gated (DEEPSEEK41 / QWEN4_EXP) and DEAD for
+   the stalling engine (DeepSeek-V4-Flash = DEEPSEEK4 family). The live
+   fast path for us is the unconditional tail (ds4.c:89197) ->
+   `dspark_rewind_recent` (ds4.c:89113), reading generic session
+   fields set by `dspark_rewind_begin` (ds4.c:64178) in the shared
+   DSpark verify: dspark_rewind_start/end, rewind_logits,
+   rewind_prefixes, rewind_frontier (a session-owned spec-frontier
+   snapshot buffer - candidate substrate for a family-correct fix).
+3. Fast path BAILS when any gate fails: logits missing;
+   `dspark_rewind_end != checkpoint.len` (anything committed since the
+   last verify); `pos` outside [start, end); window span >
+   DS4_DSPARK_MAX_BLOCK_SIZE=16 (ds4.c:2914). CRITICAL AMPLIFIER:
+   DEEPSEEK4 sessions have NO snapshot fallback after the bail -
+   ds4_session_rewind's state_ok=true paths are qwen4-only and
+   glm-only, so our family always truncates + invalidates ->
+   every single bail becomes a full rebuild. Which gate fires first is
+   UNPROVEN - M0 measures it.
 4. Slow path: `ds4_session_rewind(session,pos)` +
    `rebuild = ds4_session_common_prefix(...) != prefix.len` ->
    `server_session_sync(prefix)` -> prompt is SHORTER than the live
@@ -86,9 +89,12 @@ generate_job_inner (ds4_server.c:16736)          <- server_generation_rewind cal
    completes; DS4_DSPARK_STATS=1 shows replay_fallbacks incrementing.
 
 ## Fix options (ranked)
-1. REAL WIN: extend speculative-snapshot coverage so DSML spans keep a
-   restorable window (per-payload-block snapshots; costs GPU memory for
-   the snap sets across 43+ layers - needs sizing).
+1. REAL WIN: give DEEPSEEK4/Vision-Exp a family-correct snapshot restore -
+   the substrate already exists (`dspark_rewind_frontier`, session-owned
+   spec-frontier buffers surviving the verifier call per the comment at
+   ds4.c:64175-64176); wire a rewind-recover path through it (analogous
+   to the qwen4 snap0 set), or relax the dspark_rewind_recent gates that
+   M0 shows firing. Sizing needs M0's bail classification first.
 2. PRAGMATIC: truncation-aware sync: when the incoming prompt is a
    PREFIX of a still-valid checkpoint, truncate+resume
    (metal_graph_prefill_chunked_range from the surviving common prefix)

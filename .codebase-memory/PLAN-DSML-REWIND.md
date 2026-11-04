@@ -43,9 +43,13 @@ DS4_LOG_KVCACHE line: `resample=` (a second SILENT route exists -
 `kept < ntok && !resample` reaches the slow path without any mode
 boundary; do not miscount those as boundary bails), target pos,
 common-prefix depth vs prefix.len, rebuild token count + est seconds,
-AND the bail-reason field set: `dspark_rewind_start/end/logits/prefixes`,
-`checkpoint(.len|valid)`, snap_pos x3 (qwen4 live fields - NOT the
-ds41-only verify_start/rewind_end). No behavior change. Acceptance:
+AND the LIVE bail field set for the stalling DEEPSEEK4 family:
+`s->dspark_rewind_start/end`, `dspark_rewind_logits!=NULL`,
+`dspark_rewind_prefixes`, `checkpoint.len/valid` (all set/read in
+dspark_rewind_begin 64178 / dspark_rewind_recent 89113 -
+family-AGNOSTIC session fields). Do NOT instrument `verify_start/
+rewind_end` (ds41-only) or `snap_pos x3` (QWEN4_EXP-only) - both dead
+for the stalling engine. No behavior change. Acceptance:
 grep-able line appears in your private instance's log exactly at the
 stall. OPTIONALLY also wire the existing `rebuild_progress` SSE-keepalive
 pattern (ds4_server.c:15176+) IF the generation-rewind context permits
