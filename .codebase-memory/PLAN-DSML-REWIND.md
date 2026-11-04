@@ -507,3 +507,20 @@ incident at a time. Review recommends the systematic pass, in priority order:
    covers/predicates): either port the one-predicate rule or record the family
    divergence as a decision in the ADR — today it is an accident of line placement.
 5. Convert the property sweep into the standing suite (`make test-session-state`).
+
+## Watcher reliability (learned the hard way, 23:07-23:16)
+Three defects in a row, all in the thing that was supposed to tell me about the
+others.  `sh .codebase-memory/rewind_sentinel.sh [minutes] [logfile]` now encodes
+all three, with an end-to-end alert test in its header:
+1. `pgrep -f "port 8001"` matches the watcher's own command line: engine-death
+   detection was vacuous, and a verification run read the watcher's environment
+   and reported a bogus argv DIFF + MISSING env after the restart.  Use lsof.
+2. Baselines captured once go stale at every `ds4-server.sh` start, because it
+   rotates log/ds4.log: the new file's counts sit BELOW the old baseline, so the
+   watcher that alerted at 22:43 went silently deaf at 23:07.  Re-derive on shrink.
+3. `cnt() { grep -c ... || echo 0; }` captures "0\n0" (grep prints 0 and exits
+   nonzero on no match), so every `[ "$n" -gt "$base" ]` errored with "integer
+   expression expected" and evaluated false: all five signals unread.  Found
+   because the baseline echo printed doubled numbers - print what you compare on.
+Rule for this lane: a sentinel is a hypothesis until its alert path has been
+fired deliberately against it.
