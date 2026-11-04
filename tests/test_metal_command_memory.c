@@ -1,8 +1,12 @@
 /* Exercise the C entry points without an Objective-C caller's autorelease pool. */
 #include "ds4_gpu.h"
 #include <malloc/malloc.h>
+#include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #define CHECK(x) do { if (!(x)) { \
     fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #x); goto done; \
@@ -77,14 +81,129 @@ done:
     return rc;
 }
 
+/* Cross-thread use of the batched command buffer.
+ *
+ * Reproduction for the 00:23:14 ds4-server abort (see
+ * .codebase-memory/PLAN-VISION-BUFFER-RACE notes): the Metal layer caches ONE
+ * open encoder per batch section (g_batch_enc, ds4_metal.m:1296-1320) and hands
+ * the batch command buffer to any caller while a section is open
+ * (ds4_gpu_command_buffer(), 1285).  Nothing inside ds4_metal.m serializes
+ * encoding - g_tensor_mu only guards tensor bookkeeping - so the design assumes
+ * exactly one thread is in GPU code at a time.  The server does not enforce
+ * that: generation holds model_mu (ds4_server.c:17412) while multimodal request
+ * parsing encodes images under inference_mu (4002, inside
+ * request_tokenize_multimodal_prompt).  Two locks, one command buffer.
+ *
+ * The crash is the loud outcome; a second encoder coalescing onto a buffer that
+ * still has one open.  The quiet outcome is the other thread joining the live
+ * g_batch_enc and dispatching into someone else's batch.
+ *
+ * Thread A mirrors the decode path (spec_frontier_copy -> ds4_gpu_tensor_copy,
+ * and add_tensor leaving the batch encoder open across the section).  Thread B
+ * mirrors the vision encode (compute dispatch mid-section).  Run as a mode, not
+ * in the default suite: `./tests/test_metal_command_memory race`.  Returns 0
+ * only if the child survives; today it aborts, and that is reported as a defect
+ * rather than hidden.
+ */
+static pthread_t th_a, th_b;
+static ds4_gpu_tensor *race_a, *race_b;
+static volatile int race_iters = 3000;
+static volatile int race_stop = 0;
+
+static void *race_thread_decode(void *arg) {
+    (void)arg;
+    float in[256];
+    for (int i = 0; i < 256; i++) in[i] = (float)i;
+    for (int i = 0; i < race_iters && !race_stop; i++) {
+        if (!ds4_gpu_begin_commands()) { usleep(5); continue; }
+        (void)ds4_gpu_tensor_write(race_a, 0, in, sizeof(in));
+        (void)ds4_gpu_add_tensor(race_b, race_a, race_a, 256);   /* opens g_batch_enc */
+        (void)ds4_gpu_tensor_copy(race_b, 0, race_a, 0, sizeof(in));
+        /* No sleep here on purpose: the section is left open while thread B
+         * works, exactly as a long decode batch does. */
+        (void)ds4_gpu_end_commands();
+    }
+    return NULL;
+}
+
+static void *race_thread_vision(void *arg) {
+    (void)arg;
+    float in[256];
+    for (int i = 0; i < 256; i++) in[i] = (float)(2 * i);
+    for (int i = 0; i < race_iters && !race_stop; i++) {
+        /* The vision encode does not open a batch section: it just does GPU work,
+         * and ds4_gpu_command_buffer() hands it whoever else's buffer is live. */
+        (void)ds4_gpu_tensor_write(race_a, 512, in, sizeof(in));
+        (void)ds4_gpu_add_tensor(race_b, race_a, race_a, 256);
+        (void)ds4_gpu_tensor_copy(race_b, 1024, race_a, 512, sizeof(in));
+        usleep(2);
+    }
+    return NULL;
+}
+
+static int race_child_body(void) {
+    if (!ds4_gpu_init()) return 3;
+    race_a = ds4_gpu_tensor_alloc(4096);
+    race_b = ds4_gpu_tensor_alloc(4096);
+    if (!race_a || !race_b) return 3;
+    if (pthread_create(&th_a, NULL, race_thread_decode, NULL) != 0) return 3;
+    if (pthread_create(&th_b, NULL, race_thread_vision, NULL) != 0) return 3;
+    pthread_join(th_a, NULL);
+    race_stop = 1;
+    pthread_join(th_b, NULL);
+    if (ds4_gpu_commands_active()) ds4_gpu_end_commands();
+    fprintf(stderr, "race child: completed %d iterations per thread without abort\n",
+            race_iters);
+    ds4_gpu_cleanup();
+    return 0;
+}
+
+static int check_batch_cross_thread(const char *self) {
+    /* A forked-but-not-exec'd child cannot reach MTLCompilerService (observed:
+     * "Unable to reach MTLCompilerService ... Connection init failed"), so the
+     * reproduction runs as a real child process.  Its death is the finding: a
+     * driver assertion is a SIGABRT, so it cannot be reported from inside. */
+    fflush(stdout);
+    fflush(stderr);
+    pid_t child = fork();
+    if (child < 0) { perror("fork"); return 2; }
+    if (child == 0) {
+        setenv("DS4_RACE_CHILD", "1", 1);
+        char *av[] = {(char *)self, (char *)"race", NULL};
+        execvp(self, av);
+        perror("execvp");
+        _exit(2);
+    }
+    int status = 0;
+    if (waitpid(child, &status, 0) < 0) { perror("waitpid"); return 2; }
+    if (WIFSIGNALED(status)) {
+        fprintf(stderr,
+            "DEFECT REPRODUCED: child killed by signal %d (%s) - cross-thread use"
+            " of the batched command buffer is fatal.\n",
+            WTERMSIG(status), strsignal(WTERMSIG(status)));
+        return 1;
+    }
+    if (WEXITSTATUS(status) != 0) {
+        fprintf(stderr, "race child exited %d (setup failure, not a verdict)\n",
+                WEXITSTATUS(status));
+        return 2;
+    }
+    puts("two threads, one batched command buffer: child survived");
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc == 2) {
         const char *modes[] = {"row", "session", "batch", "big"};
         for (int i = 0; i < 4; i++)
             if (!strcmp(argv[1], modes[i])) return check_tp_memory(i);
+        if (!strcmp(argv[1], "race")) {
+            if (getenv("DS4_RACE_CHILD")) return race_child_body();
+            return check_batch_cross_thread(argv[0]);
+        }
     }
     if (argc != 1) {
-        fprintf(stderr, "usage: %s [row|session|batch|big]\n", argv[0]);
+        fprintf(stderr, "usage: %s [row|session|batch|big|race]\n", argv[0]);
         return 2;
     }
     ds4_gpu_tensor *a = NULL, *b = NULL;
