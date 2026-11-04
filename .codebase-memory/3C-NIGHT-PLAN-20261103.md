@@ -561,3 +561,16 @@ engine-form head seeded from s4full recipe as NEXT research item.
   mitigation: big tool-heavy sessions run clean WITHOUT --dspark (or
   without exact-sampling) until fixed. KV_SIZE=524288 stays (removes
   secondary pressure; cache untouched).
+- 14:0x REPRO PINNED LIVE (hypothesis -> fact): post-restart turn 1
+  rehydrated deep (M=16,910, prompt done 104.9s; turn 2 M=434, 2.9s -
+  rehydrate ~327k, evictions 0). Then ONE DSML_START tool-turn
+  (13:51:58 gen=450) collapsed the boundary again: next turn
+  re-prefilling 144,692 from **200,704 - identical pin as pre-restart
+  143,886-from-200,704** (13:45). => budget/restart irrelevant (as
+  expected - state is on disk); a DSpark draft-accept turn at a mode
+  boundary poisons prefix-key lineage from ~200,704 onward, EVERY
+  subsequent turn pays the rebuild. Session is permanently in the
+  pathological regime: stop using it for interactive work until ds4
+  fix; fresh sessions stay clean until their first big draft-accept
+  window. Silent phase has TWO shapes, both inside session_sync_internal:
+  unlogged pass at ds4.c:79564 + the logged chunked rebuild at 79489.
