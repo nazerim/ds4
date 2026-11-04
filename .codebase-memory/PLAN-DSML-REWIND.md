@@ -338,6 +338,25 @@ rare and every deep session pays it).
   *once a session falls out of the keeping paths they become per-turn*, so
   neither "never" nor "the norm" was right - it is bimodal per session.
 
+### Deployment state (20261104 20:1x)
+`DS4_REWIND_RESUME=1` is live on the engine (PID 9304 since 20:13:19, argv byte-
+identical to the pre-deploy boot, all 14 original env vars preserved, verified by
+process inspection). Plumbed into `ds4-server.sh` so a restart cannot silently
+lose it:
+- `arm_collect_env` (start-collect / restart-collect) exports it, defaulting to 1,
+  and prints `DS4_REWIND_RESUME=...` in the collect-arm banner beside the other
+  capture settings.
+- The DeepSeek profile branch of `start_server` also defaults it to 1, so a plain
+  `restart-vision-dspark` keeps the fix. It is deliberately not set for the Qwen
+  profile: only the DEEPSEEK4 driver arms this window (review confirmed the gate
+  is inert for qwen4/GLM/DS4.1), so it would be noise there.
+- Rollback is one variable, both arms verified:
+  `DS4_REWIND_RESUME=0 ./ds4-server.sh restart-collect` -> stays 0 through the
+  profile default, restoring the previous engine's decisions exactly.
+- TP note for any future multi-rank boot: leader and worker are separate
+  processes; they must get the same value or their windows diverge and every
+  mirrored rewind invalidates.
+
 ### Follow-ups this milestone surfaced (not done here)
 - `server_log()` has no `__attribute__((format(printf, 2, 3)))`, so `-Wall`
   never validates any `server_log` format string - the three new lines were

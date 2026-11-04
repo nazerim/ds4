@@ -162,6 +162,14 @@ COLLECT_TRAIN_DUMP="${DS4_TRAIN_DUMP:-/Volumes/FireCuda520/ds4-train/active}"
 COLLECT_PARITY_DIR="${DS4_TD_PARITY:-/Volumes/FireCuda520/ds4-parity/20261103-s3}"
 COLLECT_PARITY_MAX="${DS4_TD_PARITY_MAX:-200000}"
 COLLECT_EXACT="${DSPARK_EXACT:-1}"
+# Rewind-window fix (PLAN-DSML-REWIND).  A single-token decode used to destroy
+# the armed speculative-rewind window, and the exact-sampling resample replays
+# its boundary token through that same path - so every DSML turn after the first
+# mode-boundary crossing re-prefilled the whole context (measured: 601 s for
+# 212,546 tokens, twice in one turn, the second one discarded by a client
+# timeout).  1 keeps the window covering its block; 0 restores the previous
+# engine's decisions exactly.  TP leader and worker must be given the same value.
+COLLECT_REWIND_RESUME="${DS4_REWIND_RESUME:-1}"
 
 arm_collect_env() {
     if [ ! -d /Volumes/FireCuda520 ]; then
@@ -174,10 +182,12 @@ arm_collect_env() {
     DS4_TD_PARITY="$COLLECT_PARITY_DIR"
     DS4_TD_PARITY_MAX="$COLLECT_PARITY_MAX"
     DSPARK_EXACT="$COLLECT_EXACT"
-    export DS4_TRAIN_DUMP DS4_TD_PARITY DS4_TD_PARITY_MAX DSPARK_EXACT
+    DS4_REWIND_RESUME="$COLLECT_REWIND_RESUME"
+    export DS4_TRAIN_DUMP DS4_TD_PARITY DS4_TD_PARITY_MAX DSPARK_EXACT DS4_REWIND_RESUME
     echo "collect arm: TRAIN_DUMP=$DS4_TRAIN_DUMP"
     echo "             PARITY=$DS4_TD_PARITY (cap $DS4_TD_PARITY_MAX per process)"
     echo "             DSPARK_EXACT=$DSPARK_EXACT (0 = seed-batch era, mirror-invalid data)"
+    echo "             DS4_REWIND_RESUME=$DS4_REWIND_RESUME (0 = pre-fix rewind window, full rebuilds on DSML turns)"
     echo "verify after start: banner 'DSpark ... exact: $DSPARK_EXACT'; capture banners +"
     echo "  train_pid<N>.recs appear only on the first TOOL-BEARING request (dspark"
     echo "  drafts tool traffic only). Check: grep -E 'capture ACTIVE|draft dump"
@@ -334,6 +344,14 @@ start_server() {
       CTX="${CTX:-1048576}"
       TOKENS="${TOKENS:-384000}"
       PORT="${PORT:-8001}"
+      # Rewind-window fix (PLAN-DSML-REWIND): a single-token decode cleared the
+      # armed speculative-rewind window, and the exact-sampling resample decodes
+      # through that path, so DSML turns re-prefilled the whole kept context
+      # (measured 601 s for 212,546 tokens, twice in one turn).  Default ON for
+      # this family so a plain restart[-vision-dspark] keeps it; an inherited or
+      # explicit DS4_REWIND_RESUME=0 restores the previous behaviour exactly.
+      # The gate is inert for the Qwen/GLM/DS4.1 families, so it is not set there.
+      export DS4_REWIND_RESUME="${DS4_REWIND_RESUME:-1}"
       ;;
   esac
   local OTHER_PID_FILE
