@@ -230,7 +230,7 @@ def parse_stats(log_path, start_offset, allow_empty=False):
     return out
 
 
-def http_json_timed(port, path, body=None, timeout=1200):
+def http_json_timed(port, path, body=None, timeout=3600):
     """Returns (json, ttfb_s): time-to-first-byte approximates server work
     completion for non-streaming POSTs; used for first_token_s in BIG leg."""
     req = urllib.request.Request(

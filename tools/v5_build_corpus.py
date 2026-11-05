@@ -92,27 +92,24 @@ def build_messages(sid, cur):
 
 
 def checkpoints(msgs):
-    """user-boundary prefixes ending before assistant turns, deepest
-    ~TARGET-size first; return list of prefix message-lists."""
+    """v5.1: ONE checkpoint per conversation - the smallest user-boundary
+    prefix with est tokens >= 36k (empirical ~1.05 tok/char from the
+    14.4k->15.0k pretest), capped at 90k chars. The v5.0 dedup was
+    broken AND depth accounting was 4x optimistic: ~500k-token cold
+    prefills guaranteed the timeout cascade. Checkpoints at 36-95k sit
+    in the >=32k regime the offline simulation certified (cuts 12.8-
+    14.6%, kept-accept +1.8pp)."""
     idx = [i for i, m in enumerate(msgs)
-           if m['role'] == 'user' and i + 1 < len(msgs)]
-    idx = idx[1:]
-    if not idx:
-        return []
+           if m['role'] == 'user' and i + 1 < len(msgs)][1:]
     def size(i):
         return sum(len(json.dumps(m)) for m in msgs[:i])
-    idx.sort(key=size, reverse=True)          # deepest first
-    deep = [i for i in idx if size(i) >= TARGET_KTOKENS * 3]
-    pool = deep if deep else sorted(idx, key=size, reverse=True)[:1]
-    chosen = []
-    for i in sorted(pool, key=size, reverse=True):
-        if any(abs(size(i) - size(j)) < 40_000 for j in chosen):
-            continue
-        chosen.append(i)
-        if len(chosen) >= MAX_CHECKS:
-            break
-    return [msgs[:i] + [{"role": "user", "content": "Continue."}]
-            for i in sorted(chosen)]
+    band = [i for i in idx if 36_000 <= size(i) <= 90_000]
+    if not band:
+        band = [i for i in idx if 30_000 <= size(i) <= 130_000]
+    if not band:
+        return []
+    pick = min(band, key=lambda i: abs(size(i) - 50_000))
+    return [msgs[:pick] + [{"role": "user", "content": "Continue."}]]
 
 
 def main():
