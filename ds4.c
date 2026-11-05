@@ -40984,6 +40984,7 @@ static uint32_t ds41_carry_cap(uint32_t ctx) {
     X(shared_gate, DS4_N_FF_EXP) X(shared_up, DS4_N_FF_EXP) \
     X(shared_mid, DS4_N_FF_EXP) X(shared, DS4_N_EMBD) \
     X(engram_rows, DS4_ENGRAM_COLS * DS4_ENGRAM_DIM) \
+    X(engram_rows_second, DS4_TP_BATCH_MAX_ROWS * DS4_ENGRAM_COLS * DS4_ENGRAM_DIM) \
     X(engram_prefetch, (g->carry_cap ? g->carry_cap : g->prefill_cap) * DS4_ENGRAM_COLS * DS4_ENGRAM_DIM) \
     X(engram_kv, (DS4_N_HC + 1u) * DS4_N_EMBD) X(logits, DS4_N_VOCAB)
 
@@ -41004,12 +41005,17 @@ typedef struct {
     uint32_t (*prefill_ids)[2][DS4_ENGRAM_COLS];
     ds4_engram_table table[2];
     ds4_engram_reader *engram_reader;
+    /* Queued single-token decode points this at the table's own input buffer
+     * while encoding an Engram layer; prefill row copies leave it NULL and use
+     * the row's view instead. */
+    ds4_gpu_tensor *engram_input;
     float rows[2][DS4_ENGRAM_COLS * DS4_ENGRAM_DIM];
     ds4_gpu_tensor *window[40];
     ds4_gpu_tensor *compressed[4], *index_cache[4];
     ds4_gpu_tensor *previous_kv[4], *previous_score[4];
     ds4_gpu_tensor *verify_previous_kv[4], *verify_previous_score[4];
     bool verify_prefix;
+    bool score_selected_blocks;
     ds4_gpu_tensor *engram_q_norm[2], *engram_k_norm[2];
     ds41_prefill_row batch, *rows_view;
     ds41_prefill_row carry;
@@ -41541,12 +41547,26 @@ static bool ds41_attention_select_published(ds41_gpu_graph *g, const ds4_model *
         if (!ds41_matmul(g->index_q, m, l->indexer_attn_q_b, g->qr, true) ||
             !ds41_rope(g->index_q, DS4_N_INDEXER_HEAD, 128, il, pos, false) ||
             !ds4_gpu_dsv41_quantize(g->index_q, 128, DS4_N_INDEXER_HEAD, DS4_V41_FP4_E8M0) ||
-            !ds41_matmul(g->index_weights, m, l->indexer_proj, g->norm, true) ||
+            !ds41_matmul(g->index_weights, m, l->indexer_proj, g->norm, true)) return false;
 #ifdef __APPLE__
-            !ds4_gpu_glm_indexer_score_one_tensor(g->index_scores, g->index_q, g->index_weights,
+        if (il > 20 && n_comp > 2048u * 8u && g->score_selected_blocks) {
+            if (!ds4_gpu_dsv41_indexer_score_blocks(g->index_scores, g->index_q, g->index_weights,
+                    g->index_cache[owner], g->block_selected, n_comp, 2048u)) return false;
+        } else if (!ds4_gpu_glm_indexer_score_one_tensor(g->index_scores, g->index_q, g->index_weights,
                 g->index_cache[owner], n_comp, DS4_N_INDEXER_HEAD, 128, 1.0f / 64.0f, false)) return false;
 #else
-            !ds4_gpu_dsv41_indexer_scores_batch(g->index_scores, g->index_q, g->index_weights,
+#ifndef DS4_ROCM_BUILD
+        /* The later reindex layers can skip rejected eight-key blocks.
+         * Keep the original full-width slots and the existing top-k order. */
+        if (il > 20u && n_comp > 2048u * 8u && ds4_gpu_device_is_spark() &&
+            !getenv("DS4_CUDA_DISABLE_V41_MASKED_SCORE")) {
+            return ds4_gpu_dsv41_indexer_scores_masked_one(g->index_scores, g->index_q,
+                g->index_weights, g->index_cache[owner], g->block_mask, n_comp) &&
+                ds4_gpu_indexer_topk_tensor(g->selected_comp, g->index_scores, n_comp, 1,
+                                            DS4_N_INDEXER_TOP_K);
+        }
+#endif
+        if (!ds4_gpu_dsv41_indexer_scores_batch(g->index_scores, g->index_q, g->index_weights,
                 g->index_cache[owner], n_comp, 1, pos, ratio)) return false;
 #endif
     }
@@ -41737,7 +41757,8 @@ static bool ds41_graph_before_attention(ds41_gpu_graph *g, const ds4_model *m,
                                        const ds4_layer_weights *l, uint32_t il) {
     if (ds41_engram_layer(il) && !ds41_image_at(g, g->pos)) {
         const uint32_t i = il == 1 ? 0 : 1;
-        if (!ds41_matmul(g->engram_kv, m, l->engram_kv, g->engram_rows, true) ||
+        ds4_gpu_tensor *input = g->engram_input ? g->engram_input : g->engram_rows;
+        if (!ds41_matmul(g->engram_kv, m, l->engram_kv, input, true) ||
             !ds4_gpu_dsv41_engram_add(g->residual, g->engram_kv,
                 g->engram_q_norm[i], g->engram_k_norm[i], NULL, DS4_N_EMBD, 1, DS4_RMS_EPS))
             return false;
@@ -42192,16 +42213,48 @@ static DS4_MAYBE_UNUSED bool ds41_graph_step(ds41_gpu_graph *g, const ds4_model 
      * layer mapped, using the same admitted reserve as layer-major prefill. */
     const bool layer_resident = g->streaming && g->quality;
     if (layer_resident && !ds4_gpu_end_commands()) ok = false;
-    const bool queue_layers = g->tp_world == 2 && !g->imatrix &&
-        !getenv("DS4_METAL_DISABLE_V41_TP_DECODE_QUEUE");
+    /* Single-host decode would pay a full wait per layer. Committing each
+     * layer's command buffer without waiting keeps the GPU queue fed while
+     * the CPU encodes the next layer; the final-layer drain bounds the queue
+     * and preserves the buffer hazards. The disable switch exists for A/B
+     * measurements only. */
+#ifdef __APPLE__
+    const bool queue_single = g->tp_world != 2 && !g->streaming && !g->imatrix &&
+        getenv("DS4_METAL_DISABLE_V41_DECODE_PIPELINE") == NULL;
+#else
+    const bool queue_single = false;
+#endif
+    /* Streaming must synchronize to obtain routed expert IDs before cache
+     * replacement. Those waits already bound the work submitted per layer. */
+#ifdef __APPLE__
+    const bool queue_stream = g->tp_world == 1 && g->streaming && !g->quality &&
+        !g->imatrix && !getenv("DS4_METAL_DISABLE_V41_STREAM_DECODE_QUEUE");
+#else
+    const bool queue_stream = false;
+#endif
+    const bool queue_layers = queue_stream || ((g->tp_world == 2 || queue_single) && !g->imatrix &&
+        !getenv("DS4_METAL_DISABLE_V41_TP_DECODE_QUEUE"));
+#ifdef __APPLE__
+    /* Only a single-token layer sweep owns layer 20's block IDs until the
+     * last reindex. Interleaved prefill and verifier rows share that scratch. */
+    g->score_selected_blocks = g->tp_world == 1 &&
+        !getenv("DS4_V41_DISABLE_CANDIDATE_SCORING") &&
+        !getenv("DS4_METAL_DISABLE_V41_SCORE_ROWS4");
+#endif
     for (uint32_t il = 0; ok && il < DS4_N_LAYER; il++) {
         const ds4_layer_weights *l = &w->layer[il];
         if (layer_resident)
             ok = metal_graph_stream_map_layer(m, w, il) && ds4_gpu_begin_commands();
         if (ok && ds41_engram_layer(il)) {
             const uint32_t i = il == 1 ? 0 : 1;
+            /* Each Engram table owns its input buffer. The second table's
+             * upload no longer overwrites storage that the first table's
+             * queued layers may still be reading, so the queue can run
+             * through layer 13 without a drain. */
+            ds4_gpu_tensor *input = i == 0 ? g->engram_rows : g->engram_rows_second;
+            g->engram_input = input;
             ok = (!overlap_engram || ds4_engram_reader_wait(g->engram_reader, i)) &&
-                ds4_gpu_tensor_write(g->engram_rows, 0, g->rows[i], sizeof(g->rows[i]));
+                ds4_gpu_tensor_write(input, 0, g->rows[i], sizeof(g->rows[i]));
         }
         if (ok) {
 #if !defined(__APPLE__) && !defined(DS4_ROCM_BUILD)
@@ -42210,11 +42263,20 @@ static DS4_MAYBE_UNUSED bool ds41_graph_step(ds41_gpu_graph *g, const ds4_model 
             ok = ds41_graph_layer(g, m, l, il, token);
 #endif
         }
-        /* TP gates already submit ordered, bounded command buffers. Drain
-         * before overwriting the first Engram table's shared input at layer
-         * 14, and before publishing the completed token to the CPU. */
-        const bool drain = !queue_layers || il == 13 || il + 1u == DS4_N_LAYER;
-        if (drain && !ds4_gpu_end_commands()) ok = false;
+        /* Clear even on failure: a retry that falls back to row prefill must
+         * not inherit this decode-only pointer through row = *g. */
+        g->engram_input = NULL;
+        /* TP keeps its layer-13 drain: that path cannot be exercised on this
+         * machine, so it retains the scheduling it was validated with. The
+         * single-host queue only needs the final drain now that the Engram
+         * tables have separate input buffers. */
+        const bool drain = !queue_layers || (il == 13 && g->tp_world == 2) ||
+            il + 1u == DS4_N_LAYER;
+        if (drain) {
+            if (!ds4_gpu_end_commands()) ok = false;
+        } else if (queue_single && !ds4_gpu_flush_commands()) {
+            ok = false;
+        }
         if (g->tp_world == 2 && ds4_gpu_tp_failed()) ok = false;
         if (ok && g->imatrix)
             ok = imatrix_collect_tensor_batch(g->imatrix, g->norm, g->mid,
@@ -42223,6 +42285,7 @@ static DS4_MAYBE_UNUSED bool ds41_graph_step(ds41_gpu_graph *g, const ds4_model 
         if (ok && drain && !layer_resident && il + 1u < DS4_N_LAYER)
             ok = ds4_gpu_begin_commands() != 0;
     }
+    g->score_selected_blocks = false;
     if (ds4_gpu_commands_active() && !ds4_gpu_end_commands()) ok = false;
     if (layer_resident && !metal_graph_stream_map_decode_static_all(m, w)) ok = false;
     if (g->tp_world == 2 && ds4_gpu_tp_failed()) ok = false;
@@ -42313,13 +42376,17 @@ static uint32_t ds41_prefill_count(const ds41_gpu_graph *g, uint32_t remaining) 
         minimum = 1024u;
 #endif
     if (remaining < minimum) return 1;
-#if !defined(__APPLE__) && !defined(DS4_ROCM_BUILD)
+#if !defined(DS4_ROCM_BUILD)
     /* Keep a medium SSD append in one layer sweep without changing its
      * 2048-row arithmetic partitions. Tiny tails retain the exact row path. */
     if (g->streaming && g->tp_world == 1 && g->prefill_cap >= 2048u &&
         g->carry_cap >= remaining &&
         remaining > 2048u && remaining < 8192u && remaining % 2048u >= 256u &&
+#ifdef __APPLE__
+        !getenv("DS4_METAL_DISABLE_V41_MEDIUM_SWEEP") &&
+#else
         !getenv("DS4_CUDA_DISABLE_SSD_MEDIUM_SWEEP") &&
+#endif
         !getenv("DS4_METAL_DISABLE_V41_WIDE_PREFILL")) return remaining;
 #endif
     if (g->carry_cap && remaining >= 4096u &&
@@ -42648,8 +42715,11 @@ static bool ds41_graph_prefill_sweep(ds41_gpu_graph *g, const ds4_model *m,
             if (ok) ok = metal_graph_stream_map_layer(m, w, il);
 #endif
 #if !defined(__APPLE__) && !defined(DS4_ROCM_BUILD)
-            /* Below 2K, unused expert reads outweigh the overlap. */
-            if (ok && total_count >= 2048u) {
+            /* File-ordered selected reads are the default. Whole-layer
+             * prefetch trades unused weight reads for overlap; retain it as
+             * an explicit option for other storage/workload combinations. */
+            if (ok && total_count >= 2048u &&
+                getenv("DS4_CUDA_ENABLE_SSD_PREFETCH") != NULL) {
                 const ds4_gpu_stream_expert_table current = graph_stream_expert_table_make(m,
                     &w->layer[il], il,
                     routed_expert_row_bytes(w->layer[il].ffn_gate_exps) * DS4_N_FF_EXP,
@@ -42966,6 +43036,19 @@ static DS4_MAYBE_UNUSED bool ds41_graph_step_batch(ds41_gpu_graph *const *graphs
     if (!g) return false;
     const uint32_t rows = (uint32_t)count;
     const bool prefill_only = prefill_rows == rows && !g->verify_prefix;
+    /* Overlap CPU layer encoding with GPU execution for single-host batched
+     * decode. Each Engram table owns its row buffer, so the queue can run
+     * through layer 13 on single-host; TP keeps its layer-13 drain. SSD
+     * streaming is excluded from the per-layer flush because its cache is
+     * reconfigured per layer; ds4_gpu_routed_moe_batch_tensor already ends
+     * the command batch before that reconfiguration, so it does not need the
+     * layer-13 drain. Disable switch for A/B only. */
+#ifdef __APPLE__
+    const bool batch_queue = g->tp_world != 2 && !g->streaming &&
+        getenv("DS4_METAL_DISABLE_V41_BATCH_DECODE_PIPELINE") == NULL;
+#else
+    const bool batch_queue = false;
+#endif
     const bool shared_owner = g->tp_world == 2 &&
         !getenv("DS4_METAL_DISABLE_V41_TP_SHARED_OWNER");
     ds41_prefill_row active = {0};
@@ -42983,6 +43066,12 @@ static DS4_MAYBE_UNUSED bool ds41_graph_step_batch(ds41_gpu_graph *const *graphs
         (uint64_t)rows * (width) * sizeof(float))) != NULL;
     DS41_PREFILL_ROWS(DS41_SESSION_VIEW)
 #undef DS41_SESSION_VIEW
+    /* The second Engram table gets its own row buffer, as in single-token
+     * decode.  DS41_SCRATCH sizes this for DS4_TP_BATCH_MAX_ROWS rows; the
+     * prefill-capacity row storage would otherwise double every session's
+     * batch workspace. */
+    const uint64_t engram_row_bytes =
+        (uint64_t)DS4_ENGRAM_COLS * DS4_ENGRAM_DIM * sizeof(float);
     const uint64_t head_bytes = (uint64_t)(DS4_N_HEAD / g->tp_world) * DS4_N_HEAD_DIM * sizeof(float);
     for (int i = 0; ok && i < count; i++) {
         queries[i] = ds4_gpu_tensor_view(g->batch.q, (uint64_t)i * head_bytes, head_bytes);
@@ -43013,7 +43102,11 @@ static DS4_MAYBE_UNUSED bool ds41_graph_step_batch(ds41_gpu_graph *const *graphs
             const unsigned table = il == 1 ? 0 : 1;
             for (int i = 0; ok && i < count; i++) {
                 ds41_gpu_graph *s = graphs[i];
-                ok = ds4_gpu_tensor_write(g->rows_view[i].engram_rows, 0,
+                ds4_gpu_tensor *dst = table == 0 ? g->rows_view[i].engram_rows :
+                                                   g->engram_rows_second;
+                const uint64_t dst_off = table == 0 ? 0 :
+                    (uint64_t)i * engram_row_bytes;
+                ok = ds4_gpu_tensor_write(dst, dst_off,
                     engram && (uint32_t)i < prefill_rows ? engram[i][table] : s->rows[table],
                     sizeof(s->rows[table]));
             }
@@ -43021,8 +43114,13 @@ static DS4_MAYBE_UNUSED bool ds41_graph_step_batch(ds41_gpu_graph *const *graphs
         for (int i = 0; ok && i < count; i++)
             ok = ds41_dspark_capture(graphs[i]->dspark, il, positions[i],
                 g->rows_view[i].residual, 1);
-        if (ok) ok = ds41_before_attention_batch(g, &active, model, l, il, rows) &&
-            ds41_attention_project_batch(g, model, l, rows);
+        if (ok) {
+            ds4_gpu_tensor *saved_engram = active.engram_rows;
+            if (il == 14) active.engram_rows = g->engram_rows_second;
+            ok = ds41_before_attention_batch(g, &active, model, l, il, rows);
+            active.engram_rows = saved_engram;
+            if (ok) ok = ds41_attention_project_batch(g, model, l, rows);
+        }
         bool batch_output = false;
 #ifndef DS4_ROCM_BUILD
         batch_output =
@@ -43060,8 +43158,12 @@ static DS4_MAYBE_UNUSED bool ds41_graph_step_batch(ds41_gpu_graph *const *graphs
             ds4_gpu_hc_expand_split_tensor(active.residual, active.block, active.after_attn,
                 active.ffn_split, DS4_N_EMBD, DS4_N_HC) &&
             ds4_gpu_dsv41_quantize(active.residual, DS4_N_EMBD * DS4_N_HC, rows, DS4_V41_BF16);
-        /* The second Engram upload reuses the first one's input storage. */
-        if (ok && il == 13) ok = ds4_gpu_end_commands() && ds4_gpu_begin_commands();
+        /* TP keeps its layer-13 drain.  Single-host batches use separate
+         * Engram row buffers, so the queue can continue without a drain. */
+        if (ok && il == 13 && g->tp_world == 2)
+            ok = ds4_gpu_end_commands() && ds4_gpu_begin_commands();
+        else if (ok && batch_queue && il + 1u < DS4_N_LAYER &&
+                 !ds4_gpu_flush_commands()) ok = false;
     }
     const uint64_t logits_bytes = (uint64_t)DS4_N_VOCAB * sizeof(float) /
                                   (g->tp_logits_half ? 2u : 1u);
@@ -60208,9 +60310,56 @@ static bool qwen4_graph_moe(ds4_qwen4_gpu_graph *g, const ds4_model *m, const ds
     return ok;
 }
 
-/* host side: embedding rows tiled into R */
+/* Only the next chunk's n-gram disk reads run on this worker.  It owns its
+ * output and a copy of the PLE history; GPU writes and live graph state stay
+ * on the session thread. */
+typedef struct {
+    pthread_t thread;
+    const ds4_model *model;
+    const int *tokens;
+    uint32_t count;
+    int ple_prev[DS4_MAX_PLE_NGRAM];
+    float *rows;
+    bool ok;
+    int error;
+    double read_sec;
+} qwen4_ple_prefetch;
+
+static void *qwen4_ple_prefetch_run(void *context) {
+    qwen4_ple_prefetch *p = context;
+    const double started = now_sec();
+    uint32_t ids[256 * DS4_MAX_PLE_HEADS];
+    for (uint32_t t = 0; t < p->count; t++) {
+        qwen4_ple_step(p->tokens[t], p->ple_prev, ids + (t % 256u) * DS4_N_PLE_HEADS);
+        if (t % 256u == 255u || t + 1u == p->count) {
+            const uint32_t start = t / 256u * 256u;
+            if (!qwen4_ngram_read(p->model, ids, (t - start + 1u) * DS4_N_PLE_HEADS,
+                                  p->rows + (uint64_t)start * DS4_N_EMBD)) {
+                p->error = errno;
+                p->read_sec = now_sec() - started;
+                return NULL;
+            }
+        }
+    }
+    p->ok = true;
+    p->read_sec = now_sec() - started;
+    return NULL;
+}
+
+/* host side: embedding rows tiled into R.  The PLE n-gram gather lives in
+ * qwen4_graph_stage_ple() so its disk reads overlap the GPU layers before it,
+ * and thread-prefetched rows (upstream 95976d7-era PLE prefetch worker)
+ * arrive there through forward_tokens_impl's ple_prefetched parameter. */
 static bool qwen4_graph_stage_inputs(ds4_qwen4_gpu_graph *g, const ds4_model *m, const ds4_weights *w,
                                      const int *tokens, uint32_t T) {
+    /* The prefetch path stages inputs before forward_tokens_impl, so validate
+     * the whole chunk before reading any embedding or changing PLE history. */
+    for (uint32_t t = 0; t < T; t++) {
+        if (tokens[t] < 0 || tokens[t] >= (int)DS4_N_VOCAB) {
+            fprintf(stderr, "ds4: Qwen3.8 token id %d is outside the vocabulary\n", tokens[t]);
+            return false;
+        }
+    }
     const uint32_t E = DS4_N_EMBD, hc = DS4_N_HC, hc_dim = E * hc;
     float *row = g->host_row;
     const ds4_vision_span *spans = g->vis_spans;
@@ -60234,7 +60383,8 @@ static bool qwen4_graph_stage_inputs(ds4_qwen4_gpu_graph *g, const ds4_model *m,
 /* host side: the PLE n-gram gather.  Only layer DS4_N_PLE_LAYER reads it, so
  * the caller commits the layers before it first and the GPU runs them while
  * the rows come from disk. */
-static bool qwen4_graph_stage_ple(ds4_qwen4_gpu_graph *g, const ds4_model *m, const int *tokens, uint32_t T) {
+static bool qwen4_graph_stage_ple(ds4_qwen4_gpu_graph *g, const ds4_model *m, const int *tokens, uint32_t T,
+                                  const float *prefetched_ple) {
     const uint32_t E = DS4_N_EMBD;
     float *row = g->host_row;
     uint32_t ids[256 * DS4_MAX_PLE_HEADS];
@@ -60248,7 +60398,7 @@ static bool qwen4_graph_stage_ple(ds4_qwen4_gpu_graph *g, const ds4_model *m, co
             memcpy(g->snap2_ple_prev, g->ple_prev, sizeof(g->snap2_ple_prev));
             g->snap2_pos = g->pos + 2u;
         }
-        if (t % 256u == 255u || t + 1 == T) {
+        if (!prefetched_ple && (t % 256u == 255u || t + 1 == T)) {
             const uint32_t start = t / 256u * 256u;
             if (!qwen4_ngram_read(m, ids, (t-start+1u) * DS4_N_PLE_HEADS,
                                   row + (uint64_t)start * E)) {
@@ -60257,7 +60407,8 @@ static bool qwen4_graph_stage_ple(ds4_qwen4_gpu_graph *g, const ds4_model *m, co
             }
         }
     }
-    return ds4_gpu_tensor_write(g->ple_emb, 0, row, (uint64_t)T * E * sizeof(float)) != 0;
+    return ds4_gpu_tensor_write(g->ple_emb, 0, prefetched_ple ? prefetched_ple : row,
+                                (uint64_t)T * E * sizeof(float)) != 0;
 }
 
 /* Forward T tokens at g->pos..; logits (optional) receive the last token's
@@ -60328,16 +60479,12 @@ static void qwen4_rcab_stage(const ds4_qwen4_gpu_graph *g) {
 #endif
 
 
-static bool qwen4_graph_forward_tokens(ds4_qwen4_gpu_graph *g, const ds4_model *m, const ds4_weights *w,
-                                       const int *tokens, uint32_t T, float *logits_out, bool all_rows) {
+static bool qwen4_graph_forward_tokens_impl(ds4_qwen4_gpu_graph *g, const ds4_model *m, const ds4_weights *w,
+                                            const int *tokens, uint32_t T, float *logits_out, bool all_rows,
+                                            bool inputs_staged, double stage_start,
+                                            const float *ple_prefetched) {
     if (!g || T == 0 || T > g->cap_tokens || g->pos + T > g->ctx_cap) return false;
     if (all_rows && T > g->n_logit_rows) return false;
-    for (uint32_t t = 0; t < T; t++) {
-        if (tokens[t] < 0 || tokens[t] >= (int)DS4_N_VOCAB) {
-            fprintf(stderr, "ds4: Qwen3.8 token id %d is outside the vocabulary\n", tokens[t]);
-            return false;
-        }
-    }
     const uint32_t pos0 = g->pos;
     const uint32_t n_trunk = DS4_N_LAYER - DS4_N_NEXTN_PREDICT;
     const uint32_t hc_dim = DS4_N_EMBD * DS4_N_HC;
@@ -60357,8 +60504,8 @@ static bool qwen4_graph_forward_tokens(ds4_qwen4_gpu_graph *g, const ds4_model *
             flush_layer = (uint32_t)layer;
         }
     }
-    const double t0 = timing ? now_sec() : 0.0;
-    if (!qwen4_graph_stage_inputs(g, m, w, tokens, T)) return false;
+    const double t0 = timing ? (inputs_staged ? stage_start : now_sec()) : 0.0;
+    if (!inputs_staged && !qwen4_graph_stage_inputs(g, m, w, tokens, T)) return false;
     const double t1 = timing ? now_sec() : 0.0;
     if (!glm_graph_begin_commands_if_needed()) return false;
     bool ok = true;
@@ -60380,7 +60527,7 @@ static bool qwen4_graph_forward_tokens(ds4_qwen4_gpu_graph *g, const ds4_model *
         const ds4_layer_weights *l = &w->layer[il];
         if (ds4_qwen4_layer_is_ple(il)) {
             if (il > 0u) ok = ds4_gpu_flush_commands() != 0;
-            ok = ok && qwen4_graph_stage_ple(g, m, tokens, T) &&
+            ok = ok && qwen4_graph_stage_ple(g, m, tokens, T, ple_prefetched) &&
                  qwen4_gemv(g->ple_key, m, l->ple_key, g->ple_emb, T) &&
                  qwen4_gemv(g->ple_val, m, l->ple_value, g->ple_emb, T) &&
                  ds4_gpu_qwen4_ple_gate_tensor(g->ple_gated, g->ple_normed, g->R, g->ple_key, g->ple_val,
@@ -60504,6 +60651,11 @@ static bool qwen4_graph_forward_tokens(ds4_qwen4_gpu_graph *g, const ds4_model *
         g->snap_after_second = false;
     }
     return ok;
+}
+
+static bool qwen4_graph_forward_tokens(ds4_qwen4_gpu_graph *g, const ds4_model *m, const ds4_weights *w,
+                                       const int *tokens, uint32_t T, float *logits_out, bool all_rows) {
+    return qwen4_graph_forward_tokens_impl(g, m, w, tokens, T, logits_out, all_rows, false, 0.0, NULL);
 }
 
 static bool qwen4_graph_forward_token(ds4_qwen4_gpu_graph *g, const ds4_model *m, const ds4_weights *w,
@@ -78623,6 +78775,18 @@ static int ds4_session_sync_internal(ds4_session *s, const ds4_tokens *prompt, c
         /* A one-token prefill tail is still a prompt row. Speculative verify
          * batches, despite having multiple rows, must never overwrite dumps. */
         s->qwen4_graph.dump_prompt_rows = true;
+        qwen4_ple_prefetch prefetch = {0};
+        const uint64_t prefetch_bytes = (uint64_t)s->qwen4_graph.cap_tokens *
+                                        DS4_N_EMBD * sizeof(float);
+        /* One next-chunk buffer at most; skip tiny chunks where thread startup
+         * outweighs the disk read and large chunks that add memory pressure. */
+        if (!getenv("DS4_QWEN4_NO_PLE_PREFETCH") &&
+            prompt->len - start > (int)s->qwen4_graph.cap_tokens &&
+            s->qwen4_graph.cap_tokens >= 256u && prefetch_bytes <= 128u * 1024u * 1024u) {
+            prefetch.rows = malloc((size_t)prefetch_bytes);
+            if (!prefetch.rows) fprintf(stderr, "ds4: Qwen PLE prefetch buffer allocation failed\n");
+        }
+        bool prefetch_ready = false;
         int prefill_rc = 0;
         for (int i = start; i < prompt->len;) {
             if (ds4_session_cancelled(s)) {
@@ -78637,8 +78801,52 @@ static int ds4_session_sync_internal(ds4_session *s, const ds4_tokens *prompt, c
              * may leave it as the live session. Every completed chunk needs
              * its own logits as well as recurrent/KV state. */
             s->checkpoint_valid = false;
-            if (!qwen4_graph_forward_tokens(&s->qwen4_graph, &e->model, &e->weights,
-                                            prompt->v + i, chunk, s->logits, false)) {
+            bool ok;
+            if (prefetch.rows) {
+                const double stage_start = now_sec();
+                /* Worker rows are consumed at the PLE layer inside forward
+                 * (fork split-staging preserves disk/GPU overlap); NULL
+                 * falls back to the synchronous gather. */
+                const float *ple_rows = prefetch_ready ? prefetch.rows : NULL;
+                prefetch_ready = false;
+                ok = qwen4_graph_stage_inputs(&s->qwen4_graph, &e->model, &e->weights,
+                                              prompt->v + i, chunk);
+                bool reading = false;
+                if (ok && i + (int)chunk < prompt->len) {
+                    prefetch.model = &e->model;
+                    prefetch.tokens = prompt->v + i + (int)chunk;
+                    prefetch.count = (uint32_t)(prompt->len - i - (int)chunk);
+                    if (prefetch.count > s->qwen4_graph.cap_tokens)
+                        prefetch.count = s->qwen4_graph.cap_tokens;
+                    memcpy(prefetch.ple_prev, s->qwen4_graph.ple_prev, sizeof(prefetch.ple_prev));
+                    prefetch.ok = false;
+                    prefetch.error = 0;
+                    reading = pthread_create(&prefetch.thread, NULL, qwen4_ple_prefetch_run,
+                                             &prefetch) == 0;
+                    if (!reading) fprintf(stderr, "ds4: Qwen PLE prefetch thread unavailable\n");
+                }
+                if (ok) ok = qwen4_graph_forward_tokens_impl(&s->qwen4_graph, &e->model,
+                    &e->weights, prompt->v + i, chunk, s->logits, false, true, stage_start,
+                    ple_rows);
+                /* Join before the progress callback can expose this frontier.
+                 * A failed read falls back to synchronous staging next chunk. */
+                if (reading) {
+                    const double join_start = now_sec();
+                    if (pthread_join(prefetch.thread, NULL)) ds4_die("cannot join Qwen PLE prefetch");
+                    prefetch_ready = prefetch.ok;
+                    if (!prefetch.ok) fprintf(stderr,
+                        "ds4: Qwen PLE prefetch failed at token %d: %s; retrying synchronously\n",
+                        i + (int)chunk, strerror(prefetch.error));
+                    if (getenv("DS4_QWEN4_PLE_PREFETCH_TRACE")) fprintf(stderr,
+                        "ds4: Qwen PLE prefetch pos=%d count=%u read_ms=%.3f join_ms=%.3f ready=%d\n",
+                        i + (int)chunk, prefetch.count, 1e3 * prefetch.read_sec,
+                        1e3 * (now_sec() - join_start), prefetch_ready ? 1 : 0);
+                }
+            } else {
+                ok = qwen4_graph_forward_tokens(&s->qwen4_graph, &e->model, &e->weights,
+                                                prompt->v + i, chunk, s->logits, false);
+            }
+            if (!ok) {
                 snprintf(err, errlen, "Qwen3.8 prefill failed at token %d", i);
                 s->checkpoint_valid = false;
                 prefill_rc = 1;
@@ -78651,6 +78859,7 @@ static int ds4_session_sync_internal(ds4_session *s, const ds4_tokens *prompt, c
             s->mtp_draft_valid = false;
             if (s->progress) s->progress(s->progress_ud, "prefill_chunk", i, prompt->len);
         }
+        free(prefetch.rows);
         s->qwen4_graph.vis_spans = NULL;
         s->qwen4_graph.vis_span_count = 0;
         s->qwen4_graph.dump_prompt_rows = false;
