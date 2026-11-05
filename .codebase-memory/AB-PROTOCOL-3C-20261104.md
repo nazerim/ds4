@@ -46,7 +46,7 @@ AND overridden by `spec_used=$spec_model_path` in start_server. Correct
 lever (no repo edit):
 ```
 cp ds4-server.sh /tmp/ds4-server-ab.sh
-# edit ONLY the DSPARK_PATHS "vision" entry (line 204 - index 1 =
+# edit ONLY the DSPARK_PATHS "vision" entry (line 213 - index 1 =
 # "vision", NOT index 0 "0731": editing the wrong entry leaves the
 # vision boot on the official path = silently identical arms; the
 # mandatory banner check is the guard):

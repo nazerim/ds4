@@ -923,3 +923,18 @@ engine-form head seeded from s4full recipe as NEXT research item.
   POOL MATH: draft pool ~584k -> ~635k pairs (+8.7%); day-15 is the FIRST FULL
   DAY with zero era caveats inside it - every record is post-fix, bit-identical
   serve, single pid, single parity file (pid84093.bin, 4.21 GB persistent).
+
+## AB-CAMPAIGN + CONF-POOL GROWTH STARTED 20261105 17:0x (operator: "run all")
+- ORDER: A1b offline re-baseline (CONFIRMS confcal2 head under traffic
+  probe + temp battery; engine DOWN, instance lock held) -> boot ARM A
+  (warm resume per dspark-lane recipe + 4-point verify + sentinel
+  re-arm) -> P0 gate -> A-B-A-B sweeps (informal, SCORED) -> restore
+  plain collect boot -> commit/push at every boundary -> confcal3
+  slab rebuild over day13+14+15 (~210k recs, multi-pid multi-era) +
+  joint-head training (L0 jobs <=8GB alongside engine).
+- PRACTICAL FIXES FOUND WHILE PREPPING: ds4flash.gguf is a SYMLINK to
+  the real Vision-Exp model (handover's '119-byte stub' = the symlink
+  ENTRY size - tests ARE runnable here); AB-PROTOCOL boot-lever line
+  ref corrected 204->213 (index 1 'vision' unchanged); A1b copies run
+  with cd pinned to repo root (/tmp/dspark-ab/, SUPPORT -> blade
+  confcal2 sha 5c0286dd verified before launch).
