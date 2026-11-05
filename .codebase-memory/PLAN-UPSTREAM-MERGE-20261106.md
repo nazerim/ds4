@@ -230,3 +230,14 @@ no records; smoke boot 58781 = dev capture (/tmp, excluded); ds4_test
 processes = capture disabled by unset env (verified). Verdict: day-16
 corpus integrity = 3c-era eras + 57826 merged-code era (disclose) +
 clean tail.
+
+- 02:26 **C8 OPTION-A VERIFICATION (post f3b17e6): snapshot path FIXED,
+  delta-chain path REMAINS.** session-rewind+GLM_MTP: OK (the gate that
+  broke C-merge). prefill-checkpoints/restore-reuse/session-snapshot/
+  vision-suite: all OK. 18 failures ALL in kv-delta (2x :384 id-mismatch,
+  16x :385 1e-5 logit drift) - SAME arm was 8x red pre-v4 (C5-rerun), so
+  v4 regressed nothing; the per-LINK tail semantics of chained stores is
+  the remaining seam (parent link writes/reads tail state differently
+  than live chain-replay does). Review #1 (ses_e530d83b9) claim-2 traces
+  exactly those runtime branches - fix waits for its verdict rather than
+  stacking speculation.
