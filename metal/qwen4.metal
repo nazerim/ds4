@@ -62,11 +62,6 @@ struct qwen4_w_q8 {
     }
 };
 
-/* Grouped RMSNorm of one (stream chunk, token): xn = R * rsqrt(mean(R^2)
- * + eps) * gamma over the chunk, plus the chunk's partial dot with each
- * inject row (consumers sum the hc*chunks partials and apply
- * 2*sigmoid(./hc)).  The low-rank projection itself is a GEMV on xn. */
-template <typename W>
 /* Extra threadgroups of a latency-bound decode kernel pull the next
  * bandwidth-bound dispatch's weights into the system cache while DRAM is
  * otherwise idle: one load per 128-byte line, reads only.  The sink store
@@ -78,6 +73,12 @@ static inline void qwen4_prefetch_lines(device const uint4 *pf, device uint *sin
         if ((v.x ^ v.y ^ v.z ^ v.w) == magic) sink[0] = l;
     }
 }
+
+/* Grouped RMSNorm of one (stream chunk, token): xn = R * rsqrt(mean(R^2)
+ * + eps) * gamma over the chunk, plus the chunk's partial dot with each
+ * inject row (consumers sum the hc*chunks partials and apply
+ * 2*sigmoid(./hc)).  The low-rank projection itself is a GEMV on xn. */
+template <typename W>
 
 kernel void kernel_qwen4_hc_norm(
         constant ds4_metal_args_qwen4_hc_norm & args,
