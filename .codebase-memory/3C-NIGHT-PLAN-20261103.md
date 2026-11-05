@@ -1242,3 +1242,26 @@ is worth ONE window. v5 spec: pick N>=12 day-15/16 conversations
 (>64k final ctx preferred), replay prefix-turn-by-prefix-turn at t=0
 from a stored snapshot (identical bytes both arms), score conditions
 unchanged. Cost ~= v4 window (2-2.5h).
+## V5 WINDOW #1 ABORTED 22:2x - OWN-WINDOW FAILURE, POSTMORTEM HONEST
+Bench-builder bug (mine): checkpoint dedup FAILED to collapse near-equal
+depths -> conv_00 contributed 5 x ~125k-token checkpoints per sweep;
+every replay request crossed the 1200 s client timeout; every arm stop
+then force-killed busy sessions -> ZERO era lines captured (all four
+cycles) + no replay JSONs (parity JSONs 4/4 survived). Killed chain +
+bench, stopped B-boot, rebooted official collect (verified), sentinel
+re-armed. Cost: ~1h40m engine window + day-16 corpus picked 4 partial
+replay sweeps (real tool traffic on production config - manifest note
+grows: identifiable conv_*.json replays ~20:29-22:15, no era lines to
+attribute them, sessions identifiable by conv content).
+V5.1 FIXES REQUIRED BEFORE RETRY (all small, none pending a window):
+(1) builder: ONE checkpoint per conversation (deepest; skip if est
+>~150k chars), MAX_CHECKS=1; (2) sweep timeout 3000 s; (3) chain
+gate: after each stop, WAIT+re-grep for the era line (drain lag)
+before proceeding, and verify ctok/finish sanity between cycles;
+(4) scope option: informal-only tonight (A->B, one cold cycle each =
+era lines + determinism + timing calibration) and score cycle-2
+tomorrow, or full 4-cycle retry.
+LESSON (same class as the sentinel's): the scorer's era-line
+requirement is a HARD gate - a window that loses era lines is dead on
+arrival; capture must VERIFY before rotation. Pre-register that check
+in v5.1 chain.
