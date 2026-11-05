@@ -1,34 +1,44 @@
 # AB-PROTOCOL 3C — live A/B for the retrained DSpark conf head
 
-Status: PROTOCOL v3 (night 20261104, S6 + S4b review) — arm B = CONFCAL2
-per independent review AB-GATE-RULING (v2 lever rework closed the
-`DSPARK_MODEL=<path>` IGNORED blocker; arms were identical). Nothing
-executed. Morning operator gate + one live probe required before scoring.
+Status: PROTOCOL **v4** (20261105 evening) — v3 executed and VERDICTED
+(stay-official on toy-bench traffic, ledger `23bc4dd`); the regime
+replay that followed PROVED the advantage lives at >=32k contexts
+(cut-true-rate .36-.40 vs base .76-.81 = 62%-precision true-reject
+excision; +2.27pp CI [+2.03,+2.51] AUC advantage LOCATED in big ctx;
+official gate inert .9997-.9999 there; era-stable; ledger `4b08bb0`).
+v4 = BIG-context decision leg + small-ctx parity leg, arm B =
+**confcal3**. Nothing executed yet; operator gate + P0 required.
 
-## What is being A/B'd
-`mtp.2.confidence_head.proj.weight` in the DSpark support GGUF — official
-q8_0 [4352,1] vs **confcal2** (`support_AB_confcal2.gguf`, sha
-`5c0286dd…701013`): linear-4352 over the FULL engine feature
-[h_d | markov_w1(prev_d)], NO bias — the ACTUAL engine computation
-(pairing byte-verified: prev_0=seed, prev_d=props[d-1]); val AUC .8523
-vs official .8360 (+1.63pp CI [+1.15,+2.11], all 4 slots), vs confcal1b
-.8453 (+0.70pp CI [+0.44,+0.96]); ECE .0115; AUC unchanged through the
-deployed q8_0 bytes (6 gate flips). Fallback arm B: confcal1b
-(`support_confcal1b.gguf`, sha `3365e6b4…72adc6cf`, h-only, .8453).
-Official head at the same split: .8360 but gate-.45 coverage 1.000
-= INERT (S3b replay); confcal2 cuts 11.2% of val rows.
+## What is being A/B'd (v4)
+`mtp.2.confidence_head.proj.weight` in the DSpark support GGUF —
+official q8_0 [4352,1] vs **confcal3**
+(`support_AB_confcal3.gguf`, blade
+`/Volumes/FireCuda520/ds4-train/repack_test/`, sha
+`a25cf9eea460c5add0462da1be8d3ce06758c6e364a9b578f498637388dd4698`):
+engine-form linear-4352 [h|markov_w1(prev)], trained cross-era on
+207,624 cycles (days 13-15, 14 pids, 480,177 train rows). Val AUC
+.8501 vs official .8276 (+2.25pp CI [+2.03,+2.48]), wins all 4 val
+slots (+1.13/+2.58/+2.05/+3.62pp val-vs-val) and every val-bearing
+pid slice. Deploy bytes verified: dequant rescore .8501, 62/49,281
+gate flips (calibration-silent). Fallbacks: confcal2
+(`5c0286dd…701013`), confcal1b (`3365e6b4…72adc6cf`). WATCH ITEM
+FLIPPED vs v3: confcal3 gate OVER-predicts +1.6pp region-wide (n=7656
+pred .4659 obs .4502 = marginally LOOSE; expect B cut-coverage ~1-2pp
+milder than the offline .9138 -> B may keep slightly MORE drafts than
+offline suggests).
 
 ## Hard rules (S5 review, still binding)
 1. Official file immutable (`0807a67f…679bc877`); swaps are copy-based via
    `tools/repack_dspark_tensor.py`; ledger records official sha + output
-   sha side by side. ARM B CURRENT: `5c0286dde23c6c39df29f3408322c072ee27
-   dfae414dedab6c6b4639ad701013` (confcal2, blade
-   `/Volumes/FireCuda520/ds4-train/repack_test/support_AB_confcal2.gguf`,
-   reviewer-built + sha-verified); fallback confcal1b `3365e6b4…72adc6cf`.
+   sha side by side. ARM B CURRENT: `a25cf9eea460c5add0462da1be8d3ce0
+   6758c6e364a9b578f498637388dd4698` (confcal3, blade
+   `/Volumes/FireCuda520/ds4-train/repack_test/support_AB_confcal3.gguf`,
+   builder-verified: window/dequant/.8501-through-bytes rescore);
+   fallbacks confcal2 `5c0286dd…701013`, confcal1b `3365e6b4…72adc6cf`.
    Regenerate if weights change.
 2. confidence_proj binds AT BOOT -> every arm switch is a restart; no
    paired stats across a swap; re-anchor the window after the banner.
-3. Deployable head form only: confcal2 IS the engine form (linear over
+3. Deployable head form only: confcal2/3 ARE the engine form (linear over
    [h|markov_w1(prev)], no bias, [4352,1] DENSE — validator-pinned; the
    markov half is load-bearing: logit mass up to 4.73). confcal1b
    (zero markov half) remains the conservative fallback. NOT deployable:
@@ -50,7 +60,7 @@ cp ds4-server.sh /tmp/ds4-server-ab.sh
 # "vision", NOT index 0 "0731": editing the wrong entry leaves the
 # vision boot on the official path = silently identical arms; the
 # mandatory banner check is the guard):
-#   -> /Volumes/FireCuda520/ds4-train/repack_test/support_AB_confcal2.gguf
+#   -> /Volumes/FireCuda520/ds4-train/repack_test/support_AB_confcal3.gguf
 cd /Users/naz/Projects/ds4   # repo root: relative gguf/, ./log, $SERVER_CMD
 DS4_DSPARK_STATS=1 bash /tmp/ds4-server-ab.sh restart-collect   # ARM B
 ./ds4-server.sh restart-collect                                  # ARM A
@@ -76,64 +86,75 @@ plain-chat A/B would be an invisible experiment; script hard-errors on
 both failure modes).
 
 ## Procedure (per arm)
-A1. Build arm-B file (ALREADY BUILT + sha-verified for confcal2 — reuse
-    `/Volumes/FireCuda520/ds4-train/repack_test/support_AB_confcal2.gguf`,
-    do NOT rebuild blind): `python3 tools/repack_dspark_tensor.py
-    gguf/…Vision-Exp-DSpark-support.gguf --repack
-    'mtp.2.confidence_head.proj.weight=/Volumes/FireCuda520/ds4-train/
-    labels3c/run_confcal2/confcal1_weights.npz#w_full_1x4352'
-    --out <BLADE>/ds4-train/repack_test/support_AB_confcal2.gguf`; verify
-    printed changed-byte window (4,624 B) + dequant max|delta| < 1e-3
-    (measured 6.37e-4) and output sha == `5c0286dd…701013`.
+A1. Build arm-B file (ALREADY BUILT + VERIFIED for confcal3 — reuse
+    `/Volumes/FireCuda520/ds4-train/repack_test/support_AB_confcal3.gguf`,
+    sha `a25cf9ee…88dd4698`; do NOT rebuild blind): `python3
+    tools/repack_dspark_tensor.py gguf/…Vision-Exp-DSpark-support.gguf
+    --repack 'mtp.2.confidence_head.proj.weight=/Volumes/FireCuda520/
+    ds4-train/labels3c/run_confcal3/confcal1_weights.npz#w_full_1x4352'
+    --out <BLADE>/ds4-train/repack_test/support_AB_confcal3.gguf`; verify
+    printed changed-byte window (4,624 B @ 4,077,251,392) + dequant
+    max|delta| < 1e-3 (measured 9.29e-4) and output sha == a25cf9ee…
+    (re-verification of the deployed-bytes rescore: import
+    `q8_0_dequant` from the repack tool — do NOT hand-roll the 34 B
+    block layout, it bit twice).
 A1b. OFFLINE re-baseline BEFORE booting arm B (rule: retrained drafter
     head => re-baseline): tests/dspark_traffic_probe.sh +
     dspark_temp_battery.sh spawn their OWN engine (refuse while one runs)
     and hardcode SUPPORT=official — run with the engine DOWN and the
-    SUPPORT override pointed at support_AB_confcal2.gguf. This is NOT a live A/B
-    step. (A0 old "log snapshot" step dropped: rotate_logs already
-    cp-snapshots every boot.)
+    SUPPORT override pointed at support_AB_confcal3.gguf. v3 ran this
+    for confcal2 (RC 0/0, 8/10 shapes above baseline, toolcall shape
+    -15%); CONFCAL3 NEEDS ITS OWN A1b RUN before its first boot.
+    This is NOT a live A/B step. (A0 old "log snapshot" step dropped:
+    rotate_logs already cp-snapshots every boot.)
 A2. Arm order A→B→A→B (first cycle informal, second SCORED). Switch via
     the boot lever above. Banner check + >=5 min post-boot before scoring
     (warm). Engine = 127.0.0.1:8001 (the collect/DSpark profile; 8002 is
     qwen WITHOUT DSpark — benching it yields no stats ever).
-A3. `python3 tools/bench_ab_3c.py --port 8001 --arm X --out armX.json`
-    (model id auto-discovered from /v1/models; byte-offset stats window
-    from bench start — boot truncates the log, shrink detected;
-    sessions==0 / cycles==0 hard errors; finish_reason + prompt_tokens
-    recorded; accept/draft_len_hist parsed from the REAL `k:count` pair
-    format (ds4_format_len_hist, ds4.c:75285-75300 — zero bins skipped)
-    into 17-bin lists, bins 0..16).
+A3. `python3 tools/bench_ab_3c.py --port 8001 --arm X --allow-no-stats
+    --out armX.json` (model id auto-discovered from /v1/models;
+    **v3-campaign correction: the engine flushes DSpark stats at
+    session-free = pool evict/shutdown, so each boot ERA emits ONE
+    aggregate line into ITS log, snapshotted by the next boot's
+    rotation — score by parsing the rotated era file
+    (`--skip-requests --offset 0`), never the live log mid-era**;
+    shrink-detected byte offsets retained; finish_reason +
+    prompt_tokens recorded; accept/draft_len_hist parsed from the REAL
+    `k:count` pair format into 17-bin lists; small-context PARITY leg
+    uses the existing prompt set; BIG leg per below).
 A4. Restore arm A via plain `./ds4-server.sh restart-collect`.
 
-## Decision rule (pre-registered, v2 + v3 coverage definition)
-Scored cycles only (discard first scored rep as warm-informal). Arm B
-advances iff pooled over scored B vs A: (i) pooled accept rate
-(`accepted_draft/proposed`) + accept-LEN histogram shift toward longer
-runs at >= equal **COVERAGE = DSpark ENGAGEMENT (stats cycles /
-first_tokens)**, NOT gate coverage — the official gate is INERT
-(offline gate-coverage 1.000), so a literal gate-coverage reading of
-"equal coverage" is unsatisfiable (review MINOR 3); histograms included,
-(ii) B's gate actually engages (proposed/cycles similar to A, accept_rate
-direction consistent with the offline +1.63pp AUC and the 1,004
-gate-.45 disagreements vs official; confcal2 cuts 11.2% of offline rows
-— engagement should stay in A's band, cut drafts are the low-confidence
-ones), (iii) tok/s:
-DIRECTIONAL ONLY (mean/median/p95 recorded; n≈28 samples under live
-traffic with background users — NOT a gate; a >5% mean regression in
-BOTH scored windows is a STOP). (iv) quality ladder unchanged (from A1b
-offline re-baseline). Any tie/mixed => stay official, iterate training.
+## Decision rule (pre-registered, v4 — two-leg traffic)
+**Legs:** BIG (verdict-bearing): tool chains at ctx >=32k (seed ~40-60k
+tokens of static text, then multi-turn growth with tool results
+appended; fixed-seed paired t=0 core + t=1 reps). PARITY
+(non-verdict): the v3 small-prompt set — guards official's claimed
+<8k home; only a >5% paired-t0 drop there can STOP, it cannot advance B.
+Arm B advances iff scored BIG-leg B vs A: (i) PAIRED t=0 big-ctx tok/s
+mean delta >= 0 — the engine-level net of cut-vs-accelerate, the one
+question offline cannot answer; (ii) proposed-per-cycle drop >= 8%
+(verify-burn efficiency; offline expectation ~9% cut at >=32k with 63%
+true-reject precision — a MUCH larger drop signals the flipped watch
+item below); (iii) kept-set accept (accepted/proposed) not more than
+1pp below A; (iv) accept-len hist full-5 share not down >3pp vs A;
+(v) quality: finish_reason distribution sane + A1b (confcal3 file)
+ladder unchanged. STOP-CONDITIONS: >5% paired-t0 big-leg regression in
+EITHER scored window; B coverage overshoots A by >4pp (loose-gate
+signature); any engine errors/tripwires in the era line; sentinel
+anomaly. Mixed/tie => stay official. Thresholds NOT moved mid-flight:
+v4 evaluates confcal3 as-is.
 Both arms run with parity/recs capture ON (symmetric I/O; the
 DS4_TD_PARITY_MAX=200000 cap is capture-only, cannot alter drafting).
 
-### Threshold watch item (AB-GATE-RULING, keep .45)
-confcal2 scores under-predict by ~1.5-2.5pp below 0.5 (offline gate
-region pred .4606 vs obs .4854; obs at nominal [.425,.475] = .4664): at
-the nominal .45 gate the TRUE accept rate is ≈.466-.485, i.e. arm B's
-gate is marginally CONSERVATIVE — it trims a few borderline-good drafts,
-not extra bad ones; this direction cannot inflate accept-rate
-dishonestly. Expect B coverage slightly below the offline .8883.
-IF live B coverage undershoots A by >4pp or the accept-length histogram
-degrades, STOP and re-inspect calibration — do NOT "fix" the threshold.
+### Watch item v4 (flip of v3's, keep .45)
+On the broad pool confcal3 OVER-predicts below-gate (gate region
+n=7656: pred .4659 vs obs .4502 = +1.6pp; v3/confcal2 was -2.5pp
+UNDER). Direction: marginally LOOSE — expect live B cut-coverage
+slightly MILD (~1-2pp above offline .9138) and B kept-set accept
+slightly BELOW the offline ideal; this direction cannot hide a
+regression (it shows up as condition (ii) undershooting 8%). IF
+(ii) undershoots badly OR (iii) breaks: STOP and inspect
+large-context calibration on the sealed era; do NOT move .45.
 
 ## Rollback
 One command: `./ds4-server.sh restart-collect` (pristine script = official

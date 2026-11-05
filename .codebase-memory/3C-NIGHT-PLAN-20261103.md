@@ -1108,3 +1108,12 @@ answers ONLY 'is the cut decision better in the claimed regime'.
   `from repack_dspark_tensor import q8_0_dequant` (tool layout IS the
   validator; ds4.c:2330 34B blocks). Future rescorers: import, don't
   re-implement.
+- 18:4x AB-PROTOCOL v4 WRITTEN (arm B = confcal3 a25cf9ee..; two-leg
+  traffic: BIG >=32k verdict leg [paired-t0 tok/s >=0 PRIMARY,
+  proposed/cycle drop >=8%, kept-accept not <A-1pp, hist5 not <A-3pp,
+  quality ladder], small PARITY leg non-verdict; era-line scoring
+  method baked in; FLIPPED watch item documented - loose direction,
+  stop-signature moved accordingly; confcal3 needs its OWN A1b before
+  first boot). KNOWN GAP flagged for review: bench_ab_3c.py has no
+  BIG-leg runner yet (growing multi-turn >=32k context) - implementer
+  step owed before v4 execution.
