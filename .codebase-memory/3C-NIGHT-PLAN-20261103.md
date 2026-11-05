@@ -924,6 +924,18 @@ engine-form head seeded from s4full recipe as NEXT research item.
   DAY with zero era caveats inside it - every record is post-fix, bit-identical
   serve, single pid, single parity file (pid84093.bin, 4.21 GB persistent).
 
+- ERA-GUARD LANDMINE (confcal3 blocker, 3c-lane fix owed in labels3c.py):
+  D-S0-3's pid>=53508 threshold was a proxy for '--mtp-exact-sampling
+  boot', valid ONLY within the never-rebooted day-13 pid monotonicity.
+  Day-14/15 exact-era boots carry small pids (2109/3106/4051/6848/9304/
+  11048/11552/15854/19257/21663/21843) -> guard as-conf currently REJECTS
+  real conf-eligible data. Fix = explicit allowlist flag
+  (--known-exact-pids 2109,3106,... default-still-strict) + banner
+  evidence per pid; pids 6848/9304 = binary-unverified, EXCLUDE from
+  confcal3 conf pool until boot-banner proof found (markov is era-
+  agnostic, unaffected). All 3C boots since Nov-3 20:32 had exact:1 in
+  the terminal banner by script design, but design != field evidence -
+  per-lane rule 'verify binary strings before claiming features'.
 ## AB-CAMPAIGN + CONF-POOL GROWTH STARTED 20261105 17:0x (operator: "run all")
 - ORDER: A1b offline re-baseline (CONFIRMS confcal2 head under traffic
   probe + temp battery; engine DOWN, instance lock held) -> boot ARM A
