@@ -244,10 +244,12 @@ def http_json_timed(port, path, body=None, timeout=1200):
     return json.loads(raw.decode()), ttfb
 
 
-def call_messages(port, model, messages, temperature, max_tokens=200):
+def call_messages(port, model, messages, temperature, max_tokens=200,
+                  tools=None):
     body = {"model": model, "messages": messages,
             "temperature": temperature, "max_tokens": max_tokens,
-            "tools": BIG_TOOL_SCHEMA, "stream": False}
+            "tools": tools if tools is not None else BIG_TOOL_SCHEMA,
+            "stream": False}
     t0 = time.perf_counter()
     resp, ttfb = http_json_timed(port, "/v1/chat/completions", body)
     wall = time.perf_counter() - t0
@@ -328,6 +330,31 @@ def run_big_leg(port, model, temps):
     return rows
 
 
+def run_replay(port, model, directory, temps):
+    """v5 verdict leg: replay recorded REAL conversation prefixes
+    (/tmp corpus built by build_corpus.py; masked ids, secrets-screened,
+    600 perms). Same pairing keys as big_leg; scorer consumes 'big_leg'."""
+    import glob
+    import os
+    rows = []
+    files = sorted(glob.glob(os.path.join(directory, "conv_*.json")))
+    if not files:
+        raise SystemExit(f"--replay: no conv_*.json under {directory}")
+    for fp in files:
+        conv = json.load(open(fp))
+        ci = conv["conversation"]
+        for temp in temps:
+            for k, prefix in enumerate(conv["checkpoints"]):
+                r = call_messages(port, model, prefix, temp,
+                                  max_tokens=300, tools=conv["tools"])
+                r.update({"crossed_32k": r["prompt_tokens"] >= 32768})
+                rows.append(dict(seed=ci, temperature=temp, turn=k, **r))
+                print(f"conv{ci} t{temp} ckpt{k}: prompt={r['prompt_tokens']} "
+                      f"ftok={r['first_token_s']}s "
+                      f"finish={r['finish_reason']}", flush=True)
+    return rows
+
+
 def hist_add(hists):
     tot = [0] * N_HIST_BINS
     for h in hists:
@@ -363,6 +390,11 @@ def main():
                          "tool-turn sessions at >=32k (run from repo "
                          "root - seed manifest reads ./ds4.c etc.); "
                          "pairing/hashing per run_big_leg docstring")
+    ap.add_argument("--replay", default=None, metavar="DIR",
+                    help="v5 verdict leg: replay REAL recorded "
+                         "conversation prefixes from /tmp corpus DIR "
+                         "(masked, secret-screened); emits 'big_leg' "
+                         "rows so score_ab_v4 consumes it unchanged")
     ap.add_argument("--big-temps", default="0,1",
                     help="temperatures for --big-leg (t=0 is the "
                          "verdict core, t=1 directional)")
@@ -383,7 +415,12 @@ def main():
         import os
         offset = os.path.getsize(a.log)   # byte window starts NOW
         report["log_offset"] = offset
-        if a.big_leg:
+        if a.replay:
+            report["big_leg"] = run_replay(
+                a.port, model, a.replay,
+                [float(t) for t in a.big_temps.split(",")])
+            time.sleep(3)
+        elif a.big_leg:
             report["big_leg"] = run_big_leg(
                 a.port, model, [float(t) for t in a.big_temps.split(",")])
             time.sleep(3)
@@ -431,7 +468,8 @@ def main():
 
     report["engine_stats"] = parse_stats(a.log, offset,
                                          allow_empty=(a.allow_no_stats
-                                                      or a.big_leg))
+                                                      or a.big_leg
+                                                      or a.replay))
     tot_prop = sum(s["proposed"] for s in report["engine_stats"])
     tot_acc = sum(s["accepted_draft"] for s in report["engine_stats"])
     report["engine_pooled"] = {
