@@ -1191,3 +1191,31 @@ answers ONLY 'is the cut decision better in the claimed regime'.
   A1b confcal3 PASS + artifact verified + protocol corrected.
   Execution = operator window (~2-2.5h, 4 boot swaps, user sessions
   pause minutes each swap).
+## V4 ARMS VERDICT 19:5x-21:5x: HOLD (second rule-conformant hold) + STOP-FLAG TRIGGERED
+Full A->B->A->B executed, cycle-2 scored, engine restored (ARGV-MATCH,
+collection live). Determinism: 14/14 paired t=0 matches, 0 dropped -
+the method is proven sound. Results (B=confcal3 vs A=official):
+  (i)  paired speed ratio 0.998 (B -0.2%, effectively tie) FAIL vs >=1.0
+  (ii) proposed/cycle B/A 0.968 = only 3.2% cut (bar >=8%) FAIL
+  (iii)kept-accept B 92.54 vs A 94.59 = -2.05pp FAIL (>1pp)
+  (iv) full5 -2.7pp PASS; (v) A1b PASS.
+  STOP-FLAG 'coverage_overshoot' TRIPPED (0.968 > .954): B cut FAR
+  LESS than offline regime replay predicted (~9% at >=32k). Protocol
+  says: STOP, inspect large-ctx calibration, do NOT move .45.
+DIAGNOSIS (post-hoc, clearly labeled): the bench's synthetic big-leg
+traffic is a HIGH-CONFIDENCE flow - arm A itself accepted 94.6% of
+proposals; the corpus bins where confcal3 shines had base accept
+.73-.81 (a ~22% reject tail to cut). With almost no reject mass in
+traffic, a gate CANNOT beat an inert gate - there is nothing to cut;
+B pays gate overhead (-0.2% speed, and its few cuts were -2pp
+misfires). The regime replay wasn't wrong; the ARMS TRAFFIC was
+unrepresentative. Official head retains deployment; confcal3 remains
+offline best (+2.25pp CI [+2.03,+2.48], cross-era, per-slot, per-pid).
+PROTOCOL-V5 OPTION (for operator): arms on REPRESENTATIVE traffic -
+replay REAL recorded session prefixes (day-14/15 corpora, role=user
+resends of actual conversations) at t=0 paired + era-line population
+comps; the reject tail then exists and the gate can earn. Alternative
+cheaper test first: does the offline cut-rate prediction hold on
+REPLAYED corpus prompts before burning another arms window.
+Day-16 corpus note grows: 4 arm-sweep eras of bench conversations in
+active/ (identifiable shapes; manifest note owed at seal).
