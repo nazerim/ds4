@@ -1,4 +1,8 @@
-# MORNING MEMO — 2026-11-06 (written 00:40, overnight window closed)
+# MORNING MEMO — 2026-11-06 (written 00:35, overnight window closed)
+> 00:5x UPDATE: closeout review landed PASS_WITH_MINORS (fixes banked in
+> ledger FOLLOW-UP block); lane audit + upstream merge-debt PLAN done ->
+> `.codebase-memory/PLAN-UPSTREAM-MERGE-20261106.md`. Tier-3 flag below
+> item 1 is now a planned workstream.
 
 Campaign state: **v5.2 finished 00:29 — HOLD + coverage STOP; conf-adoption
 line CLOSED on its pre-registered terms.** Engine official (PID 49807,

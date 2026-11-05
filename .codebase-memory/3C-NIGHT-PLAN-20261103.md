@@ -1354,3 +1354,61 @@ confcal3 head), A2 00:06:4->00:17:3 (PID 49527 official, scored), B2
 00:28:4 (ARGV-verified). v5.1 window eras are on day-15 side (22:19-22:58).
 CLEANUP: /tmp/v5-corpus /tmp/v52-corpus /tmp/ab5 /tmp/ab51 DELETED (real
 session text + superseded evidence); /tmp/ab52 kept until day-16 seal.
+## V5.2 CLOSEOUT FOLLOW-UP (independent review verdict PASS_WITH_MINORS, 00:5x) - SUPERSEDES WORDING ABOVE
+Fresh-context review reproduced every verdict-bearing number exactly
+(verdict.json = era-A2.log:407/era-B2.log:412 lines; cut 0.96923; band
+selection = A1/B1 rungs with A1==B1 pairing enforced by gate code; .45
+confidence in all four boot banners; era files byte-equal to rotation
+snapshots; cleanup complete). ADVANCE=false ROBUST under all corrections
+below - and closure was genuinely pre-registered. Fixes (append-only;
+this block supersedes):
+ 1. Corroboration sentence CORRECTED: unpaired walls - B faster 4/5,
+    max delta 3.8% (seed 3), SLOWER 1.1% (seed 5); seeds 0/2/3 have
+    unmatched token counts so raw ratios are directional only. No-speed
+    conclusion stands (paired 5+7 cancel; (ii)+(STOP) independent).
+ 2. Condition (i) STATISTIC DISCLOSED: score_ab_v4.py (commit 35621d3,
+    predates window, same use in v5.1) operationalizes (i) as MEDIAN
+    paired wall ratio; protocol text pre-registered MEAN tok/s delta.
+    At n=2: mean delta -0.02 (marginal FAIL) vs median 1.000 (PASS as
+    recorded). Tool-vs-protocol drift disclosed; verdict unchanged -
+    (ii) fail + coverage STOP independently force HOLD.
+ 3. ROOT CAUSE DOWNGRADED: "CONFIRMED" -> BEST-SUPPORTED HYPOTHESIS.
+    Measured: offline over-prediction +1.6pp (day-13) and live near-
+    inert coverage (keep 96.9%). NOT measured: that over-prediction is
+    STRONGER on novel-provenance cycles (era lines carry no per-
+    proposal scores; prop_confidence=0.000). Unexcluded alternatives:
+    depth-band vs sim bins, session/tool mix, draft-length feedback.
+    The protocol's (ii)-undershoot action - "inspect large-context
+    calibration on the sealed era" - has NO banked artifact: that is
+    the concrete pending inspection if this line is ever reopened.
+    "cuts nothing" -> "cuts ~3%".
+ 4. CLOSURE AUTHORITY RE-CITED: the governing pre-registration is the
+    23:35 RESUME rule (142c1d5, written before any scored leg):
+    "HOLD/band-FAIL -> close conf-adoption line on record" - not the
+    23:00 branch (b) (which was the don't-test closure and carried the
+    only caveat, ">=32k untested" - removed by v5.2's own measurement).
+    Closure = NOT an overreach.
+ 5. (v) MISLABEL FIXED: (v) = A1b-ladder + finish_reason sanity; the
+    A1b leg was satisfied in-window (B1 blade boot banner confcal3 +
+    band gate's A1==B1 rung cross-check); parity 0.992 is a STOP-GUARD,
+    not a verdict condition. --a1b-pass was chain-set (hardcoded in
+    arms52.sh after those checks passed) - noted as process debt for
+    any future window: emit the evidence lines beside the flag.
+ 6. Divergence inventory exact: 1x 300/300 sha-flip (seed 0), 192v215
+    (seed 2), 300v256 (seed 3) = 3 dropped pairs, not "two 300/300".
+ 7. Restore wording: ARGV-MATCH-FINAL EMITTED x1 (my "x2" was set -x
+    trace-line double-count) + invalid=0 + sentinel all-zero.
+ 8. Noise parenthetical applies to v5.2 (n=1024-1048, sd~1.4pp); v5.1
+    n uncaptured (ab51 deleted) but both deltas (+0.45/-0.29) <1sigma
+    opposite-signed -> "quality direction NOT established live in any
+    regime" holds. (Correctly retracts v5.1 finding-3 "confirmed".)
+ 9. Manifest stamp convention: A1 start 22:58:12 = boot banner (log
+    rotation instant 22:58:10); era ends floor-minute, starts ceil-
+    minute (non-overlap convention, now labeled).
+10. Sim cut-range slices LABEL: 12.8-14.6% = >=32k depth-bin subset
+    (v5.1 quote); 9.5-14.9% = every >=32k bin x era group (RESUME);
+    ~9% = whole-corpus (protocol). Live 3.1% undershoots ALL THREE.
+11. /tmp/ab52 = 17 files (incl. band.flag, heartbeat.sh, arms52.sh);
+    RESUME POINTERS stale /tmp/ab5,ab51 entries struck same commit.
+REVIEWER-VERIFIED CLEAN (no action): number matrix, gate pairing logic,
+threshold immutability, cleanup, A1-era disclosure accuracy.
