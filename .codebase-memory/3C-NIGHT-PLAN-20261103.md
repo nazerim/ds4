@@ -1007,7 +1007,9 @@ train with allowlisted exact-era pids).
   480,177/49,281 rows - val 5.5x night). Val pooled .8501 vs official
   replay .8276 = +2.25pp (n>4x the night's, CI tighter expected).
   Per-slot ALL 4 beat official: .8787/.8389/.8230/.8058 vs
-  .8331(?)/.8154/.7949/.7771 (slot3 +2.9pp). ECE .0129. PASS_auc true.
+  .8690/.8154/.7949/.7771 (official slot0 re-read from its report - my
+  initial .8331 guess was WRONG; margins: slot0 +.97pp THINNEST,
+  slot3 +2.9pp fattest). ECE .0129. PASS_auc true.
   CROSS-ERA: per-pid val slices - confcal3 beats official on EVERY
   stable pid (delta +.0018..+.0694; big-clean-era 21843 +2.7pp n=9671,
   day15 84093 +2.4pp n=12634; day13 slice .8544 > night confcal2's
