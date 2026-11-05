@@ -230,12 +230,26 @@ def parse_stats(log_path, start_offset, allow_empty=False):
     return out
 
 
+def http_json_timed(port, path, body=None, timeout=1200):
+    """Returns (json, ttfb_s): time-to-first-byte approximates server work
+    completion for non-streaming POSTs; used for first_token_s in BIG leg."""
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}{path}",
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={"Content-Type": "application/json"})
+    t0 = time.perf_counter()
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        raw = r.read()
+        ttfb = time.perf_counter() - t0
+    return json.loads(raw.decode()), ttfb
+
+
 def call_messages(port, model, messages, temperature, max_tokens=200):
     body = {"model": model, "messages": messages,
             "temperature": temperature, "max_tokens": max_tokens,
             "tools": BIG_TOOL_SCHEMA, "stream": False}
     t0 = time.perf_counter()
-    resp = http_json(port, "/v1/chat/completions", body, timeout=1200)
+    resp, ttfb = http_json_timed(port, "/v1/chat/completions", body)
     wall = time.perf_counter() - t0
     usage = resp.get("usage") or {}
     choice = (resp.get("choices") or [{}])[0]
@@ -246,7 +260,8 @@ def call_messages(port, model, messages, temperature, max_tokens=200):
                            "args": (c.get("function") or {}).get("arguments")}
                           for c in calls], sort_keys=True)
     ctok = int(usage.get("completion_tokens", 0))
-    return {"wall_s": round(wall, 3), "completion_tokens": ctok,
+    return {"wall_s": round(wall, 3), "first_token_s": round(ttfb, 3),
+            "completion_tokens": ctok,
             "prompt_tokens": int(usage.get("prompt_tokens", 0)),
             "finish_reason": choice.get("finish_reason"),
             "content_sha256": hashlib.sha256(
@@ -276,15 +291,34 @@ def run_big_leg(port, model, temps):
                   f"prompt={first['prompt_tokens']} {first['tok_s']} tok/s",
                   flush=True)
             for turn in range(1, BIG_TURNS + 1):
-                msgs.append({"role": "assistant",
-                             "content": f"Sending chunk {turn - 1}."})
+                if turn == 1:
+                    msgs.append({"role": "assistant",
+                                 "content": "Acknowledged."})
+                else:
+                    # REAL tool-history shape (assistant tool_calls +
+                    # tool-role result), all canned => arm-independent.
+                    # (v4 smoke finding: prose assistant echoes taught the
+                    # model to stop calling tools from turn 2 on.)
+                    msgs.append({
+                        "role": "assistant", "content": "",
+                        "tool_calls": [{
+                            "id": f"call_smoke{seed_i}_{turn - 1}",
+                            "type": "function",
+                            "function": {
+                                "name": "lookup_context",
+                                "arguments": json.dumps(
+                                    {"chunk": turn - 1})}}]})
+                    msgs.append({"role": "tool",
+                                 "tool_call_id":
+                                     f"call_smoke{seed_i}_{turn - 1}",
+                                 "name": "lookup_context",
+                                 "content": big_tool_result(
+                                     seed_i, turn - 1)})
                 msgs.append({"role": "user",
-                             "content": "Previous chunk contents:\n"
-                                        + big_tool_result(seed_i, turn - 1)
-                                        + "\n\nNow call lookup_context with "
-                                          f"chunk={turn}. Do not answer in "
-                                          "prose."})
-                r = call_messages(port, model, msgs, temp)
+                             "content": "Call lookup_context with chunk="
+                                        f"{turn} immediately. Do not "
+                                        "answer in prose."})
+                r = call_messages(port, model, msgs, temp, max_tokens=300)
                 r.update({"crossed_32k": r["prompt_tokens"] >= 32768})
                 rows.append(dict(seed=seed_i, temperature=temp,
                                  turn=turn, **r))
