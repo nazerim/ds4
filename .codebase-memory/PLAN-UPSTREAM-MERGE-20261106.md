@@ -112,3 +112,78 @@ Gates per batch, in order:
 ## Execution log (append)
 - 00:5x v1 SMASHED by review ses_e5364bce0 (findings F1-F7); v2 rebuilt.
 - Batch-0 complete (cherry evidence above).
+- 01:0x **Batch A** `2c931a0` (+33c): 3 hunks; PLE-prefetch taken theirs,
+  RCAB infra grafted around _impl rename; metal-test usage union.
+  Coexist-tier green. (My batch-A adapter was OBSOLETE by batch B —
+  upstream had independently rederived the fork's split; reverted.)
+- 01:1x **Batch B** `45cfb26` (+25c): stage_embeddings/stage_ple split +
+  decode ple_overlap adopted; metal ABI union round 1 (n_hc slot 13,
+  out_layout 14). Coexist-tier green.
+- 01:1x **Batch C** `47e22a7` (+176c, tip): 28 hunks/6 files. Deep
+  resolutions: (a) attention: upstream core_rows split adopted with the
+  fork per-row-verify mechanism grafted inside - upstream else-path IS
+  the fork default (bit-identity preserved), fork env takes precedence
+  over upstream's T==3 2/1-split when armed; (b) WIRE FORMAT: upstream's
+  v3 reuses tag 0x51573803 (fork's V2 lineage format) with different
+  layout - resolved by fork-sovereignty: trio functions swapped to fork
+  bodies, upstream tail becomes runtime-only (+reset re-added at load),
+  upstream's legacy(0x...02)=whole stays compatible with our V1; cost =
+  one predictor rebuild after restore, no silent misread; (c) metal ABI
+  union round 2: slot_mask[3]+masked_tokens joined, out_layout last,
+  sizeof 76->80 TRAILING-PADDING trap caught by both asserts (bumped in
+  host _Static_assert AND device static_assert); (d) server vision:
+  SERVER_MAX_IMAGES=256 gate (upstream arrays sized by it) hoisted ahead
+  of fork keep-images policy; (e) shared_dense env knob hoisted to
+  upstream's new early consumer, duplicate deleted.
+  Build: 0 warnings 0 errors; coexist-tier green (server/mtp-slice).
+- FINDING (pre-existing, NOT merge): tests/test_dspark_rewind.py
+  prefix_slots variants red on MAIN too - test mock not updated for
+  Nov-3/4 instrumentation (end_cause/ds4_td_segment_end/gate). Engine
+  lane owns the fix (mock-only). Reported for morning.
+- 01:2x STOP-TIER running (free-rein window): engine down, full ./ds4_test
+  + make dspark-acceptance in worktree, capped (40/20 min), trap-restore
+  + detached 45-min watchdog + shell-notification = triple coverage;
+  results appended below when green.
+- ROUND-1 FACT (01:19): stopgateC ran with NO model symlink in worktree
+  -> suite + dspark-acceptance skipped (rc0 misreport; capped-rc reads
+  the tail-pipe). Its restore trap fired from WORKTREE cwd (script bug:
+  no cd in trap) -> collector PID 57826 booted from WORKTREE = merged
+  binary accidentally running production collect 01:19:18-01:23:20 with
+  PRODUCTION capture env (blade paths, banner OK, invalid=0) -> doubles
+  as boot-smoke PASS for batch C binary. DAY-16 MANIFEST era note:
+  57826 = merged-code era (~4 min); 58173/58304 = failed lock-refused
+  boots (no records); 58604 = main old-binary collector 01:25:52+.
+- ROUND-2 ABORT (01:21, stopgateC2): bare `stop` from main found no
+  pidfile (engine's was in worktree) -> pidfile-based stop no-op ->
+  correct ABORT-by-design fired; trap restored from main cwd (58604).
+- ROUND-3 ABORT (01:23, stopgateC3): watchdog3 was launched as INLINE
+  bash -c whose command line contains the engine's argv pattern string ->
+  `pgrep -f 'ds4-server --model'` self-matched forever -> fake drain
+  timeout -> abort before suite; ARGV diff then read the watchdog (the
+  real engine 58604 was healthy, invalid=0, pidfile at main).
+- LESSONS BANKED (bind all future chains): (1) engine liveness ONLY via
+  PIDFILE (alive()/status), never pgrep -f argv text; (2) watchdogs are
+  FILE-BASED scripts so their cmdline carries no engine strings;
+  (3) restore traps must cd to the intended repo absolutely; (4) suite
+  needs <cwd>/ds4flash.gguf symlink (it is itself a symlink to the 97.6 GB
+  blade model - "119-byte stub" in old docs = the symlink's size field).
+- ROUND-4 (C4, launched 01:27): pidfile-clean rerun - stop 58604 -> full
+  suite WITH model -> merged-binary smoke (dev-redirect capture) -> trap
+  restore main collector. wd4 file-based, 90 min.
+- **G-REVIEW gate (operator directive 20261106): before landing
+  merge/upstream into main, an independent fresh-context code review of
+  the whole merge branch MUST run and its findings be banked.** Landing
+  itself stays coupled to the day-16 seal window (F7 checkpoint
+  round-trip + boot swap); batches + pre-land re-merge can complete
+  overnight.
+- 01:30 **STOP-TIER PASS (C4, pidfile-clean)**: full ./ds4_test on merged
+  binaries suite_rc=0 / 0 FAILED ("ds4 tests: ok"; Qwen3.8-fixture skips
+  match main baseline); merged-binary smoke boot 58781 served a real
+  greedy chat request with invalid=0 -> Metal device structs (80-byte ABI,
+  slot_mask grafts, attention core_rows split) exercised END-TO-END;
+  restore 58834 old-binary ARGV-MATCH-FINAL; total downtime ~3 min.
+  wd4 (90-min, file-based) still armed = passive engine-death cover
+  until ~02:57.
+- STATUS: batches A+B+C verified at every gate this box allows. Landing
+  (merge/upstream -> main) pending G-REVIEW dispatch + pass; boot-swap +
+  day-16 seal + F7 checkpoint round-trip remain one operator window.
