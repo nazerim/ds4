@@ -66123,7 +66123,14 @@ uint32_t ds4_qwen4_mtp_slice_rows(uint32_t mtp_pos, uint32_t rows,
 }
 
 #ifdef DS4_HAS_QWEN4_GPU
-static uint64_t qwen4_payload_tensor_bytes(uint32_t rows, uint32_t mtp_rows);
+static uint64_t qwen4_payload_tensor_bytes(uint32_t rows, uint32_t mtp_rows, bool tail);
+
+/* Pending trunk row predicate - upstream v3-era logic, byte-identical. */
+static bool qwen4_payload_tail_state(const ds4_qwen4_gpu_graph *g, uint32_t rows) {
+    return g->mtp_R && rows && g->mtp_tail_valid &&
+           g->mtp_tail_pos == rows - 1u && g->mtp_pos >= rows - 1u;
+}
+#define QWEN4_PAYLOAD_TAIL_BYTES ((uint64_t)DS4_N_EMBD * DS4_N_HC * sizeof(float))
 #endif
 
 uint64_t ds4_session_payload_bytes(ds4_session *s) {
@@ -66138,10 +66145,13 @@ uint64_t ds4_session_payload_bytes(ds4_session *s) {
         bytes += (uint64_t)DS4_N_VOCAB * sizeof(float);
         const uint32_t rows = (uint32_t)s->checkpoint.len;
         /* Same helper the writer uses, with rows_from == 0: one formula
-         * for the estimator and the payload, so they cannot drift. */
-        const uint32_t mtp_rows = ds4_qwen4_mtp_slice_rows(s->qwen4_graph.mtp_pos,
-                                                           rows, 0);
-        bytes += qwen4_payload_tensor_bytes(rows, mtp_rows);
+         * for the estimator and the payload, so they cannot drift.
+         * V4 (option A): when the pending trunk row is live, the nextn
+         * block covers [0, rows-1) and the tail rides as its own section. */
+        const bool tail = qwen4_payload_tail_state(&s->qwen4_graph, rows);
+        const uint32_t mtp_rows = tail ? rows - 1u
+            : ds4_qwen4_mtp_slice_rows(s->qwen4_graph.mtp_pos, rows, 0);
+        bytes += qwen4_payload_tensor_bytes(rows, mtp_rows, tail);
         return bytes;
 #endif
     }
@@ -66326,6 +66336,7 @@ int ds4_session_stage_payload_span(ds4_session *s, ds4_session_payload_file *out
  * Old loaders reject V2 loudly (re-prefill), never misplace. */
 #define DS4_QWEN4_PAYLOAD_TAG 0x51573802u
 #define DS4_QWEN4_PAYLOAD_TAG_V2 0x51573803u
+#define DS4_QWEN4_PAYLOAD_TAG_V4 0x51573804u   /* sliced spans + pending trunk row (option A) */
 /* upstream v3-era alias: 0x51573802 was their V1-payload name, our V1 tag;
  * the tail-preferring v3 format is runtime-only in this fork (see merge notes). */
 #define DS4_QWEN4_PAYLOAD_V2 0x51573802u
@@ -66350,8 +66361,9 @@ static uint64_t qwen4_payload_ple_hist_bytes(void) {
     return (uint64_t)(DS4_N_PLE_CONV - 1u) * DS4_N_PLE_NGRAM * DS4_N_EMBD * DS4_N_HC * sizeof(float);
 }
 
-static uint64_t qwen4_payload_tensor_bytes(uint32_t rows, uint32_t mtp_rows) {
-    uint64_t bytes = sizeof(uint32_t);   /* mtp_rows */
+static uint64_t qwen4_payload_tensor_bytes(uint32_t rows, uint32_t mtp_rows, bool tail) {
+    uint64_t bytes = tail ? 2u * sizeof(uint32_t) : sizeof(uint32_t);   /* mtp_rows (+ tail flag) */
+    if (tail) bytes += QWEN4_PAYLOAD_TAIL_BYTES;
     for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
         if (ds4_qwen4_layer_is_linear(il)) {
             bytes += qwen4_payload_lin_state_bytes() + qwen4_payload_lin_hist_bytes();
@@ -66376,9 +66388,9 @@ static uint64_t qwen4_payload_tensor_bytes(uint32_t rows, uint32_t mtp_rows) {
  * attention/nextn/pos3 row slices (disjoint [rows_from, rows) offsets - the
  * actual chain payload).  The loader must skip exactly these bytes and no
  * more; ds4_test --payload-trim sweeps this split model-free. */
-void ds4_qwen4_payload_link_split(uint32_t rows, uint32_t mtp_rows,
-                                  uint32_t rows_from,
-                                  ds4_qwen4_payload_split *out) {
+static void qwen4_payload_link_split_tail(uint32_t rows, uint32_t mtp_rows,
+                                          uint32_t rows_from, bool tail,
+                                          ds4_qwen4_payload_split *out) {
     ds4_qwen4_payload_split sp = {0};
     sp.header_bytes = (uint64_t)DS4_SESSION_PAYLOAD_U32_FIELDS * sizeof(uint32_t);
     sp.tokens_bytes = (uint64_t)rows * sizeof(uint32_t);
@@ -66401,13 +66413,21 @@ void ds4_qwen4_payload_link_split(uint32_t rows, uint32_t mtp_rows,
     }
     sp.ple_bytes = qwen4_payload_ple_hist_bytes() +
                    (uint64_t)DS4_MAX_PLE_NGRAM * sizeof(uint32_t) + sizeof(uint32_t);
-    /* kept from every link: the mtp_rows u32 plus the row-sliced regions */
-    sp.kept_rows_bytes = sizeof(uint32_t) + attn_bytes + nextn_bytes +
+    /* kept from every link: the mtp_rows u32 (+ v4 tail flag and tail
+     * row when armed) plus the row-sliced regions */
+    sp.kept_rows_bytes = (tail ? 2u * sizeof(uint32_t) + QWEN4_PAYLOAD_TAIL_BYTES
+                               : sizeof(uint32_t)) + attn_bytes + nextn_bytes +
                          (uint64_t)(rows - rows_from) * 16u;   /* pos3 slice */
     sp.skip_bytes = sp.tokens_bytes + sp.logits_bytes + sp.gdn_bytes + sp.ple_bytes;
     sp.keep_bytes = sp.header_bytes + sp.kept_rows_bytes;
     sp.total_bytes = sp.skip_bytes + sp.keep_bytes;
     if (out) *out = sp;
+}
+
+void ds4_qwen4_payload_link_split(uint32_t rows, uint32_t mtp_rows,
+                                  uint32_t rows_from,
+                                  ds4_qwen4_payload_split *out) {
+    qwen4_payload_link_split_tail(rows, mtp_rows, rows_from, false, out);
 }
 
 static ds4_shape g_ds4_test_saved_shape;
@@ -66460,6 +66480,12 @@ static int qwen4_session_save_payload_span(ds4_session *s, FILE *fp,
         payload_set_err(err, errlen, "Qwen3.8 delta span parent must align to row groups of 4");
         return 1;
     }
+    /* V4 (option A): sliced span semantics + upstream's pending trunk row
+     * in one format. The tail predicate is rows-based, so every link of a
+     * chain makes the same v2/v4 decision; the tail section of non-terminal
+     * links is skipped on read (it belongs to an older frontier). */
+    const bool tail = qwen4_payload_tail_state((const ds4_qwen4_gpu_graph *)g, rows);
+    const uint32_t mtp_pos_eff = tail && g->mtp_pos > rows - 1u ? rows - 1u : g->mtp_pos;
     uint32_t header[DS4_SESSION_PAYLOAD_U32_FIELDS] = {
         DS4_SESSION_PAYLOAD_MAGIC,
         DS4_SESSION_PAYLOAD_VERSION,
@@ -66473,7 +66499,7 @@ static int qwen4_session_save_payload_span(ds4_session *s, FILE *fp,
         DS4_N_HEAD_DIM,
         DS4_N_INDEXER_HEAD_DIM,
         DS4_N_VOCAB,
-        DS4_QWEN4_PAYLOAD_TAG_V2,
+        tail ? DS4_QWEN4_PAYLOAD_TAG_V4 : DS4_QWEN4_PAYLOAD_TAG_V2,
     };
     for (uint32_t i = 0; i < DS4_SESSION_PAYLOAD_U32_FIELDS; i++) {
         if (payload_write_u32(fp, header[i], err, errlen) != 0) return 1;
@@ -66486,8 +66512,13 @@ static int qwen4_session_save_payload_span(ds4_session *s, FILE *fp,
     int rc = 0;
     /* V2: nextn rows are sliced to this store's span [rows_from,
      * min(mtp_pos, rows)).  See ds4_qwen4_mtp_slice_rows for the C1 fix. */
-    const uint32_t mtp_rows = ds4_qwen4_mtp_slice_rows(g->mtp_pos, rows, rows_from);
+    const uint32_t mtp_rows = ds4_qwen4_mtp_slice_rows(mtp_pos_eff, rows, rows_from);
     if (rc == 0) rc = payload_write_u32(fp, mtp_rows, err, errlen);
+    if (rc == 0 && tail) rc = payload_write_u32(fp, 1u, err, errlen);
+    if (rc == 0 && tail) {
+        rc = payload_write_tensor_span(fp, g->mtp_tail_R, 0, QWEN4_PAYLOAD_TAIL_BYTES,
+                                       buf, DS4_SESSION_IO_CHUNK, err, errlen);
+    }
     for (uint32_t il = 0; rc == 0 && il < DS4_N_LAYER; il++) {
         if (ds4_qwen4_layer_is_linear(il)) {
             rc = payload_write_tensor_span(fp, g->layer_lin_state[il], 0, qwen4_payload_lin_state_bytes(),
@@ -66571,7 +66602,8 @@ static int qwen4_session_load_payload_span(ds4_session *s, FILE *fp, const uint3
      * lagging whole copy and a V2 slice are structurally identical numbers
      * and could otherwise be misplaced silently. */
     const bool mtp_v2 = h[12] == DS4_QWEN4_PAYLOAD_TAG_V2;
-    if ((h[12] != DS4_QWEN4_PAYLOAD_TAG && !mtp_v2) ||
+    const bool mtp_v4 = h[12] == DS4_QWEN4_PAYLOAD_TAG_V4;
+    if ((h[12] != DS4_QWEN4_PAYLOAD_TAG && !mtp_v2 && !mtp_v4) ||
         h[8] != DS4_N_LAYER || h[9] != DS4_N_HEAD_DIM ||
         h[10] != DS4_N_INDEXER_HEAD_DIM || h[11] != DS4_N_VOCAB || h[6] != DS4_N_EMBD * DS4_N_HC) {
         payload_set_err(err, errlen, "KV checkpoint was written by a different model family or shape");
@@ -66650,6 +66682,26 @@ static int qwen4_session_load_payload_span(ds4_session *s, FILE *fp, const uint3
         payload_set_err(err, errlen, "KV checkpoint MTP rows exceed the token count");
         rc = 1;
     }
+    /* V4: [mtp_rows][tail=1][tail row] section pair. Flag must be 1 (a
+     * tail-less write uses the V2 tag); slice must end before the tail. */
+    uint32_t tail_flag = 0;
+    if (rc == 0 && mtp_v4) {
+        if (payload_read_u32(fp, &tail_flag, remaining, err, errlen) != 0) rc = 1;
+        else if (tail_flag != 1u || rows == 0u || rows_from + mtp_rows > rows - 1u) {
+            payload_set_err(err, errlen, "KV checkpoint v4 tail section is malformed");
+            rc = 1;
+        }
+    }
+    if (rc == 0 && mtp_v4) {
+        if (skip_overwritten)
+            rc = payload_seek_skip_bytes(fp, QWEN4_PAYLOAD_TAIL_BYTES,
+                                         buf, DS4_SESSION_IO_CHUNK,
+                                         remaining, err, errlen);
+        else
+            rc = payload_read_tensor_span(fp, g->mtp_tail_R, 0, QWEN4_PAYLOAD_TAIL_BYTES,
+                                          buf, DS4_SESSION_IO_CHUNK,
+                                          remaining, err, errlen);
+    }
     /* V2 files hold the span slice [rows_from, rows_from + mtp_rows); V1
      * files hold a whole copy [0, mtp_rows) regardless of rows_from (the
      * pre-slicing writer always wrote from tensor offset 0).  The tag is
@@ -66665,7 +66717,7 @@ static int qwen4_session_load_payload_span(ds4_session *s, FILE *fp, const uint3
      * means writer/reader layout drift or corruption - fail closed before
      * seeking or reading a single tensor byte. */
     ds4_qwen4_payload_split split;
-    ds4_qwen4_payload_link_split(rows, mtp_rows, rows_from, &split);
+    qwen4_payload_link_split_tail(rows, mtp_rows, rows_from, mtp_v4, &split);
     if (rc == 0 && split.total_bytes != payload_total) {
         payload_set_err(err, errlen, "KV checkpoint payload size does not match its header");
         rc = 1;
@@ -66764,6 +66816,14 @@ static int qwen4_session_load_payload_span(ds4_session *s, FILE *fp, const uint3
          * the terminal link, whose whole token array is the survivor. */
         token_vec_free(&new_checkpoint);
     } else {
+        /* V4: mirror the live post-forward tail state exactly (valid,
+         * cached=false, tail row at rows-1) so eval after restore takes
+         * the same branch with the same inputs as the live session did. */
+        if (mtp_v4) {
+            g->mtp_tail_valid = true;
+            g->mtp_tail_pos = rows - 1u;
+            g->mtp_tail_cached = false;
+        }
         ds4_td_segment_end(s);   /* v1.3 capture: adopt = lineage boundary, flush while old tokens alive */
         token_vec_free(&s->checkpoint);
         s->checkpoint = new_checkpoint;
