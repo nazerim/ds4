@@ -1037,3 +1037,29 @@ train with allowlisted exact-era pids).
   Known minors: misleading failure wording if --recs passed with
   multi-pair slab (loud, never silent-wrong); prev>=0 guard added
   (conf3c one-liner this batch).
+
+## REGIME REPLAY (pre-registered 18:3x, offline-only, conf-deploy crux)
+Q: does confcal3's .45 gate earn its keep in the LARGE-CONTEXT tool
+regime (where live A/B on toy bench traffic could not show it)?
+Data: sealed slab conf_s3cal_20261105 + saved score npys (official f32
+.8276-source, confcal3 val-scores all-rows). Universe: VAL rows only
+(honest, unseen), label!= -1. Bins: cycle pos (context depth)
+[<8k,8-32k,32-100k,100-200k,200k+] x per-bin: n, true-accept-rate
+(base), each head's coverage@.45, CUT-TRUE-RATE (accept-rate among the
+rows that head cuts = damage-avoided quality; GOOD cuts => well below
+base), kept-set accept rate, AUC. Secondary tables: pos>=32k by pid-
+era; pos>=32k by slot d.
+DECISION SHAPE (fixed before seeing numbers):
+  PROCEED-A/B-v4 iff: (a) confcal3 cut-true-rate <= base - 15pp in
+  BOTH >=32k bins (cuts real bad drafts), (b) official coverage there
+  >= .99 (inert - nothing to lose by replacing), (c) small-bin (<8k)
+  cut-true-rate not materially worse than big bins (i.e. no regime
+  inversion where its cuts are junk on small ctx too), (d) confcal3
+  AUC > official AUC in >=32k bins specifically (ranking advantage is
+  located where deployment claims it).
+  KILL-LINE iff confcal3 cut-true-rate >= base in the >=100k bins
+  (cuts good drafts there = its gate is wrong where we claimed right).
+  Everything else = AMBIGUOUS (report, no adoption push).
+Note: engine-level speed trade (fewer drafts = fewer verify tokens =
+slower when drafts are cheap) stays OUT OF SCOPE offline - this
+answers ONLY 'is the cut decision better in the claimed regime'.
