@@ -44,7 +44,11 @@ offline suggests).
    (zero markov half) remains the conservative fallback. NOT deployable:
    s4full1/s4full2 V1Head form (w1/w2 drift would change model_fp and
    invalidate disk-KV).
-4. Gate semantics: cut iff `sigmoid(logit) >= .45` (threshold on sigmoid).
+4. Gate semantics (v4 review fix - direction was INVERTED in v3 text):
+   engine BREAKS the draft stream when `sigmoid(logit) < .45`
+   (ds4.c:37064-37067; keep iff sigmoid >= threshold, matching
+   eval3c `pred = s >= thresh`). Threshold is on the SIGMOID, not the
+   logit.
 5. Judge on acceptance stats (pooled accept rate, accept-LENGTH histogram,
    coverage), not AUC; tok/s is directional under live traffic.
 6. `trainer/tests/test_gguf_dq.py::test_q8_0_*` green before any repack
@@ -102,11 +106,16 @@ A1b. OFFLINE re-baseline BEFORE booting arm B (rule: retrained drafter
     head => re-baseline): tests/dspark_traffic_probe.sh +
     dspark_temp_battery.sh spawn their OWN engine (refuse while one runs)
     and hardcode SUPPORT=official — run with the engine DOWN and the
-    SUPPORT override pointed at support_AB_confcal3.gguf. v3 ran this
-    for confcal2 (RC 0/0, 8/10 shapes above baseline, toolcall shape
-    -15%); CONFCAL3 NEEDS ITS OWN A1b RUN before its first boot.
-    This is NOT a live A/B step. (A0 old "log snapshot" step dropped:
-    rotate_logs already cp-snapshots every boot.)
+    SUPPORT override pointed at support_AB_confcal3.gguf. **v4 REVIEW
+    MUST-FIX: the scripts HARD-ASSIGN SUPPORT (traffic_probe.sh:10,
+    temp_battery.sh:8) - an external env SUPPORT is silently ignored
+    (same failure class as the v1 boot lever!). Use the proven v3
+    method: cp both to /tmp, sed the SUPPORT line to the confcal3
+    blade path, run the copies (with cd pinned to the repo root).**
+    v3 ran this for confcal2 (RC 0/0, 8/10 shapes above baseline,
+    toolcall shape -15%); CONFCAL3 NEEDS ITS OWN A1b RUN before its
+    first boot. This is NOT a live A/B step. (A0 old "log snapshot"
+    step dropped: rotate_logs already cp-snapshots every boot.)
 A2. Arm order A→B→A→B (first cycle informal, second SCORED). Switch via
     the boot lever above. Banner check + >=5 min post-boot before scoring
     (warm). Engine = 127.0.0.1:8001 (the collect/DSpark profile; 8002 is
@@ -139,9 +148,12 @@ item below); (iii) kept-set accept (accepted/proposed) not more than
 1pp below A; (iv) accept-len hist full-5 share not down >3pp vs A;
 (v) quality: finish_reason distribution sane + A1b (confcal3 file)
 ladder unchanged. STOP-CONDITIONS: >5% paired-t0 big-leg regression in
-EITHER scored window; B coverage overshoots A by >4pp (loose-gate
-signature); any engine errors/tripwires in the era line; sentinel
-anomaly. Mixed/tie => stay official. Thresholds NOT moved mid-flight:
+EITHER scored window; **B gate-KEEP-coverage above the offline
+expectation .9138 by >4pp (i.e. > .9538)** — v4 review fix: "overshoots
+A" was vacuous (official keep-coverage ~.9998, inert; B can never
+exceed it) — the loose-gate signature is B keeping materially MORE
+than offline predicts; any engine errors/tripwires in the era line;
+sentinel anomaly. Mixed/tie => stay official. Thresholds NOT moved mid-flight:
 v4 evaluates confcal3 as-is.
 Both arms run with parity/recs capture ON (symmetric I/O; the
 DS4_TD_PARITY_MAX=200000 cap is capture-only, cannot alter drafting).

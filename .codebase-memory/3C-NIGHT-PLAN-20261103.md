@@ -1117,3 +1117,30 @@ answers ONLY 'is the cut decision better in the claimed regime'.
   first boot). KNOWN GAP flagged for review: bench_ab_3c.py has no
   BIG-leg runner yet (growing multi-turn >=32k context) - implementer
   step owed before v4 execution.
+- 19:0x PACKAGE REVIEW (qwen lane): R1 PASS_WITH_MINORS - PROCEED
+  VERDICT STANDS + goal-post audit ruled HONEST (condition (c) passes
+  literally at <8k, cutTR .333; the inversion is outside all PROCEED
+  conditions and drove the parity-leg design; kept-set lift is
+  +3.2..4.2pp not +4-5; era-list pinning: mid .411 excludes 11552,
+  .394 includes - both reproduced; f32-threshold repr micro-deltas).
+  PROCEED SURVIVES POST-FIX-ONLY EXCLUSION (21843+84093 alone: cutTR
+  gaps 40.2/48.3/40.7pp, merged boot +2.50 CI [+2.16,+2.85]).
+  R2 PASS - artifact FULLY independent: official sha unchanged;
+  4,587 changed bytes all inside window; rescore-through-bytes .8501
+  EXACT, 62/49,281 flips EXACT; re-quantize round-trip BIT-EXACT
+  (weights->artifact provenance deterministic). R3 PASS_WITH_MINORS,
+  MUST-FIXES APPLIED THIS COMMIT: (1) hard-rule-4 gate direction was
+  INVERTED in v3 text (engine cuts on sigmoid < .45, ds4.c:37064);
+  (2) STOP "overshoots A" vacuous (A inert .9998) -> re-anchored
+  "B gate-KEEP-coverage > .9138 + 4pp"; (3) A1b SUPPORT hard-assign
+  trap (silent-wrong-baseline = v1 boot-lever class) -> /tmp
+  script-copy procedure documented; (4) paired-t0 determinism
+  (ds4.c:88032 exact=greedy+exact-sampling, v3 12/12 precedent) must
+  be CHECKED not assumed: BIG-leg runner per-pair completion sha256,
+  divergent pairs dropped+flagged. REMAINING BUILD: --big-leg runner
+  (reviewer shape: 2-4 fixed 40-60k-token seed texts committed OUT of
+  corpus dirs; 4-8 canned multi-KB tool turns growing ctx; per-step
+  sha256+ctok+prompt_tokens to prove >=32k crossing; t=1 reps
+  non-verdict; DS4_TD_PARITY UNSET (never =0, coercion trap) +
+  TRAIN_DUMP redirected during dev). v4 is EXECUTABLE when runner
+  exists + operator signals.
