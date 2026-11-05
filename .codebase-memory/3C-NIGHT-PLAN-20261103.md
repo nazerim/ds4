@@ -1219,3 +1219,26 @@ cheaper test first: does the offline cut-rate prediction hold on
 REPLAYED corpus prompts before burning another arms window.
 Day-16 corpus note grows: 4 arm-sweep eras of bench conversations in
 active/ (identifiable shapes; manifest note owed at seal).
+## PRE-CHECK #1 RESULT: v5 JUSTIFIED (offline gate-semantics simulation)
+Simulated the ENGINE gate walk (per cycle: propose slots until first
+conf<.45 aborts) for both heads over ALL 19,405 val cycles (unseen
+conv-hash rows) - the arms conditions that traffic CAN answer offline:
+  (ii) B/A proposed ratio .851-.905 = 9.5-14.9% cut, >=8% bar PASSES
+       in EVERY context bin (9.5/14.6/14.4/13.8/12.8) AND EVERY era
+       group (11.4/13.1/14.9) - uniform, not bin-lottery.
+  (iii) B kept-accept +1.0..+1.9pp ABOVE A in every slice (gate
+       removes net-junk: cuts at 37% true-accept vs 60% population).
+  Representativeness quantified: corpus A accept 53-65% vs v4 bench
+  94.6% - live arms traffic had 5x LESS reject mass than real use;
+  the STOP flag + fails were a traffic artifact, now proven twice
+  (live A-accept level + B's measured 3.2% cut vs predicted 13.9%).
+  STILL OPEN: (i) speed net - offline cannot price verify-burn saved
+  (~9% of proposed tokens = 63% of cuts would've been wasted verify)
+  vs acceleration lost (~5% of tokens' accept share); at >=32k
+  contexts verify cost dominates per wasted token -> prior favors B
+  but ONLY arms answers.
+DECISION INPUT: v5 (arms on REPLAYED REAL session prefixes at t=0)
+is worth ONE window. v5 spec: pick N>=12 day-15/16 conversations
+(>64k final ctx preferred), replay prefix-turn-by-prefix-turn at t=0
+from a stored snapshot (identical bytes both arms), score conditions
+unchanged. Cost ~= v4 window (2-2.5h).
