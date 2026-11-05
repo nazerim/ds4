@@ -112,3 +112,41 @@ Gates per batch, in order:
 ## Execution log (append)
 - 00:5x v1 SMASHED by review ses_e5364bce0 (findings F1-F7); v2 rebuilt.
 - Batch-0 complete (cherry evidence above).
+- 01:0x **Batch A** `2c931a0` (+33c): 3 hunks; PLE-prefetch taken theirs,
+  RCAB infra grafted around _impl rename; metal-test usage union.
+  Coexist-tier green. (My batch-A adapter was OBSOLETE by batch B —
+  upstream had independently rederived the fork's split; reverted.)
+- 01:1x **Batch B** `45cfb26` (+25c): stage_embeddings/stage_ple split +
+  decode ple_overlap adopted; metal ABI union round 1 (n_hc slot 13,
+  out_layout 14). Coexist-tier green.
+- 01:1x **Batch C** `47e22a7` (+176c, tip): 28 hunks/6 files. Deep
+  resolutions: (a) attention: upstream core_rows split adopted with the
+  fork per-row-verify mechanism grafted inside - upstream else-path IS
+  the fork default (bit-identity preserved), fork env takes precedence
+  over upstream's T==3 2/1-split when armed; (b) WIRE FORMAT: upstream's
+  v3 reuses tag 0x51573803 (fork's V2 lineage format) with different
+  layout - resolved by fork-sovereignty: trio functions swapped to fork
+  bodies, upstream tail becomes runtime-only (+reset re-added at load),
+  upstream's legacy(0x...02)=whole stays compatible with our V1; cost =
+  one predictor rebuild after restore, no silent misread; (c) metal ABI
+  union round 2: slot_mask[3]+masked_tokens joined, out_layout last,
+  sizeof 76->80 TRAILING-PADDING trap caught by both asserts (bumped in
+  host _Static_assert AND device static_assert); (d) server vision:
+  SERVER_MAX_IMAGES=256 gate (upstream arrays sized by it) hoisted ahead
+  of fork keep-images policy; (e) shared_dense env knob hoisted to
+  upstream's new early consumer, duplicate deleted.
+  Build: 0 warnings 0 errors; coexist-tier green (server/mtp-slice).
+- FINDING (pre-existing, NOT merge): tests/test_dspark_rewind.py
+  prefix_slots variants red on MAIN too - test mock not updated for
+  Nov-3/4 instrumentation (end_cause/ds4_td_segment_end/gate). Engine
+  lane owns the fix (mock-only). Reported for morning.
+- 01:2x STOP-TIER running (free-rein window): engine down, full ./ds4_test
+  + make dspark-acceptance in worktree, capped (40/20 min), trap-restore
+  + detached 45-min watchdog + shell-notification = triple coverage;
+  results appended below when green.
+- **G-REVIEW gate (operator directive 20261106): before landing
+  merge/upstream into main, an independent fresh-context code review of
+  the whole merge branch MUST run and its findings be banked.** Landing
+  itself stays coupled to the day-16 seal window (F7 checkpoint
+  round-trip + boot swap); batches + pre-land re-merge can complete
+  overnight.
