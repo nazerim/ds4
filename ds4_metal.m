@@ -52140,6 +52140,35 @@ int ds4_gpu_qwen4_hc_combine_norm_tensor(
         MTLSizeMake(n_hc * DS4_QWEN4_HC_CHUNKS, 1, 1), MTLSizeMake(128, 1, 1), 0);
 }
 
+/* The next single-token hc norm dispatch also prefetches this model range
+ * (see kernel_qwen4_hc_norm). */
+static const void *g_qwen4_pf_map;
+static uint64_t g_qwen4_pf_size, g_qwen4_pf_off, g_qwen4_pf_bytes;
+void ds4_gpu_qwen4_prefetch_next(const void *map, uint64_t size, uint64_t offset, uint64_t bytes) {
+    g_qwen4_pf_map = map; g_qwen4_pf_size = size; g_qwen4_pf_off = offset; g_qwen4_pf_bytes = bytes;
+}
+
+#define QWEN4_PREFETCH_MAGIC 0x9E3779B9u
+/* Consume the pending range: bind it and the sink, return its line count
+ * (0 and a harmless binding when nothing is pending). */
+static uint32_t qwen4_take_prefetch(qwen4_bind *pf, qwen4_bind *sink) {
+    static id<MTLBuffer> sink_buf;
+    if (!sink_buf) sink_buf = [g_device newBufferWithLength:16 options:MTLResourceStorageModePrivate];
+    sink->buf = sink_buf;
+    sink->off = 0;
+    pf->buf = sink_buf;
+    pf->off = 0;
+    const uint64_t bytes = g_qwen4_pf_bytes;
+    g_qwen4_pf_bytes = 0;
+    if (!sink_buf || bytes < 128u ||
+        !qwen4_bind_weight(pf, g_qwen4_pf_map, g_qwen4_pf_size, g_qwen4_pf_off, bytes, "prefetch")) {
+        pf->buf = sink_buf;
+        pf->off = 0;
+        return 0;
+    }
+    return (uint32_t)(bytes / 128u);
+}
+
 int ds4_gpu_qwen4_hc_norm_tensor(
         ds4_gpu_tensor *xn, ds4_gpu_tensor *inj_part, const ds4_gpu_tensor *R,
         const void *model_map, uint64_t model_size, uint64_t gamma_offset, uint64_t inject_offset,
@@ -52148,7 +52177,7 @@ int ds4_gpu_qwen4_hc_norm_tensor(
     const uint64_t wrow = qwen4_hc_row_bytes(weight_type, dim);
     struct { uint32_t n_tokens, n_embd, n_hc, n_inject; float eps; uint32_t pad0, pad1, pad2; } args =
         { n_tokens, n_embd, n_hc, n_inject, eps, 0, 0, 0 };
-    qwen4_bind b[5];
+    qwen4_bind b[7];
     if (n_tokens == 0 || n_embd == 0 || n_hc == 0 || n_hc > 8 || n_inject > 4 || wrow == 0 || (dim % 32) != 0 ||
         !qwen4_bind_tensor(&b[0], R, n_tokens * dim * sizeof(float), "hc norm input") ||
         !qwen4_bind_weight(&b[1], model_map, model_size, gamma_offset, dim * sizeof(float), "hc norm gamma") ||
@@ -52186,8 +52215,15 @@ int ds4_gpu_qwen4_hc_norm_tensor(
     const int kernel = reuse
         ? qwen4_hc_kernel(weight_type, QWEN4_K_HC_NORM_REUSE_F16, QWEN4_K_HC_NORM_REUSE_F32, QWEN4_K_HC_NORM_REUSE_Q8)
         : qwen4_hc_kernel(weight_type, QWEN4_K_HC_NORM_F16, QWEN4_K_HC_NORM_F32, QWEN4_K_HC_NORM_Q8);
-    return qwen4_dispatch(kernel, &args, sizeof(args), b, 5,
-                          MTLSizeMake(reuse ? n_hc : n_hc * DS4_QWEN4_HC_CHUNKS, n_tokens, 1), MTLSizeMake(128, 1, 1), 0);
+    /* 32 groups measured best on M5 Max for the 6.5 MB hc projections. */
+    uint32_t lines = qwen4_take_prefetch(&b[5], &b[6]);
+    if (reuse || n_tokens != 1u) lines = 0;
+    const uint32_t pf_tgs = lines ? 32u : 0u;
+    args.pad0 = lines;
+    args.pad1 = pf_tgs * 128u;
+    args.pad2 = QWEN4_PREFETCH_MAGIC;
+    return qwen4_dispatch(kernel, &args, sizeof(args), b, 7,
+                          MTLSizeMake(reuse ? n_hc : n_hc * DS4_QWEN4_HC_CHUNKS + pf_tgs, n_tokens, 1), MTLSizeMake(128, 1, 1), 0);
 }
 
 int ds4_gpu_qwen4_hc_gate_mix_tensor(
@@ -53488,7 +53524,8 @@ int ds4_gpu_qwen4_moe_mid_shared_row_tensor(
     const uint64_t shared_bytes = (uint64_t)sh_row_bytes * ff_dim;
     const uint32_t out_stride = n_slots_routed + 1u;
     qwen4_moe_args args = { n_tokens, 0u, in_dim, ff_dim, 0u, sh_row_bytes, shared_bytes,
-                            1u, shared_type, sh_row_bytes, 0u, 0u, 0u,
+                            1u, shared_type, sh_row_bytes, 0u,
+                            {0}, 0u, 0u, 0u,
                             (out_stride << 6) | n_slots_routed };
     qwen4_bind b[7];
     if (n_tokens == 0 || (in_dim % 256u) != 0 ||
@@ -53517,7 +53554,8 @@ int ds4_gpu_qwen4_moe_down_shared_row_tensor(
     const uint64_t shared_bytes = (uint64_t)sh_row_bytes * out_dim;
     const uint32_t out_stride = n_slots_routed + 1u;
     qwen4_moe_args args = { n_tokens, 0u, ff_dim, out_dim, 0u, sh_row_bytes, shared_bytes,
-                            1u, shared_type, sh_row_bytes, 0u, 0u, 0u,
+                            1u, shared_type, sh_row_bytes, 0u,
+                            {0}, 0u, 0u, 0u,
                             (out_stride << 6) | n_slots_routed };
     qwen4_bind b[5];
     if (n_tokens == 0 ||
