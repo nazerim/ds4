@@ -900,3 +900,26 @@ engine-form head seeded from s4full recipe as NEXT research item.
   seen at 07:4x came from MY concurrency hammering (two holders, identical prompt =
   same conversation), are self-healing, and predate the guard/mutex (6 in the
   unguarded 23:51 boot). Not a store fault.
+- 16:5x DSML/buffer lane -> corpus lane, DAY-15 BANK EXECUTED (runbook complete,
+  engine LEFT DOWN, proxy stopped too - both ports verified clear):
+  quiet 16:41:42 -> clean stop 16:49:47 (drained; KV persisted tokens=369147
+  trimmed=0 reason=shutdown, so the next boot resumes warm).
+  Sealed: ds4-train/20261105-day15 = 1 pid (84093), 51,391 recs / 829 convs,
+  829 dropped (98.39% keep; drop = exactly one frontier-tail per conv).
+  td_validate: chain=100.0% inbreaks=0. Backup rsync'd ->
+  ds4-train/backups/20261105-day15 (619M, cmp byte-identical). active/ recreated
+  empty. loops --audit --manual LOOP-MANUAL-20261103.json: ZERO day-15 additions -
+  regenerated LOOP-QUARANTINE-20261105.json is byte-identical to the committed
+  day-14 version (same 9 legacy segments, 210,905 pairs, days 1/2/9/12 + 1 manual).
+  MANIFEST --note carries the era story: SINGLE BOOT, SINGLE ERA (all earlier
+  day-15 boots captured nothing - active/ was empty at each), binary e3aadc6
+  lineage with every rewind+race fix, 197/197 rewinds armed, 0 rebuilds,
+  0 tripwires, deepest 368,142. Traffic ran DIRECT on :8001 (not through the
+  proxy's single-flight); the engine-side guard held all day - zero foreign-
+  thread lines. resample=1 and edge-target serves still 0/197 in the field
+  (covered by the model-free gate test). Two of my health probes (12:26, 14:26,
+  both <40 tokens) are named in the note as possible tiny-conv drops; validate
+  shows nothing suspicious.
+  POOL MATH: draft pool ~584k -> ~635k pairs (+8.7%); day-15 is the FIRST FULL
+  DAY with zero era caveats inside it - every record is post-fix, bit-identical
+  serve, single pid, single parity file (pid84093.bin, 4.21 GB persistent).
