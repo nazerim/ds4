@@ -176,3 +176,14 @@ Gates per batch, in order:
   itself stays coupled to the day-16 seal window (F7 checkpoint
   round-trip + boot swap); batches + pre-land re-merge can complete
   overnight.
+- 01:30 **STOP-TIER PASS (C4, pidfile-clean)**: full ./ds4_test on merged
+  binaries suite_rc=0 / 0 FAILED ("ds4 tests: ok"; Qwen3.8-fixture skips
+  match main baseline); merged-binary smoke boot 58781 served a real
+  greedy chat request with invalid=0 -> Metal device structs (80-byte ABI,
+  slot_mask grafts, attention core_rows split) exercised END-TO-END;
+  restore 58834 old-binary ARGV-MATCH-FINAL; total downtime ~3 min.
+  wd4 (90-min, file-based) still armed = passive engine-death cover
+  until ~02:57.
+- STATUS: batches A+B+C verified at every gate this box allows. Landing
+  (merge/upstream -> main) pending G-REVIEW dispatch + pass; boot-swap +
+  day-16 seal + F7 checkpoint round-trip remain one operator window.
