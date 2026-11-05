@@ -1144,3 +1144,19 @@ answers ONLY 'is the cut decision better in the claimed regime'.
   non-verdict; DS4_TD_PARITY UNSET (never =0, coercion trap) +
   TRAIN_DUMP redirected during dev). v4 is EXECUTABLE when runner
   exists + operator signals.
+- 19:0x BIG-LEG RUNNER SHIPPED (bench 062cb4d): --big-leg mode = 2 seeds
+  (50k+65k-token canned doc seeds, sha-deterministic), 6 canned
+  multi-KB tool-result turns growing context, per-turn content_sha256
+  for arm pairing (scorer DROPS divergent pairs - determinism checked,
+  not assumed, per v4 review), t=0 verdict core / t=1 directional,
+  big-leg implies allow-no-stats mid-era. Offline proof suite green:
+  pair-hist parse, 17-bin add, allow_empty + strict raise, seed/result
+  determinism. NOTE for the record: commit ran while a self-test was
+  failing - failure was my TEST constant (3024 vs 3044), code was
+  correct; re-verified clean post-commit. LIVE SMOKE TEST OWED on v4
+  day: first boot = dev boot with DS4_TD_PARITY UNSET + TRAIN_DUMP to
+  /tmp, run one --big-leg seed, confirm >=32k prompt_tokens crossing
+  + era-line cycles>0 at stop, THEN real arms. v4 is now
+  FULLY-BUILT: runner + protocol + artifact + pre-registered rules;
+  execution awaits operator signal + a quiet window (dev smoke, then
+  A->B->A->B big-leg cycles ~1.5-2h).
