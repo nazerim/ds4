@@ -1,5 +1,10 @@
 # AB-PROTOCOL 3C — live A/B for the retrained DSpark conf head
 
+> v5.x amendment (20261105): verdict leg switched from canned big-leg to
+> MEASURED-BAND replay of real recorded conversations (ladder -> band gate
+> 32,768-120,000 prompt_tokens -> scored subset); rules/conditions below
+> unchanged. Live chain: /tmp/ab52/arms52.sh; state: RESUME-3C-20261106.md.
+
 Status: PROTOCOL **v4** (20261105 evening) — v3 executed and VERDICTED
 (stay-official on toy-bench traffic, ledger `23bc4dd`); the regime
 replay that followed PROVED the advantage lives at >=32k contexts
