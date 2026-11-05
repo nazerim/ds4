@@ -1177,3 +1177,17 @@ answers ONLY 'is the cut decision better in the claimed regime'.
   RE-SMOKE #2 RUNNING (v2 runner, same redirect discipline, ~20 min).
   PAIRED-T0 NOTE: tool_choice:'required' NOT honored by server (only
   'none' parsed) - forcing is prompt-engineering + history-shape only.
+- 19:4x DEV SMOKE #2 (v2 runner): PASS. 12/14 turns finish=tool_calls
+  (was 2/14 - real tool-history shape fixed it); 14/14 >=32k (66-98k);
+  IDENTICAL per-turn content sha across seeds (deterministic greedy
+  core proven); era line cycles=153 proposed=566 accept=94.35%
+  replay_fallbacks=0 errors=0; containment held (pid25899 only to
+  /tmp dirs); official collect restored (PID 26564, ARGV-MATCH2,
+  invalid=0, sentinel armed). BONUS FINDING: turn0 ftok ~3-5s =>
+  disk-KV prefix cache HIT from smoke #1 across boots - paired
+  first-cycle asymmetry (cold vs warm prefill) is EXACTLY what the
+  pre-registered informal-first-cycle rule absorbs; no protocol
+  change needed. V4 FULLY GO-READY: runner + scorer (self-tested) +
+  A1b confcal3 PASS + artifact verified + protocol corrected.
+  Execution = operator window (~2-2.5h, 4 boot swaps, user sessions
+  pause minutes each swap).
