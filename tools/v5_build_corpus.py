@@ -107,7 +107,7 @@ def checkpoints(msgs):
     def size(i):
         return sum(len(json.dumps(m)) for m in msgs[:i])
     picks = []
-    for target in (90_000, 180_000, 320_000, 520_000):
+    for target in (90_000, 180_000, 320_000):
         cand = min(idx, key=lambda i: abs(size(i) - target))
         if size(cand) < 40_000:
             continue
