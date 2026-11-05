@@ -1300,4 +1300,8 @@ DECISION POINT (operator): (a) v5.2 window with measured-depth
 selection + band gate (~45 min informal proves band first; scored only
 if it lands); (b) close the conf-adoption line on the record: offline
 dominates, live 8-23k shows quality gain w/o speed gain, >=32k live
-case remains open-by-measurement not by loss.
+case remains open-by-measurement not by loss.- HEARTBEAT DOCTRINE (operator, 20261105 23:4x): heartbeats are single-shot (exit =
+  notification = my wake-up). ALWAYS re-arm a fresh heartbeat shell after
+  handling any trigger, for as long as any unattended window/chain runs;
+  stop re-arming only at window END or campaign close. Applies to the
+  current v5.2 watch (sh_1ac5746f0) and every future overnight run.
