@@ -1092,3 +1092,19 @@ answers ONLY 'is the cut decision better in the claimed regime'.
   small-ctx leg kept as parity-guard since <8k remains official's
   claimed home); (3) decision rule re-anchored on kept-set accept
   + verify-token burn + tok/s at >=32k, not pooled toy accept.
+- 18:5x CONFCAL3 DEPLOY ARTIFACT BUILT + VERIFIED (chain step 1 done):
+  /Volumes/FireCuda520/ds4-train/repack_test/support_AB_confcal3.gguf
+  sha256 a25cf9eea460c5add0462da1be8d3ce06758c6e364a9b578f498637388dd4698
+  (official 0807a67f.. re-verified unchanged, file NOT written; sizes
+  equal 5,989,114,528; changed bytes all in 4,624 B window @
+  4,077,251,392; repack-tool dequant max|d| 9.29e-4; INDEPENDENT
+  rescore THROUGH DEQUANT BYTES: val AUC .8501 == f32, gate-.45 flips
+  62/49,281 (.13%, quant-boundary noise) -> deploy-faithful quality
+  CONFIRMED, same calibration-silent profile as 1b/2).
+  weights artifact note: run_confcal3/confcal1_weights.npz w_full
+  (1,4352) b=0 finite markov 256/256 nonzero.
+  SELF-STumble banked: hand-rolled dequant twice wrong (f16 scale
+  stride confusion, then int8-as-uint8 sign) - canonical path is
+  `from repack_dspark_tensor import q8_0_dequant` (tool layout IS the
+  validator; ds4.c:2330 34B blocks). Future rescorers: import, don't
+  re-implement.
