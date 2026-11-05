@@ -72,22 +72,27 @@ def quarantine_excl(recs_path: str, q) -> set:
 
 def build_pair(recs_path: str, parity_path: str | None, q, mode: str,
                cyc_offset: int = 0, allow_any_era: bool = False,
-               file_id: int = 0):
+               file_id: int = 0, known_exact: frozenset = frozenset()):
     """One (recs[, parity]) pair. markov mode may run parity-less (labels
     come from recs alone); conf mode REQUIRES parity (conf-row features)."""
     stem = os.path.basename(recs_path)
     if mode == "conf" and parity_path is None:
         raise SystemExit("conf mode needs a parity path (features)")
     if mode == "conf" and not allow_any_era:
-        # era guard (D-S0-3): conf labels valid only for pid >= 53508
+        # era guard (D-S0-3): pid>=53508 was a PROXY for the exact-era
+        # boot, valid only under day-13's monotonic pid space; post-
+        # restart boots recycle small pids (engine-lane restarts Nov 4-5)
+        # -> --known-exact-pids carries operator-evidenced exact boots.
         try:
             pid = int(stem.rsplit("pid", 1)[1].split(".")[0])
         except ValueError:
             raise SystemExit(f"cannot parse pid from {stem}")
-        if pid < 53508:
-            raise SystemExit(f"{stem}: pid {pid} < 53508 = seed-batch era, "
-                             "conf labels INVALID (D-S0-3). Override "
-                             "knowingly with --allow-any-era.")
+        if pid < 53508 and pid not in known_exact:
+            raise SystemExit(f"{stem}: pid {pid} < 53508 = presumed seed-"
+                             "batch era, conf labels INVALID (D-S0-3); if "
+                             "this boot ran --mtp-exact-sampling pass "
+                             "--known-exact-pids. --allow-any-era "
+                             "overrides all guards (knowingly).")
     n = os.path.getsize(recs_path) // RECORD_BYTES
     npar = (os.path.getsize(parity_path) // PARITY_STRIDE
             if parity_path else -1)
@@ -206,9 +211,15 @@ def main():
                     help="PARITY='NONE' for markov mode (recs-only labels)")
     ap.add_argument("--quarantine", default=None)
     ap.add_argument("--allow-any-era", action="store_true",
-                    help="skip the conf-mode pid>=53508 era guard (knowingly)")
+                    help="skip the conf-mode era guard entirely (knowingly)")
+    ap.add_argument("--known-exact-pids", default=None,
+                    help="comma list of pids < 53508 whose boot provably "
+                         "ran --mtp-exact-sampling (post-restart pid "
+                         "recycling; D-S0-3 proxy fix 20261105)")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
+    known_exact = frozenset(int(x) for x in a.known_exact_pids.split(",")) \
+        if a.known_exact_pids else frozenset()
     q = None
     if a.quarantine:
         from .loops import load_quarantine
@@ -221,7 +232,8 @@ def main():
         res, next_cyc = build_pair(recs, par, q, a.mode,
                                    cyc_offset=next_cyc,
                                    allow_any_era=a.allow_any_era,
-                                   file_id=file_id)
+                                   file_id=file_id,
+                                   known_exact=known_exact)
         print("pair", os.path.basename(recs), res["stats"])
         pair_stats.append({"file_id": file_id, "file": recs,
                            "stats": res["stats"]})
