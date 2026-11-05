@@ -450,6 +450,16 @@ checkpoint with no cache event at all, and the label was
 for M2: the census can correlate cost with ctx, but only the instrument can
 name the trigger.)
 
+## POINTER (12:30): the invariant audit and the Metal-race lane
+`AUDIT-REWIND-EXITS-20261105.md` enumerates every window exit against the rule that
+all three routes violated (seven `dspark_rewind_end` writers, both drivers' returns,
+three shapes cleared as non-violations) and names ONE unpatched suspect: argmax
+84228-84279 commits tokens and returns with `end = 0` and no `keep`. Left alone on
+purpose — no incident names it; if a rebuild ever prints
+`end_state=ds4_session_eval_dspark_speculative_argmax`, the fix is the same
+tolerance-gated line as `18fa4f8`. Deploy ledger and review dispositions:
+`TODO-20261105.md` + `PLAN-VISION-BUFFER-RACE.md`.
+
 ## ROUTE #3 (22:43:00 live) — armed window, edge position refused. FIXED ecef491, NOT YET DEPLOYED
 
     generation rewind rebuild ctx=69776..69971:195 route=truncation resample=0

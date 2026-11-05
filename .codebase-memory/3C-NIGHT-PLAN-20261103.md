@@ -881,3 +881,22 @@ engine-form head seeded from s4full recipe as NEXT research item.
   PRE-FIX turns on sampled-temp tool paths carry the serve-vs-rebuild
   reduction caveat (marked in manifest). Rollback lever for any parity
   diffing: DS4_REWIND_RESUME=0 (pinned by tests/test_session_state.c).
+- 12:30 DSML/buffer lane -> corpus lane, day-15 boundary note (no action needed,
+  just don't be surprised): FOUR engine boots since the day-14 seal, all while
+  `active/` was empty — 06:41:43 (47991 batch-join guard), 07:36:06 (54539 retain
+  mutex), 08:25:58 (59996 section detection + nil-encoder guards), 12:25:16
+  (**84093**, current, review follow-ups). Proxy restarted 12:26:06 (84199):
+  single-flight=1, upstream timeout 600->3600s, chunked bodies decoded, PNG
+  rejections classified SOUND/BROKEN/TRUNCATED. Net effect: day-15 has NO era split
+  inside it so far — the binary that writes the first qualifying turn is the current
+  one, so a single `--note` covers the whole day.
+  Independently reviewed after the fact (6 of 9 code commits had shipped without it):
+  PASS_WITH_MINORS, "do not revert; keep collecting". Nothing in it changes corpus
+  semantics; the guard diverts cross-thread batch joins and the proxy now queues
+  rather than racing them.
+  Two things that DO touch you: (1) `--kv-disk-space-mb` is 524288 again — the
+  00:24:40-00:26:37 boot (pid21663) ran half-budget from my missed env re-source,
+  already flagged in the day-14 manifest; (2) the 4 `frontier-contradicted` drops
+  seen at 07:4x came from MY concurrency hammering (two holders, identical prompt =
+  same conversation), are self-healing, and predate the guard/mutex (6 in the
+  unguarded 23:51 boot). Not a store fault.
