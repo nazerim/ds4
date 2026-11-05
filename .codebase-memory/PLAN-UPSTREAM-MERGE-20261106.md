@@ -144,6 +144,32 @@ Gates per batch, in order:
   + make dspark-acceptance in worktree, capped (40/20 min), trap-restore
   + detached 45-min watchdog + shell-notification = triple coverage;
   results appended below when green.
+- ROUND-1 FACT (01:19): stopgateC ran with NO model symlink in worktree
+  -> suite + dspark-acceptance skipped (rc0 misreport; capped-rc reads
+  the tail-pipe). Its restore trap fired from WORKTREE cwd (script bug:
+  no cd in trap) -> collector PID 57826 booted from WORKTREE = merged
+  binary accidentally running production collect 01:19:18-01:23:20 with
+  PRODUCTION capture env (blade paths, banner OK, invalid=0) -> doubles
+  as boot-smoke PASS for batch C binary. DAY-16 MANIFEST era note:
+  57826 = merged-code era (~4 min); 58173/58304 = failed lock-refused
+  boots (no records); 58604 = main old-binary collector 01:25:52+.
+- ROUND-2 ABORT (01:21, stopgateC2): bare `stop` from main found no
+  pidfile (engine's was in worktree) -> pidfile-based stop no-op ->
+  correct ABORT-by-design fired; trap restored from main cwd (58604).
+- ROUND-3 ABORT (01:23, stopgateC3): watchdog3 was launched as INLINE
+  bash -c whose command line contains the engine's argv pattern string ->
+  `pgrep -f 'ds4-server --model'` self-matched forever -> fake drain
+  timeout -> abort before suite; ARGV diff then read the watchdog (the
+  real engine 58604 was healthy, invalid=0, pidfile at main).
+- LESSONS BANKED (bind all future chains): (1) engine liveness ONLY via
+  PIDFILE (alive()/status), never pgrep -f argv text; (2) watchdogs are
+  FILE-BASED scripts so their cmdline carries no engine strings;
+  (3) restore traps must cd to the intended repo absolutely; (4) suite
+  needs <cwd>/ds4flash.gguf symlink (it is itself a symlink to the 97.6 GB
+  blade model - "119-byte stub" in old docs = the symlink's size field).
+- ROUND-4 (C4, launched 01:27): pidfile-clean rerun - stop 58604 -> full
+  suite WITH model -> merged-binary smoke (dev-redirect capture) -> trap
+  restore main collector. wd4 file-based, 90 min.
 - **G-REVIEW gate (operator directive 20261106): before landing
   merge/upstream into main, an independent fresh-context code review of
   the whole merge branch MUST run and its findings be banked.** Landing
