@@ -964,3 +964,27 @@ engine-form head seeded from s4full recipe as NEXT research item.
   Scored-window method now: boot era -> sweep -> next boot rotates ->
   parse that era file. Arm isolation by boot = strictly cleaner than
   the byte-offset live-window idea anyway.
+## AB-CAMPAIGN VERDICT 20261105 17:5x: STAY OFFICIAL (rule-conformant)
+Full protocol v3 executed: A1b (confcal2 offline ladder PASS, 8/10
+shapes above no-dspark baseline; 'toolcall' shape -15% = first signal)
+-> P0 PASS (era-cycles 78) -> informal A/B -> SCORED A/B (arm-isolated
+BOOT ERAS; stats flush at session-free corrected mid-campaign;
+--allow-no-stats + rotated-era parse; bench hist fix validated on
+real lines). SCORED: A 85.98%/avg2.379 vs B 84.65%/2.242; full5_share
+B 0.308 vs A 0.284 (only B-lean metric); zero_share 0.407 vs 0.345;
+PAIRED t=0 (n=12 deterministic): B SLOWER 12/12, mean -1.64 t/s
+(-3.9%, >5% STOP not tripped). Mechanism: confcal2 engages (cuts
+~4% proposals/cycle) while official .45 gate ~inert on short fresh
+bench contexts; drafting-everything wins there -> gate value is
+REGIME-DEPENDENT; offline +1.63pp AUC untouched and uncontradicted.
+PRE-REGISTERED RULE APPLIED AS WRITTEN: mixed/B-behind => stay
+official, iterate training; threshold NOT moved (AB-GATE-RULING).
+Follow-up (offline, no engine): does confcal2 beat official on the
+300k+-ctx day-15 runaway-argument regime (era label replay)? That is
+the regime a calibrated gate can win; decide adoption there.
+Engine: RESTORED to official collect boot (PID 16003, argv byte-
+identical, invalid=0, parity armed, sentinel re-armed). Artifacts:
+/tmp/dspark-ab/{ab-verdict.json,era*.json,arm*-*.json,scorer.py};
+blade confcal2 file kept for forensics. Day-16 collection live.
+NEXT: confcal3 (era-guard fix -> slab over day13+14+15 -> joint-head
+train with allowlisted exact-era pids).
