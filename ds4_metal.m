@@ -9865,6 +9865,13 @@ int ds4_gpu_pack_slot_rows_f32_tensor(
 
 int ds4_gpu_begin_commands(void) {
     if (!g_initialized && !ds4_gpu_init()) return 0;
+    /* A second thread reaching here today gets 0 and quietly falls back to
+     * per-operation buffers - which is also why the cross-thread case was
+     * invisible: nothing said "another thread owns the section". Same return
+     * value, now named. */
+    if (g_batch_cb && g_batch_cb_owner_valid &&
+        !pthread_equal(pthread_self(), g_batch_cb_owner))
+        ds4_gpu_note_foreign_batch("join_begin", __builtin_return_address(0));
     /* A failed concurrent FFN must never affect the next command batch. */
     ds4_gpu_parallel_ffn_reset_state(YES);
     if (g_batch_cb) return 0;
@@ -9893,6 +9900,9 @@ int ds4_gpu_flush_encoder(void) {
 int ds4_gpu_flush_commands(void) {
     if (!g_initialized && !ds4_gpu_init()) return 0;
     ds4_gpu_parallel_ffn_reset_state(YES);
+    if (g_batch_cb && g_batch_cb_owner_valid &&
+        !pthread_equal(pthread_self(), g_batch_cb_owner))
+        ds4_gpu_note_foreign_batch("flush_batch", __builtin_return_address(0));
     if (!g_batch_cb) return 0;
 
     ds4_gpu_close_batch_encoder();
@@ -10875,6 +10885,10 @@ static int ds4_gpu_tp_encode_gate_prefetch(uint32_t gate) {
     if (wait_us == 0.0) budget = 4u << 20;
     if (budget == 0u) return 1;
     id<MTLComputeCommandEncoder> enc = ds4_gpu_compute_encoder(g_batch_cb);
+    if (!enc) return 1;   /* advisory prefetch hint: no encoder means the hint is
+                           * lost, not the result. Said out loud because messaging
+                           * nil would do exactly nothing and then still `return 1`,
+                           * which reads as success to every caller forever. */
     ds4_gpu_encode_touch_table(enc, touch, g_tp_prefetch_plan[gate], n, budget);
     ds4_gpu_end_compute_encoder(g_batch_cb, enc);
     return 1;
@@ -11397,6 +11411,10 @@ int ds4_gpu_add_tensor_tp_flag(
     const uint32_t value = (uint32_t)(g_tp_seq + 1u);
     const uint32_t ntg = n / 256u;
     id<MTLComputeCommandEncoder> enc = ds4_gpu_compute_encoder(g_batch_cb);
+    if (!enc) return ds4_gpu_add_tensor(out, a, b, n);   /* every other failure in
+                        * this function already falls back to the plain add; nil
+                        * was the one case that would have fallen through to
+                        * messaging nil, enqueued nothing, and returned success */
     [enc setComputePipelineState:pipeline];
     [enc setBytes:&n length:sizeof(n) atIndex:0];
     [enc setBuffer:abuf offset:ds4_gpu_tensor_offset(a) atIndex:1];
@@ -11507,6 +11525,10 @@ int ds4_gpu_tp_gate_encode(uint32_t layer, uint32_t gate) {
             const uint32_t value = (uint32_t)seq;
             const uint32_t nlines = DS4_TP_POLL_LINES;
             id<MTLComputeCommandEncoder> enc = ds4_gpu_compute_encoder(g_batch_cb);
+            /* No silent success here: this encode publishes the poll flag the peer
+             * waits on, so dropping it would leave the exchange spinning. `return 0`
+             * is the established failure mode two lines above (!poll_pipeline). */
+            if (!enc) return 0;
             [enc setComputePipelineState:poll_pipeline];
             [enc setBuffer:g_tp_poll_buffer
                     offset:(NSUInteger)(seq % DS4_TP_POLL_RING) *
@@ -11842,6 +11864,13 @@ static int ds4_gpu_signal_batch_and_wait_event(const char *label) {
 }
 
 int ds4_gpu_end_commands(void) {
+    /* Detect, do not refuse: ds4.c:23163 does `if (ds4_gpu_end_commands() == 0)
+     * return false;` on a resume path, so a refusal here would turn a naming
+     * improvement into a new failure mode. A foreign end commits the owning
+     * thread's section - the pre-crash interleaving - so it must be heard of. */
+    if (g_batch_cb && g_batch_cb_owner_valid &&
+        !pthread_equal(pthread_self(), g_batch_cb_owner))
+        ds4_gpu_note_foreign_batch("end_batch", __builtin_return_address(0));
     if (!g_batch_cb) {
         ds4_gpu_parallel_ffn_reset_state(YES);
         return 0;

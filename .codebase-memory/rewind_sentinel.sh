@@ -72,7 +72,7 @@ cnt_e() {
 #               ownership-transfer edges.  Those still share the buffer by design, so
 #               the pre-00:23:14 interleaving is live - alert, because that is exactly
 #               the shape that produced a driver assertion.
-BATCH_UNGUARDED='GPU batch section touched by a foreign thread at (compute_encoder|blit_encoder|close_batch|recreate_batch)'
+BATCH_UNGUARDED='GPU batch section touched by a foreign thread at (compute_encoder|blit_encoder|close_batch|recreate_batch|join_begin|end_batch|flush_batch)'
 BATCH_DIVERTED='GPU batch section touched by a foreign thread at (command_buffer|tensor_copy)'
 
 # Baselines for the five failure signals, plus the counters that decide whether
