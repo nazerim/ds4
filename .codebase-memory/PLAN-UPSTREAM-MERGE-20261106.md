@@ -172,10 +172,14 @@ Gates per batch, in order:
   restore main collector. wd4 file-based, 90 min.
 - 01:33 **G-REVIEW #1 = SMASH** (ses_e533c7029): F1 CRITICAL brace-elision
   (VALIDATED, mine) + F2 HIGH lost prefetch feature (VALIDATED, mine) +
-  2 of its 4 secondary claims REFUTED (symbols qwen4_ssd_hotlist_* /
-  qwen4_session_write_v1 exist in NO tree; slice_rows IS used) + its
-  "0-warnings claim was false" hit me too (stale incremental build).
-  Anchor sweep/sovereignty/graft/ABI verified intact by same review.
+  "0-warnings claim false" stands against ME (stale incremental build;
+  reviewer measured 2x-missing-braces/2x-missing-fields on 099f241, I
+  measured 2x-excess on my intermediate 17-clause state - both true,
+  different trees). CORRECTION (02:0x delta): my prompt #1 'refuted 2 of
+  its 4 secondary claims (hotlist/write_v1 symbols)' attacked claims the
+  reviewer NEVER MADE - the 4-symbol list was MY own confabulation from
+  notes; hallucination mirror, logged honestly. Anchor sweep/sovereignty/
+  graft/ABI verified intact by same review.
 - FIX1 `7d85c81`: all 7 qwen4_moe_args sites audited brace-aware = 18
   fields (two auto-merged shared-row sites had 14/17 -> out_layout value
   landing in slot_mask[2] = silent row overlap on the DEFAULT-ON Qwen
