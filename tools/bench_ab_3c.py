@@ -12,6 +12,7 @@ Usage:
   python3 tools/bench_ab_3c.py --arm B --out armB.json
 """
 import argparse
+import hashlib
 import json
 import re
 import statistics
@@ -53,6 +54,55 @@ TOOL_PROMPTS = [
 STATS_RE = re.compile(
     r"ds4: DSpark stats cycles=(\d+) first_tokens=(\d+) proposed=(\d+) "
     r"accepted_draft=(\d+) accept_rate=([\d.]+)% avg_accept=([\d.]+)")
+
+# --- BIG-leg (v4) ------------------------------------------------------------
+# Verdict leg: grow a session past >=32k tokens with DETERMINISTIC content,
+# replay the identical turn script on both arms at t=0, hash completions per
+# turn; scorer pairs by (seed, turn), DROPS pairs whose content sha diverges
+# (paired-t0 rests on greedy+exact-sampling determinism - CHECKED, not
+# assumed: ds4.c:88032, v3 precedent 12/12), then scores tok/s + prompt
+# growth over the surviving pairs. Dev-run ONLY against a boot with
+# DS4_TD_PARITY UNSET (never =0: coerces to 4096) and DS4_TRAIN_DUMP
+# redirected - synthetic cycles must never touch the real corpus.
+BIG_SEED_FILES = ["ds4.c", "ds4_server.c", "AGENT.md", "README.md"]
+BIG_SEED_CHARS = (200_000, 260_000)        # ~50k-65k tokens per seed
+BIG_TURNS = 6                               # tool turns after the seed ask
+BIG_TOOL_SCHEMA = [{
+    "type": "function", "function": {
+        "name": "lookup_context",
+        "description": "Fetch a chunk of previously provided context",
+        "parameters": {"type": "object", "properties": {
+            "chunk": {"type": "integer"}}, "required": ["chunk"]}}}]
+
+
+def big_seed_text(n_chars):
+    """Deterministic seed corpus: fixed manifest concatenated, then
+    sha-extended to exactly n_chars (same bytes on every run/arm)."""
+    buf = []
+    total = 0
+    for name in BIG_SEED_FILES:
+        try:
+            data = open(name, "r", errors="replace").read()
+        except OSError:
+            continue
+        buf.append(f"\n==== FILE {name} ====\n" + data)
+        total += len(buf[-1])
+        if total >= n_chars:
+            break
+    text = "".join(buf)
+    while len(text) < n_chars:
+        h = hashlib.sha256((text[-4096:] + str(len(text))).encode()).hexdigest()
+        text += h * 64
+    return text[:n_chars]
+
+
+def big_tool_result(seed_i, turn):
+    """Deterministic ~4 KB canned tool result (identical across arms)."""
+    parts, s = [], f"seed{seed_i}-turn{turn}"
+    while len("".join(parts)) < 4096:
+        s = hashlib.sha256(s.encode()).hexdigest()
+        parts.append(s)
+    return "".join(parts)[:4096]
 # REAL engine format (ds4_format_len_hist, ds4.c:75285-75300): "k:count"
 # PAIRS with zero bins skipped, e.g. accepted_len_hist=1:900,2:450,3:120,
 # 4:40,5:12 - a [0-9,] class truncates at the first ':' and captures bin
@@ -178,6 +228,70 @@ def parse_stats(log_path, start_offset, allow_empty=False):
     return out
 
 
+def call_messages(port, model, messages, temperature, max_tokens=200):
+    body = {"model": model, "messages": messages,
+            "temperature": temperature, "max_tokens": max_tokens,
+            "tools": BIG_TOOL_SCHEMA, "stream": False}
+    t0 = time.perf_counter()
+    resp = http_json(port, "/v1/chat/completions", body, timeout=1200)
+    wall = time.perf_counter() - t0
+    usage = resp.get("usage") or {}
+    choice = (resp.get("choices") or [{}])[0]
+    msg = choice.get("message") or {}
+    content = msg.get("content") or ""
+    calls = msg.get("tool_calls") or []
+    tc_blob = json.dumps([{"name": (c.get("function") or {}).get("name"),
+                           "args": (c.get("function") or {}).get("arguments")}
+                          for c in calls], sort_keys=True)
+    ctok = int(usage.get("completion_tokens", 0))
+    return {"wall_s": round(wall, 3), "completion_tokens": ctok,
+            "prompt_tokens": int(usage.get("prompt_tokens", 0)),
+            "finish_reason": choice.get("finish_reason"),
+            "content_sha256": hashlib.sha256(
+                (content + tc_blob).encode()).hexdigest()[:16],
+            "tok_s": round(ctok / wall, 2) if wall > 0 else None}
+
+
+def run_big_leg(port, model, temps):
+    """Turn script per seed: [seed-ask] then N tool-call turns; history is
+    FULLY CANNED (user-role growth only, canned assistant echo - no
+    role=tool id protocol) so identical bytes reach both arms and any
+    per-turn divergence isolates to that turn's pair (scorer drops and
+    flags divergent pairs before touching tok/s)."""
+    rows = []
+    for seed_i, n_chars in enumerate(BIG_SEED_CHARS):
+        text = big_seed_text(n_chars)
+        for temp in temps:
+            msgs = [{"role": "user",
+                     "content": "This is a long reference document. Reply "
+                                "with a one-line acknowledgement only.\n\n"
+                                + text}]
+            first = call_messages(port, model, msgs, temp, max_tokens=64)
+            rows.append(dict(seed=seed_i, temperature=temp, turn=0,
+                             crossed_32k=first["prompt_tokens"] >= 32768,
+                             **first))
+            print(f"seed{seed_i} t{temp} turn0: "
+                  f"prompt={first['prompt_tokens']} {first['tok_s']} tok/s",
+                  flush=True)
+            for turn in range(1, BIG_TURNS + 1):
+                msgs.append({"role": "assistant",
+                             "content": f"Sending chunk {turn - 1}."})
+                msgs.append({"role": "user",
+                             "content": "Previous chunk contents:\n"
+                                        + big_tool_result(seed_i, turn - 1)
+                                        + "\n\nNow call lookup_context with "
+                                          f"chunk={turn}. Do not answer in "
+                                          "prose."})
+                r = call_messages(port, model, msgs, temp)
+                r.update({"crossed_32k": r["prompt_tokens"] >= 32768})
+                rows.append(dict(seed=seed_i, temperature=temp,
+                                 turn=turn, **r))
+                print(f"seed{seed_i} t{temp} turn{turn}: "
+                      f"prompt={r['prompt_tokens']} {r['tok_s']} tok/s "
+                      f"finish={r['finish_reason']}", flush=True)
+    return rows
+
+
 def hist_add(hists):
     tot = [0] * N_HIST_BINS
     for h in hists:
@@ -208,6 +322,14 @@ def main():
                          "worth recording now")
     ap.add_argument("--offset", type=int, default=0,
                     help="byte offset for --skip-requests mode")
+    ap.add_argument("--big-leg", action="store_true",
+                    help="v4 verdict leg ONLY: canned growing-context "
+                         "tool-turn sessions at >=32k (run from repo "
+                         "root - seed manifest reads ./ds4.c etc.); "
+                         "pairing/hashing per run_big_leg docstring")
+    ap.add_argument("--big-temps", default="0,1",
+                    help="temperatures for --big-leg (t=0 is the "
+                         "verdict core, t=1 directional)")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
 
@@ -225,24 +347,29 @@ def main():
         import os
         offset = os.path.getsize(a.log)   # byte window starts NOW
         report["log_offset"] = offset
-        for temp in [float(t) for t in a.temps.split(",")]:
-            for rep in range(a.reps):
-                for tag, p in PROMPTS:
-                    r = call(a.port, model, p, temp)
-                    r.update({"prompt_tag": tag, "temperature": temp,
-                              "rep": rep})
-                    report["requests"].append(r)
-                    print(f"t{temp} rep{rep} {tag}: {r['tok_s']} tok/s "
-                          f"({r['completion_tokens']} tok, "
-                          f"finish={r['finish_reason']})", flush=True)
-                for tag, p, tools in TOOL_PROMPTS:
-                    r = call(a.port, model, p, temp, tools=tools)
-                    r.update({"prompt_tag": tag, "temperature": temp,
-                              "rep": rep, "tools": True})
-                    report["requests"].append(r)
-                    print(f"t{temp} rep{rep} {tag}: {r['tok_s']} tok/s "
-                          f"({r['completion_tokens']} tok, "
-                          f"finish={r['finish_reason']})", flush=True)
+        if a.big_leg:
+            report["big_leg"] = run_big_leg(
+                a.port, model, [float(t) for t in a.big_temps.split(",")])
+            time.sleep(3)
+        else:
+            for temp in [float(t) for t in a.temps.split(",")]:
+                for rep in range(a.reps):
+                    for tag, p in PROMPTS:
+                        r = call(a.port, model, p, temp)
+                        r.update({"prompt_tag": tag, "temperature": temp,
+                                  "rep": rep})
+                        report["requests"].append(r)
+                        print(f"t{temp} rep{rep} {tag}: {r['tok_s']} tok/s "
+                              f"({r['completion_tokens']} tok, "
+                              f"finish={r['finish_reason']})", flush=True)
+                    for tag, p, tools in TOOL_PROMPTS:
+                        r = call(a.port, model, p, temp, tools=tools)
+                        r.update({"prompt_tag": tag, "temperature": temp,
+                                  "rep": rep, "tools": True})
+                        report["requests"].append(r)
+                        print(f"t{temp} rep{rep} {tag}: {r['tok_s']} tok/s "
+                              f"({r['completion_tokens']} tok, "
+                              f"finish={r['finish_reason']})", flush=True)
         # sessions flush at request end; a beat covers in-flight ones
         time.sleep(3)
 
@@ -267,7 +394,8 @@ def main():
         for fr in {r["finish_reason"] for r in report["requests"]}}
 
     report["engine_stats"] = parse_stats(a.log, offset,
-                                         allow_empty=a.allow_no_stats)
+                                         allow_empty=(a.allow_no_stats
+                                                      or a.big_leg))
     tot_prop = sum(s["proposed"] for s in report["engine_stats"])
     tot_acc = sum(s["accepted_draft"] for s in report["engine_stats"])
     report["engine_pooled"] = {
