@@ -124,12 +124,17 @@ def call(port, model, prompt, temperature, tools=None, max_tokens=256):
             "tok_s": round(ctok / wall, 2) if wall > 0 else None}
 
 
-def parse_stats(log_path, start_offset):
+def parse_stats(log_path, start_offset, allow_empty=False):
     """Engine stats lines from BYTE OFFSET (recorded at bench start) to
     EOF. Byte-offset windowing is arm isolation by construction: boot
-    truncates the log (size shrinks) - detected and refused. Sessions
-    flush at session DESTROY (ds4.c:76362), i.e. per request, so a sweep
-    already written is complete."""
+    truncates the log (size shrinks) - detected and refused.
+    CORRECTED 20261105: the session-flush point is ds4_session_free
+    (POOL EVICT / SHUTDOWN, ds4.c:76419+76445) - an arm's aggregate
+    stats line lands in ITS boot-era log at the NEXT boot's rotation
+    boundary, NOT during live benching. The night assumption of
+    per-request flush (76362) matched the then-code, not this build.
+    Pass allow_empty=True during a boot era and re-parse the rotated
+    era log afterwards (parse_stats with --skip-requests --offset 0)."""
     size = __import__("os").path.getsize(log_path)
     if size < start_offset:
         raise SystemExit(f"log shrank ({start_offset}->{size}): engine "
@@ -159,6 +164,8 @@ def parse_stats(log_path, start_offset):
                         "accept_len_hist": alh,
                         "draft_len_hist": dlh})
     if not out:
+        if allow_empty:
+            return []
         raise SystemExit(
             "ZERO 'ds4: DSpark stats' lines in window: is the engine "
             "booted with DS4_DSPARK_STATS=1? (never set historically - "
@@ -193,6 +200,12 @@ def main():
     ap.add_argument("--temps", default="0,1")
     ap.add_argument("--skip-requests", action="store_true",
                     help="stats-parse only (from --offset)")
+    ap.add_argument("--allow-no-stats", action="store_true",
+                    help="valid mid-boot-era: engine flushes DSpark stats "
+                         "at session free (pool evict/shutdown) - the "
+                         "era's line appears only in the ROTATED log "
+                         "after the next boot; request-side results still "
+                         "worth recording now")
     ap.add_argument("--offset", type=int, default=0,
                     help="byte offset for --skip-requests mode")
     ap.add_argument("--out", required=True)
@@ -253,7 +266,8 @@ def main():
                 if r["finish_reason"] == fr)
         for fr in {r["finish_reason"] for r in report["requests"]}}
 
-    report["engine_stats"] = parse_stats(a.log, offset)
+    report["engine_stats"] = parse_stats(a.log, offset,
+                                         allow_empty=a.allow_no_stats)
     tot_prop = sum(s["proposed"] for s in report["engine_stats"])
     tot_acc = sum(s["accepted_draft"] for s in report["engine_stats"])
     report["engine_pooled"] = {

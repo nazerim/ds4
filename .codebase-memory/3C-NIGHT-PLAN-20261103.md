@@ -950,3 +950,17 @@ engine-form head seeded from s4full recipe as NEXT research item.
   ref corrected 204->213 (index 1 'vision' unchanged); A1b copies run
   with cd pinned to repo root (/tmp/dspark-ab/, SUPPORT -> blade
   confcal2 sha 5c0286dd verified before launch).
+- P0-GATE CORRECTION (mid-campaign, 20261105 17:2x): the flush point is
+  ds4_session_free (POOL EVICT / SHUTDOWN, ds4.c:76419 call 76445), NOT
+  per-request as the night's S6 assumed (76362 matched then-code only).
+  Each boot era emits ONE aggregate 'DSpark stats' line into its own
+  log, snapshotted at the NEXT boot's rotation. So: informal-A sweep
+  ran 28/28 requests (tool turns finish=tool_calls; tok/s 42->36 as
+  ctx grows; ZERO errors) and its stats line WILL exist at the A->B
+  switch -> P0 satisfied by design of the switch itself. bench script
+  gets --allow-no-stats (mid-era safe); scoring parses ROTATED era
+  logs per arm (parse_stats offset 0), proven on day-15's dump:
+  cycles=114,333 accept=64.69% hist 17-bins decode on REAL line.
+  Scored-window method now: boot era -> sweep -> next boot rotates ->
+  parse that era file. Arm isolation by boot = strictly cleaner than
+  the byte-offset live-window idea anyway.
