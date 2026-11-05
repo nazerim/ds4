@@ -219,3 +219,14 @@ Gates per batch, in order:
 - STATUS: batches A+B+C verified at every gate this box allows. Landing
   (merge/upstream -> main) pending G-REVIEW dispatch + pass; boot-swap +
   day-16 seal + F7 checkpoint round-trip remain one operator window.
+
+DAY-16 MERGE-VERIFY ERA TALLY (for the seal manifest; all official-head
+collectors unless noted): 57826 = MERGED-code era, worktree cwd, prod
+capture env, 01:19:18-01:23:20 (records valid, pre-review code - flag
+era or drop its convs at consumption); collector restart eras 58604,
+62680, 63352, 63659, 63976 (live) - each saw ZERO client traffic (no
+probes), flush at their stops; test boots 58173/58304 = lock-refused,
+no records; smoke boot 58781 = dev capture (/tmp, excluded); ds4_test
+processes = capture disabled by unset env (verified). Verdict: day-16
+corpus integrity = 3c-era eras + 57826 merged-code era (disclose) +
+clean tail.

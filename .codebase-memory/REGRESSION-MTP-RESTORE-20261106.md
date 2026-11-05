@@ -26,6 +26,25 @@ golden-vectors OK | logprob-vectors OK | full vision-model suite OK |
 boot smoke OK. The split is sharp: forward/compute paths fine;
 **save->load->continue numerics broken.**
 
+## C7 scope matrix (per-arm isolates, 02:01) - regression narrowed to MTP state ONLY
+| arm | merged | main |
+|---|---|---|
+| session-rewind WITHOUT GLM_MTP | **OK** | OK |
+| qwen4-prefill-checkpoints (no MTP env) | **OK** | OK |
+| session-rewind WITH GLM_MTP (+SPEC_FORCE_ACCEPT) | ERR (:236) | OK |
+=> plain checkpoint/restore round-trip is HEALTHY on merged; the break
+is specifically the MTP prepared-predictor state path (fork wire vs
+upstream tail-runtime semantics). Confirms suspect #1; option A scope
+is therefore the MTP-state integration only, not the whole trio.
+
+## Corpus contamination check (02:0x) - NEGATIVE, method documented
+Engine capture gate is getenv("DS4_TRAIN_DUMP") at ds4.c:76051: UNSET =
+capture DISABLED inside the binary (the :-real default is a SCRIPT-level
+fallback at ds4-server.sh:161, never in test processes). active/ newest
+recs = train_pid49527/49701 (00:17/00:28, expected 3c scored eras);
+nothing created 01:27-02:02; restarted collectors saw zero traffic
+(no probes - doctrine), so nothing to flush. Smoke boots exported
+/tmp redirects. Day-16 corpus CLEAN.
 ## Prime suspects (sovereignty seam = fork payload trio inside upstream runtime)
 1. **Tail-state mismatch**: fork reader restores `mtp_pos` (V1/V2
    semantics, no tail concept) + my 3-line `mtp_tail_valid=false` reset;
