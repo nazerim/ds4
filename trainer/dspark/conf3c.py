@@ -132,6 +132,9 @@ def main():
         else:
             raise SystemExit("--markov: slab lacks conf_prev and no "
                              "--recs/--parity given")
+        if int(prev.min(initial=0)) < 0:
+            raise SystemExit("conf_prev contains negative token ids - "
+                             "slab built from unresolved seeds?")
         w1 = np.load(a.tensors)["mtp.2.markov_head.markov_w1.weight"]
         rows = np.concatenate(
             [rows, w1[prev].astype(np.float16)], axis=1)  # (R,4352)

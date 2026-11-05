@@ -1006,22 +1006,34 @@ train with allowlisted exact-era pids).
   form head on the MULTI-PID slab (188,219 train / 19,405 val cycles;
   480,177/49,281 rows - val 5.5x night). Val pooled .8501 vs official
   replay .8276 = +2.25pp (n>4x the night's, CI tighter expected).
-  Per-slot ALL 4 beat official: .8787/.8389/.8230/.8058 vs
-  .8690/.8154/.7949/.7771 (official slot0 re-read from its report - my
-  initial .8331 guess was WRONG; margins: slot0 +.97pp THINNEST,
-  slot3 +2.9pp fattest). ECE .0129. PASS_auc true.
+  Per-slot ALL 4 beat official VAL-VS-VAL (review-corrected baseline
+  [.8674/.8131/.8025/.7696]; my earlier table had the pool-wide row
+  set - mixed-row-set MAJOR caught in review): .8787/.8389/.8230/
+  .8058 -> margins +1.13/+2.58/+2.05/+3.62pp (slot3 fattest). The
+  official .8690-slot0 number in 3db9d42 was pool-wide, superseded by
+  this line. Headline bootstrap: +2.25pp CI [+2.03,+2.48] P>0=1.0000
+  (reviewer rng 31337, 10k paired row-resample). ECE .0129. PASS_auc.
+  official ref .8276 from the saved f32 npy (report's f64 .8283 - state
+  source in any external quote).
   CROSS-ERA: per-pid val slices - confcal3 beats official on EVERY
   stable pid (delta +.0018..+.0694; big-clean-era 21843 +2.7pp n=9671,
   day15 84093 +2.4pp n=12634; day13 slice .8544 > night confcal2's
   .8523). Era-allowlist sensitivity PASSES (6848 +2.6pp, 9304 +6.9pp -
   no foreign-era signature). Conv-hash split = no cross-file leakage
-  (same conv same side by construction).
+  (same conv same side by construction). Day13-slice vs night confcal2:
+  .8544 vs .8523 = +0.21pp CI [-0.10,+0.51] = NOISE (review paired
+  test) - confcal3's claim is AGGREGATE + cross-era, not day13-victory.
   CALIBRATION FLIP: gate region (n=7656) pred .4659 obs .4502 =
   +1.58pp OVER-prediction (confcal2/day13 was -2.5pp UNDER) - a
   marginally LOOSE gate direction on the broad pool. Watch item for
   any future A/B mirrors last night's: expect B to cut slightly FEWER
   borderline-bad drafts than truth; coverage .9138.
-  NOT YET: bootstrap CI vs official (reviewer asked to add), review of
-  the 3-file pipeline change (3b900a3) still owed, deploy artifact NOT
-  built (no repack of confcal3 head - premature until review +
-  operator want).
+  NOT YET: deploy artifact (no repack of confcal3 head - premature:
+  arm-B entry needs operator want + blade verify gate). DONE since
+  review CLOSED PASS on the 3-file change (prev independent 200/200
+  raw-byte check; dual-mode replay byte-identical incl == night
+  run_officialreplay1 npy = single-pair path UNREGRESSED; 36/36) +
+  bootstrap CI (above) + per-pid slices independently reproduced.
+  Known minors: misleading failure wording if --recs passed with
+  multi-pair slab (loud, never silent-wrong); prev>=0 guard added
+  (conf3c one-liner this batch).
