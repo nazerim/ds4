@@ -62,18 +62,6 @@ struct qwen4_w_q8 {
     }
 };
 
-/* Extra threadgroups of a latency-bound decode kernel pull the next
- * bandwidth-bound dispatch's weights into the system cache while DRAM is
- * otherwise idle: one load per 128-byte line, reads only.  The sink store
- * needs a line whose words XOR to `magic`; it only keeps the loads live. */
-static inline void qwen4_prefetch_lines(device const uint4 *pf, device uint *sink, uint n_lines, uint magic,
-                                        uint first, uint stride) {
-    for (uint l = first; l < n_lines; l += stride) {
-        const uint4 v = pf[(uint64_t)l * 8u];
-        if ((v.x ^ v.y ^ v.z ^ v.w) == magic) sink[0] = l;
-    }
-}
-
 /* Grouped RMSNorm of one (stream chunk, token): xn = R * rsqrt(mean(R^2)
  * + eps) * gamma over the chunk, plus the chunk's partial dot with each
  * inject row (consumers sum the hc*chunks partials and apply
@@ -86,8 +74,6 @@ kernel void kernel_qwen4_hc_norm(
         device const char  *w_inject,   /* [n_inject][hc*E] */
         device float       *xn,         /* [T][hc*E] */
         device float       *inj_part,   /* [T][hc*chunks][n_inject] */
-        device const uint4 *pf,         /* pad0 > 0: 128-byte lines the next dispatch reads */
-        device uint        *sink,       /* never written in practice; keeps the loads live */
         uint3 tgpig [[threadgroup_position_in_grid]],
         ushort tid [[thread_index_in_threadgroup]],
         ushort3 ntg [[threads_per_threadgroup]],
@@ -96,12 +82,6 @@ kernel void kernel_qwen4_hc_norm(
     const uint s = tgpig.x / QWEN4_HC_CHUNKS;
     const uint chunk = tgpig.x % QWEN4_HC_CHUNKS;
     const uint tok = tgpig.y;
-    if (args.pad0 && s >= args.n_hc && tok == 0) {
-        /* the low-rank projection's weights (qwen4_prefetch_lines) */
-        qwen4_prefetch_lines(pf, sink, args.pad0, args.pad2,
-                             (tgpig.x - args.n_hc * QWEN4_HC_CHUNKS) * ntg.x + tid, args.pad1);
-        return;
-    }
     if (s >= args.n_hc || tok >= args.n_tokens) return;
     const uint E = args.n_embd, dim = E * args.n_hc;
     const uint nth = ntg.x, nsg = nth / 32;
@@ -150,8 +130,7 @@ kernel void kernel_qwen4_hc_norm(
 #define QWEN4_HC_NORM_INSTANCE(SUFFIX, W) \
 template [[host_name("kernel_qwen4_hc_norm_" #SUFFIX)]] \
 kernel void kernel_qwen4_hc_norm<W>(constant ds4_metal_args_qwen4_hc_norm &, device const float *, \
-        device const float *, device const char *, device float *, device float *, device const uint4 *, \
-        device uint *, uint3, ushort, ushort3, ushort, ushort);
+        device const float *, device const char *, device float *, device float *, uint3, ushort, ushort3, ushort, ushort);
 QWEN4_HC_NORM_INSTANCE(f16, qwen4_w_f16)
 QWEN4_HC_NORM_INSTANCE(f32, qwen4_w_f32)
 QWEN4_HC_NORM_INSTANCE(q8, qwen4_w_q8)
@@ -3347,6 +3326,7 @@ struct ds4_metal_args_qwen4_moe {
     uint32_t shared_row_bytes;
     uint32_t n_total_expert;
     uint32_t list_cap;     /* grouped kernels: row stride of the per-expert pair lists */
+    uint32_t n_hc;         /* kernel_qwen4_moe_down_reduce only, 0 elsewhere; mirrors qwen4_moe_args in ds4_metal.m */
     uint32_t out_layout;   /* 0 = default (tok*(n_slots+has_shared)+slot); else
                             * (mid/part row stride << 6) | slot base: the exact
                             * grouped verify path keeps the baseline shared-as-slot
@@ -3946,9 +3926,7 @@ kernel void kernel_qwen4_moe_down_reduce(
         ushort sgitg [[simdgroup_index_in_threadgroup]]) {
     threadgroup float part[17][QWEN4_DOWN_REDUCE_ROWS];
     threadgroup float wgt[8];
-    /* #1238 passed n_hc in this struct's 13th field (named pad0 on its
-     * branch); our line reuses that slot as out_layout — same offset, ours. */
-    const uint n_hc = args.out_layout, ns = args.n_slots, slot = sgitg;
+    const uint n_hc = args.n_hc, ns = args.n_slots, slot = sgitg;
     if (tid < n_hc) wgt[tid] = qwen4_hc_inject_weight(inj, n_hc, tid);
     const uint dim = is_function_constant_defined(qwen4_mv_dim) ? qwen4_mv_dim : args.in_dim;
     const uint wt = is_function_constant_defined(qwen4_mv_type) ? qwen4_mv_type : args.weight_type;
@@ -4487,6 +4465,19 @@ static inline void qwen4_load_raw16_next(thread qwen4_raw16 &r,
         if (group == 0) r.h = *(device const uint4 *)blk;
         if ((group & 1u) == 0)
             r.q = *(device const uint4 *)(blk + 16 + (group >> 1) * 32 + q0 * 8);
+        return;
+    }
+    if (type == 10) {
+        const uint group = b % 8u, half_row = q0 / 2u;
+        device const uchar *blk = (device const uchar *)(row + (uint64_t)(b / 8u) * 84u);
+        if (group == 0u) r.h.x = *(device const uint *)(blk + 80u);
+        r.h.y = blk[group * 2u + half_row];
+        /* Four successive steps extract different two-bit planes of the
+         * same bytes. Q2_K superblocks are only four-byte aligned. */
+        if ((group & 3u) == 0u) {
+            device const uint *qs = (device const uint *)(blk + 16u + (group / 4u) * 32u + half_row * 16u);
+            r.q = uint4(qs[0], qs[1], qs[2], qs[3]);
+        }
         return;
     }
     r = qwen4_load_raw16(row, b, q0, type);
