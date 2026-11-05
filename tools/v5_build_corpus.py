@@ -92,24 +92,30 @@ def build_messages(sid, cur):
 
 
 def checkpoints(msgs):
-    """v5.1: ONE checkpoint per conversation - the smallest user-boundary
-    prefix with est tokens >= 36k (empirical ~1.05 tok/char from the
-    14.4k->15.0k pretest), capped at 90k chars. The v5.0 dedup was
-    broken AND depth accounting was 4x optimistic: ~500k-token cold
-    prefills guaranteed the timeout cascade. Checkpoints at 36-95k sit
-    in the >=32k regime the offline simulation certified (cuts 12.8-
-    14.6%, kept-accept +1.8pp)."""
+    """v5.2 DEPTH LADDER: up to 4 user-boundary prefixes nearest
+    dump-char targets 90k/180k/320k/520k (measured tok/char ranges
+    ~0.24-1.04 across content types, so the true 32-120k-token band is
+    found by MEASURING prompt_tokens in the informal cycle, then
+    selecting per-conversation rungs that landed 32768-120000 - v5.1
+    finding #1: static estimation cannot hit the band). Dedup 20%.
+    The ladder prefixes are byte-stable across boots/conversations, so
+    informal runs warm the scored cycle via disk-KV."""
     idx = [i for i, m in enumerate(msgs)
            if m['role'] == 'user' and i + 1 < len(msgs)][1:]
+    if not idx:
+        return []
     def size(i):
         return sum(len(json.dumps(m)) for m in msgs[:i])
-    band = [i for i in idx if 36_000 <= size(i) <= 90_000]
-    if not band:
-        band = [i for i in idx if 30_000 <= size(i) <= 130_000]
-    if not band:
-        return []
-    pick = min(band, key=lambda i: abs(size(i) - 50_000))
-    return [msgs[:pick] + [{"role": "user", "content": "Continue."}]]
+    picks = []
+    for target in (90_000, 180_000, 320_000, 520_000):
+        cand = min(idx, key=lambda i: abs(size(i) - target))
+        if size(cand) < 40_000:
+            continue
+        if any(abs(size(cand) - size(p)) < 0.2 * target for p in picks):
+            continue
+        picks.append(cand)
+    return [msgs[:i] + [{"role": "user", "content": "Continue."}]
+            for i in sorted(picks)]
 
 
 def main():
