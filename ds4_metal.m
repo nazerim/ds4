@@ -1753,6 +1753,24 @@ static void ds4_gpu_retain_pending_cb(id<MTLCommandBuffer> cb) {
 /* Detach (not wait): waiting happens by the caller OUTSIDE the lock, because a
  * GPU completion wait can take arbitrarily long and must never hold up another
  * thread's buffer allocations. */
+/* The pools are locked for writers; readers came last. `g_pending_cbs count`
+ * outside the mutex is the same bug class that cost the engine its 00:23:14 abort
+ * (shared NSMutableArray touched from handler threads), and two of the three
+ * readers below run on this box - ds4_gpu_synchronize especially, which is a
+ * teardown/health path that can meet a vision thread mid-retain.
+ * own_only = YES answers "how deep is THIS thread's backlog", which is what the
+ * TP depth throttle actually wants now that the list can interleave threads. */
+static NSUInteger ds4_gpu_pending_count(BOOL own_only) {
+    const pthread_t self_thread = pthread_self();
+    NSUInteger n = 0;
+    pthread_mutex_lock(&g_gpu_retain_mu);
+    for (DS4GpuPendingCB *e in g_pending_cbs) {
+        if (!own_only || pthread_equal(e->owner, self_thread)) n++;
+    }
+    pthread_mutex_unlock(&g_gpu_retain_mu);
+    return n;
+}
+
 static NSArray<DS4GpuPendingCB *> *ds4_gpu_take_pending_cbs(BOOL all_threads) {
     const pthread_t self_thread = pthread_self();
     NSMutableArray<DS4GpuPendingCB *> *taken = [NSMutableArray array];
@@ -2864,8 +2882,7 @@ void ds4_gpu_release_zero_prefix_prefill_mask_cache(void) {
     /* Layer-major prefill waits each layer before advancing, so its final
      * release point has no outstanding cache users. Keep the guard here for
      * diagnostic callers that may have an open or asynchronously flushed CB. */
-    if (!g_initialized || g_batch_cb ||
-        (g_pending_cbs && [g_pending_cbs count] != 0)) {
+    if (!g_initialized || g_batch_cb || ds4_gpu_pending_count(NO) != 0) {
         return;
     }
     ds4_gpu_clear_zero_prefix_prefill_mask_cache();
@@ -11511,7 +11528,7 @@ int ds4_gpu_tp_gate_encode(uint32_t layer, uint32_t gate) {
             /* Depth throttle on this thread's own backlog: index from the end of
              * the (now owner-tagged) pending list rather than the raw array, which
              * may interleave other threads' entries. */
-            if ([g_pending_cbs count] > DS4_TP_POLL_MAX_INFLIGHT) {
+            if (ds4_gpu_pending_count(YES) > DS4_TP_POLL_MAX_INFLIGHT) {
                 id<MTLCommandBuffer> old_cb = ds4_gpu_peek_own_pending_cb(
                     (NSUInteger)0);
                 if (old_cb) [old_cb waitUntilCompleted];
@@ -11933,7 +11950,7 @@ int ds4_gpu_synchronize(void) {
     if (!g_initialized && !ds4_gpu_init()) return 0;
     if (g_batch_cb) return ds4_gpu_end_commands();
     ds4_gpu_parallel_ffn_reset_state(YES);
-    if ([g_pending_cbs count] != 0) {
+    if (ds4_gpu_pending_count(NO) != 0) {
         int ok = ds4_gpu_wait_all_pending_command_buffers("synchronize");
         ds4_gpu_release_transient(YES);
         ds4_gpu_model_buffer_cache_maybe_evict("synchronize");

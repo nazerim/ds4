@@ -75,6 +75,7 @@ PY
 grep -ac "POST-BODY-UNFRAMEABLE" "$P" | sed 's/^/  unframeable rejections (want 0): /'
 
 echo "=== 4) single-flight: concurrent POSTs must SERIALISE, not race ==="
+q_before=$(grep -ac "QUEUED" "$P")
 python3 - <<'PY'
 import json, os, threading, time, urllib.request
 key = os.environ["TEST_PROXY_KEY"]
@@ -98,20 +99,31 @@ t0 = time.time()
 for t in ts: t.start()
 for t in ts: t.join()
 wall = time.time() - t0
-ok = [v for v in out.values() if v.startswith("ok")]
-sums = sum(float(v.split()[1].rstrip("s")) for v in ok)
-all_ok = len(ok) == N
-if not all_ok:
-    verdict = "NO - some callers were REJECTED, not queued"
-elif wall > 0.6 * sums:
-    verdict = "YES - serialised; nothing concurrent reached the engine"
-else:
-    verdict = "NO - ran concurrently (wall %.1fs << sum %.1fs)" % (wall, sums)
+lat = sorted(float(v.split()[1].rstrip("s")) for v in out.values() if v.startswith("ok"))
 print("  %d concurrent requests: wall %.1fs | per-request %s" % (N, wall, out))
-print("  all succeeded AND wall ~= sum (serialised)? %s" % verdict)
+print("  latencies (sorted): %s" % ["%.1f" % x for x in lat])
+# Do NOT compare wall against the SUM of latencies: under a single-flight queue each
+# latency already contains the waits of everyone behind it, so summing double-counts
+# and a perfectly serialised run fails the test (it did, reporting "ran
+# concurrently" while the proxy logged two QUEUED waits). Serialisation shows as an
+# arithmetic staircase t, 2t, 3t - and the authoritative evidence is the proxy's own
+# QUEUED lines, checked in shell below.
+if len(lat) == N and lat[0] > 0:
+    step = lat[0]
+    stair = all(abs(lat[i] - (i + 1) * step) < max(0.8, 0.8 * step) for i in range(N))
+    print("  staircase (t,2t,3t)? %s   all callers succeeded: yes" % ("YES" if stair else "no"))
+else:
+    print("  staircase: inconclusive - %d of %d callers succeeded" % (len(lat), N))
 PY
 sleep 0.5
-grep -ac "QUEUED" "$P" | sed 's/^/  requests that waited their turn: /'
+q_after=$(grep -ac "QUEUED" "$P")
+queued=$((q_after - q_before))
+echo "  QUEUED lines added: $queued   (want >= 2: everyone behind the first caller)"
+if [ "$queued" -ge 2 ]; then
+    echo "  VERDICT: serialised - callers were queued, not raced into the engine"
+else
+    echo "  VERDICT: FAIL - concurrency reached the engine"
+fi
 grep -a "QUEUED" "$P" | tail -3 | cut -c1-125
 
 echo "=== 5) engine survived (the whole point) ==="

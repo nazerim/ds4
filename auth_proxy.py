@@ -89,6 +89,16 @@ def _note(key, wait_ms=0):
                 _stats["max_wait_ms"] = max(_stats["max_wait_ms"], wait_ms)
 
 
+def _chunk_name(typ):
+    """PNG chunk types are 4 ASCII bytes, but a corrupt length field shifts the
+    walk off a real boundary and the 'type' becomes control bytes - which
+    json.dumps then emits as \u0000 escapes and a human cannot read. Keep what is
+    printable and mark the rest, so the log says 'garbage' instead of noise."""
+    if len(typ) == 4 and all(65 <= ord(c) <= 90 or 97 <= ord(c) <= 122 for c in typ):
+        return typ
+    return "%s?" % typ.encode("latin-1", "replace").hex()
+
+
 def _png_chunks(raw):
     """Walk the chunk stream: (type, declared_length) per chunk.
 
@@ -105,7 +115,7 @@ def _png_chunks(raw):
     while i + 8 <= len(raw):
         ln = int.from_bytes(raw[i:i + 4], "big")
         typ = raw[i + 4:i + 8].decode("latin-1", "replace")
-        chunks.append(typ)
+        chunks.append(_chunk_name(typ))
         if ln > len(raw):                       # declared size larger than the body
             return {"chunks": chunks, "trailer": typ == "IEND", "aligned": False}
         i += 8 + ln + 4                          # header + data + CRC
@@ -175,6 +185,13 @@ def _image_payload_diagnostics(body):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    # BaseHTTPRequestHandler applies this to the connection socket (handle() ->
+    # settimeout), so a stalled client that stops reading can no longer park the
+    # single-flight permit forever. Without it the semaphore - added to stop two
+    # threads reaching the engine at once - becomes a way for ONE bad client to
+    # freeze the engine for everyone, with the stall bounded by nothing: SSE
+    # writes block in _relay, upstream of any HTTPConnection timeout.
+    timeout = int(os.environ.get("PROXY_CLIENT_TIMEOUT", "900"))
     # SSE latency: never let Nagle hold a small event packet back.
     disable_nagle_algorithm = True
 
@@ -353,7 +370,14 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError:
                     return b"", f"bad chunk size {line[:24]!r}"
                 if size == 0:
-                    self.rfile.readline()      # trailing CRLF after the terminator
+                    # Walk past the terminator AND any trailers, stopping at the
+                    # blank line: leaving trailer bytes in rfile desynchronises the
+                    # NEXT request on this keep-alive connection (framing, not the
+                    # engine, but it would surface as a bogus content error).
+                    while True:
+                        trailer = self.rfile.readline()
+                        if not trailer or trailer in (b"\r\n", b"\n"):
+                            break
                     return bytes(buf), None
                 buf.extend(self.rfile.read(size))
                 self.rfile.readline()          # CRLF after each chunk
