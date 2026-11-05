@@ -1160,3 +1160,20 @@ answers ONLY 'is the cut decision better in the claimed regime'.
   FULLY-BUILT: runner + protocol + artifact + pre-registered rules;
   execution awaits operator signal + a quiet window (dev smoke, then
   A->B->A->B big-leg cycles ~1.5-2h).
+- 19:2x DEV SMOKE #1 RESULT (runner v1): mechanics PASS (B boot argv =
+  confcal3 a25cf9ee via /tmp lever; capture CONTAINED - pid25288 wrote
+  ONLY /tmp/ds4-smoke-train, real active/ untouched; 14/14 turns
+  >=32k ctx (66-100k); era line cycles=129 proposed=213 accept=77%;
+  official reboot ARGV-MATCH + sentinel re-armed). TWO TRAFFIC-SHAPE
+  DEFECTS found & fixed (7f2b499): (1) prose assistant echoes taught
+  the model to stop calling tools (2/14 tool_calls) -> canned history
+  now REAL tool shape (assistant tool_calls + role=tool results);
+  (2) wall tok_s prefill-polluted (0.3 vs engine's true 33 t/s) ->
+  first_token_s added (TTFB), tok_s kept for reference; max_tokens 300.
+  NOTE for day-16 manifest: active/ pids 14145/15381/15799/15923
+  include the v3-campaign BENCH sweeps' tool traffic (real requests on
+  collect-armed boots - legitimate cycles but identifiable synthetic
+  conversations; consumers can exclude known bench prompt hashes).
+  RE-SMOKE #2 RUNNING (v2 runner, same redirect discipline, ~20 min).
+  PAIRED-T0 NOTE: tool_choice:'required' NOT honored by server (only
+  'none' parsed) - forcing is prompt-engineering + history-shape only.
