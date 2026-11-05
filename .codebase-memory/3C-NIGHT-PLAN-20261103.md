@@ -1265,3 +1265,39 @@ LESSON (same class as the sentinel's): the scorer's era-line
 requirement is a HARD gate - a window that loses era lines is dead on
 arrival; capture must VERIFY before rotation. Pre-register that check
 in v5.1 chain.
+## V5.1 WINDOW RESULT 22:20-22:58: FIRST FLAWLESS PIPELINE RUN; HOLD AGAIN
+Pipeline: era lines 4/4, JSONs 4/4, informal gate PASS mid-chain, scored
+cycle completed, restore verified - v5.0's failure modes all closed.
+VERDICT (as pre-registered, no post-hoc edits): ADVANCE=false.
+  (i) paired t0 speed 0.995 FAIL | (ii) cut 4.8% <8% FAIL
+  (iii) kept-accept B +0.45pp PASS (first live PASS - sim direction
+  confirmed: gate removes junk even at 8-23k) | (iv) PASS | stops none.
+FOUR FINDINGS (each closes a hole):
+ 1. REGIME MISS (again, quantified): measured prompts 8.7-23.5k tokens,
+    NOT the intended >=32k - char->token estimation is content-
+    dependent (observed 0.24-1.04 tok/char across convs; static
+    selection CANNOT hit the band). v5.2 fix: MEASURED selection -
+    depth ladder per conv in informal cycle, scored cycle proceeds
+    ONLY if paired prompts land 32k-120k (informal gate adds band
+    check). Cold prefill 32-120k = 1.5-6 min - fits budget.
+ 2. DETERMINISM IS NOT PERFECT (2/9 pairs dropped by sha-mismatch:
+    tool-call args diverged 199v268 ctok; prose 300v300 differ) -
+    batch-vs-single logit ties flip argmax (the reduction-order risk
+    the M1 review warned of). The drop-and-flag mechanism DID exactly
+    its job (n=7 honest pairs); protocol wording must say '>=60%
+    pairs matched' not 'all'.
+ 3. (iii) NOW PASSES LIVE - both heads' era lines (A 74.84% vs B
+    75.29%) show confcal3 cutting net-junk at 8-23k too; consistent
+    with sim (+1.6pp there) and era-stable. The case is directional
+    everywhere; only SPEED remains unproven (and its home regime
+    >=32k remains UNTESTED live - cut there predicted 12.8-14.6%
+    vs 4.8% measured at this depth).
+ 4. Era contamination: cycles=1082/1136 >> v4's 258/267 - third-party
+    agent traffic ran on 8001 during the window (user lanes on the
+    engine). Acceptable for pooled conditions, but v5.2 should note
+    era cycles vs replay-only expectation.
+DECISION POINT (operator): (a) v5.2 window with measured-depth
+selection + band gate (~45 min informal proves band first; scored only
+if it lands); (b) close the conf-adoption line on the record: offline
+dominates, live 8-23k shows quality gain w/o speed gain, >=32k live
+case remains open-by-measurement not by loss.
