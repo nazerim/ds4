@@ -1002,3 +1002,24 @@ train with allowlisted exact-era pids).
   per-pid val-AUC slices (6848/9304/21663 era sensitivity), per-era
   train/val split stats, review of 3-file change (pending since
   3b900a3) BEFORE confcal3 verdict.
+- 18:2x CONFCAL3 RESULT (run_confcal3/, pending review): joint engine-
+  form head on the MULTI-PID slab (188,219 train / 19,405 val cycles;
+  480,177/49,281 rows - val 5.5x night). Val pooled .8501 vs official
+  replay .8276 = +2.25pp (n>4x the night's, CI tighter expected).
+  Per-slot ALL 4 beat official: .8787/.8389/.8230/.8058 vs
+  .8331(?)/.8154/.7949/.7771 (slot3 +2.9pp). ECE .0129. PASS_auc true.
+  CROSS-ERA: per-pid val slices - confcal3 beats official on EVERY
+  stable pid (delta +.0018..+.0694; big-clean-era 21843 +2.7pp n=9671,
+  day15 84093 +2.4pp n=12634; day13 slice .8544 > night confcal2's
+  .8523). Era-allowlist sensitivity PASSES (6848 +2.6pp, 9304 +6.9pp -
+  no foreign-era signature). Conv-hash split = no cross-file leakage
+  (same conv same side by construction).
+  CALIBRATION FLIP: gate region (n=7656) pred .4659 obs .4502 =
+  +1.58pp OVER-prediction (confcal2/day13 was -2.5pp UNDER) - a
+  marginally LOOSE gate direction on the broad pool. Watch item for
+  any future A/B mirrors last night's: expect B to cut slightly FEWER
+  borderline-bad drafts than truth; coverage .9138.
+  NOT YET: bootstrap CI vs official (reviewer asked to add), review of
+  the 3-file pipeline change (3b900a3) still owed, deploy artifact NOT
+  built (no repack of confcal3 head - premature until review +
+  operator want).
