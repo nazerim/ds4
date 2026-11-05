@@ -130,7 +130,17 @@ A3. `python3 tools/bench_ab_3c.py --port 8001 --arm X --allow-no-stats
     shrink-detected byte offsets retained; finish_reason +
     prompt_tokens recorded; accept/draft_len_hist parsed from the REAL
     `k:count` pair format into 17-bin lists; small-context PARITY leg
-    uses the existing prompt set; BIG leg per below).
+    uses the existing prompt set. BIG LEG: `python3
+    tools/bench_ab_3c.py --port 8001 --big-leg --big-temps 0 --out
+    bigX.json` from the REPO ROOT (deterministic 50k/65k canned seeds,
+    6 growing tool turns, per-turn content_sha256 - scorer drops+flags
+    divergent pairs before touching tok/s).
+    **CAPTURE REDIRECT RULE (dev-smoke-learned 20261105):
+    ds4-server.sh resolves `${DS4_TRAIN_DUMP:-real}` /
+    `${DS4_TD_PARITY:-real}` - ABSENT env RE-ARMS the real corpus;
+    "unset to disable" (v4 text earlier) is WRONG for script-mediated
+    boots. Redirect BOTH to /tmp dirs for any dev/smoke boot;
+    DS4_TD_PARITY_MAX=0 never works (coerces to 4096).**
 A4. Restore arm A via plain `./ds4-server.sh restart-collect`.
 
 ## Decision rule (pre-registered, v4 — two-leg traffic)

@@ -62,8 +62,10 @@ STATS_RE = re.compile(
 # (paired-t0 rests on greedy+exact-sampling determinism - CHECKED, not
 # assumed: ds4.c:88032, v3 precedent 12/12), then scores tok/s + prompt
 # growth over the surviving pairs. Dev-run ONLY against a boot with
-# DS4_TD_PARITY UNSET (never =0: coerces to 4096) and DS4_TRAIN_DUMP
-# redirected - synthetic cycles must never touch the real corpus.
+# DS4_TRAIN_DUMP AND DS4_TD_PARITY REDIRECTED to /tmp dirs - absent env
+# RE-ARMS the real corpus via the script's ${VAR:-real} defaults;
+# DS4_TD_PARITY_MAX=0 does not disable (coerces to 4096). Synthetic
+# cycles must never touch the real corpus.
 BIG_SEED_FILES = ["ds4.c", "ds4_server.c", "AGENT.md", "README.md"]
 BIG_SEED_CHARS = (200_000, 260_000)        # ~50k-65k tokens per seed
 BIG_TURNS = 6                               # tool turns after the seed ask
