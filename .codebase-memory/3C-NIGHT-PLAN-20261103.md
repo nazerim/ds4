@@ -988,3 +988,17 @@ identical, invalid=0, parity armed, sentinel re-armed). Artifacts:
 blade confcal2 file kept for forensics. Day-16 collection live.
 NEXT: confcal3 (era-guard fix -> slab over day13+14+15 -> joint-head
 train with allowlisted exact-era pids).
+- 18:0x CONF-SLAB BUILT: conf_s3cal_20261105.npz (5.6 GB, 15 pairs):
+  207,624 cycles total (day13 30,205 | day14 13 pids 126,871 | day15
+  50,548) = 6.9x day-13 pool; ALL pairs pos_mismatch=0, skip_quar=0
+  (day-14/15 audits added nothing -> quarantine-1105 spans live only
+  in days 1/2/9/12, consistent); 11 small-pid files admitted via
+  --known-exact-pids. CRASH-ERA CONFIRMED IN DATA: pid19257 n=6540 vs
+  npar=6574 (34 parity-only records = lost recs ring tail; index join
+  took min cleanly). First launch attempt died on zsh no-word-split
+  ($ARGS as one token) - relaunched via bash script; waiter on process.
+  CHAIN RUNNING: official --slab-replay (full-slab H1 reference) ->
+  conf3c --markov (slab conf_prev mode, no rebuild) -> confcal3. Then:
+  per-pid val-AUC slices (6848/9304/21663 era sensitivity), per-era
+  train/val split stats, review of 3-file change (pending since
+  3b900a3) BEFORE confcal3 verdict.
