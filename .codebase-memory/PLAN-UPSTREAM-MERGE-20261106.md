@@ -10,17 +10,19 @@ is the executable plan. **Nothing here runs without an operator go.**
 | main | `2d7e8dc..` == nazerim/main; ahead 458 / **behind 234** of origin | none - synced |
 | feat/kvstore-tokenizer-fingerprint | worktree `ds4-pr1020`, clean tree, synced; **already merges origin/main incrementally** (5915b7b) | precedent, keep cadence |
 | feat/kvstore-reload-loop-guard | synced | none |
-| pr1149 (2c) pr1179 (17c) pr1179-oct11 (18c) | **LOCAL-ONLY, 37 commits zero remote copies** (Qwen/Metal experiments) | **pushed to nazerim tonight** |
+| pr1149 (2c) pr1179 (17c) pr1179-oct11 (18c) | **LOCAL-ONLY: 20 unique commits, zero remote copies** (pr1179 is a strict subset of pr1179-oct11; Qwen/Metal experiments) | **pushed to nazerim tonight** |
 | fix/unterminated-tool-envelope | on nazerim, 1 commit never merged to main | decide upstream-PR vs retire |
 | int8-moe-prefill | on nazerim; lever REJECTED (PLAN-INT8-MOE closed) | archive |
 | pr1149-ab, pr1238 | fully contained in main | deletable (keep remote, harmless) |
 | worktree ds4-head (detached, stale) | prunable | pruned tonight |
 
 **Doctrine rule this enforces (was violated silently): every lane pushes
-its branch before idle; unpushed work = lost work risk.** 45 unpushed
-commits existed across lanes at audit time including tonight's 37 — the
-headline answer to "are all commits up to date" is now yes; it wasn't
-20 minutes ago.
+its branch before idle; unpushed work = lost work risk.** At audit time
+20 commits were genuinely unpushed (pr1179 ⊂ oct11 — raw branch-line
+counts double-tally them; 37 was my first arithmetic bug) plus 5 pushed
+but unmerged (fix/unterminated, int8-moe) = 25 branch-only not in main.
+Headline answer to "are all commits up to date" is now yes; it wasn't
+25 minutes ago.
 
 ## 2. Merge shape (measured, not guessed)
 - merge-base `b5aedb9` (early Sept). Upstream pace since: Sep 100, Oct
