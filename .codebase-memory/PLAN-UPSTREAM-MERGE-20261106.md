@@ -170,6 +170,34 @@ Gates per batch, in order:
 - ROUND-4 (C4, launched 01:27): pidfile-clean rerun - stop 58604 -> full
   suite WITH model -> merged-binary smoke (dev-redirect capture) -> trap
   restore main collector. wd4 file-based, 90 min.
+- 01:33 **G-REVIEW #1 = SMASH** (ses_e533c7029): F1 CRITICAL brace-elision
+  (VALIDATED, mine) + F2 HIGH lost prefetch feature (VALIDATED, mine) +
+  2 of its 4 secondary claims REFUTED (symbols qwen4_ssd_hotlist_* /
+  qwen4_session_write_v1 exist in NO tree; slice_rows IS used) + its
+  "0-warnings claim was false" hit me too (stale incremental build).
+  Anchor sweep/sovereignty/graft/ABI verified intact by same review.
+- FIX1 `7d85c81`: all 7 qwen4_moe_args sites audited brace-aware = 18
+  fields (two auto-merged shared-row sites had 14/17 -> out_layout value
+  landing in slot_mask[2] = silent row overlap on the DEFAULT-ON Qwen
+  EXACT-VERIFY path); prefetch transplanted at MAIN-HEAD FIDELITY (not
+  9000fb7): globals+take_prefetch+MAGIC define, b[7], reuse-gate, pads,
+  caller w/ env, header decl, device helper + call block + specialization
+  INSTANCE params extended (reuse stays 5-arg, matching main).
+  LESSON: symbol-presence anchor sweep is INSUFFICIENT - dead-but-
+  present code only shows as compiler -Wunused on a FORCED rebuild.
+- FIX2 (device re-parent): my helper splice landed between
+  'template <typename W>' and its kernel - hc_norm IS a template kernel -
+  orphaned template = metal backend unavailable at runtime. Only ever
+  catchable by a boot that DISPATCHES the kernel: Vision-Exp smoke (C4)
+  proves nothing about Qwen kernels. Caught by C5-first qwen-fixture
+  suite (session-rewind: ERR 'metal backend unavailable'); helper moved
+  above the kernel doc comment exactly as main has it. Device .metal is
+  invisible to host compile (no `metal` CLI on CLT-only box) => the
+  QWEN FIXTURE BOOT IS THE GATE, must stay in the pre-land checklist.
+- C5-rerun (sh_1acd9ae60, ~01:57): same pidfile-clean chain on fixed
+  HEAD; wd4 disarmed (chain trap proven 3x); pass criteria: zero 'metal
+  backend unavailable', rowcount-ab/verify-identity/session-rewind/
+  golden-vectors execute (not skip), suite_rc=0.
 - **G-REVIEW gate (operator directive 20261106): before landing
   merge/upstream into main, an independent fresh-context code review of
   the whole merge branch MUST run and its findings be banked.** Landing
