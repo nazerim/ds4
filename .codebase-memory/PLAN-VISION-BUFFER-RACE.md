@@ -260,3 +260,28 @@ generated in-script.
   passed `QUEUE_TIMEOUT/1000` against a value already in seconds, so a "45 s" limit
   rejected callers after 45 ms - the exact fail-fast the semaphore exists to remove.
   Both were caught by running the tests, not by reading the code.
+
+---
+
+## INDEPENDENT REVIEW (foreground, PASS_WITH_MINORS) and dispositions — 12:29
+Six of nine code commits in this lane shipped before review; that was a rule breach,
+now corrected. Verdict: **do not revert; keep collecting day-15.** No blockers.
+
+| id | finding | disposition |
+|---|---|---|
+| **F2** | three reads of `g_pending_cbs` outside `g_gpu_retain_mu` — two on this box (`ds4_gpu_synchronize`, zero-prefix mask-cache release), one TP-only. "The same bug you paid a crash to learn." | **fixed** `e3aadc6`: `ds4_gpu_pending_count(own_only)`; TP depth throttle now counts its own backlog |
+| **F8** | the semaphore is held across an entire SSE relay and the handler had no socket timeout → one stalled client parks the only permit indefinitely; my fix had built a way for a single client to freeze the engine for everyone | **fixed** `e3aadc6`: `PROXY_CLIENT_TIMEOUT` (900 s); release was already airtight in `finally` |
+| **F1** | foreign `flush_commands`/`end_commands` commits the owner's half-encoded batch and **re-stamps ownership**, so the owner becomes foreign to its own section — the original crash stays reachable, and log-only hides it | **deferred, gated**: refusal is unsafe while `ds4.c:23163` treats a refused `end` as fatal, and it is unreachable with `tp.active == false`. **Condition: guard this before any TP or `--batched-session` run, not after the first field log.** |
+| F9 | chunked decoder read one line past the terminator; trailers desync the next request on a keep-alive connection | **fixed** (walk to blank line) |
+| — | PNG chunk "type" can be control bytes when a corrupt length shifts the walk → `\u0000` noise in logs | **fixed**: `_chunk_name()` hex-marks non-printable types |
+| F4 | the three nil-encoder guards verified correct, incl. that `g_tp_flag_prepublished_seq` is set only after a successful fold, so the fallback cannot falsely claim publication | no change |
+| F3 | no lock held across `waitUntilCompleted`/`wait_command_buffer`; single mutex makes AB-BA structurally impossible; every cb commits exactly once | no change |
+| F5 | entries retained by a thread that exits persist until teardown | documented; watermark suggested |
+| F6 | `g_pipeline_cache` is an unguarded shared `NSMutableDictionary` reached by keepalive + TP + owner threads — same race family, pre-existing | documented, not touched |
+| F7 | `tensor_copy` now *fails* for foreign callers where it previously raced; "every caller has a fallback" is a claim, not a proof | watch the tripwire lines; a hit means a flow now errors where it used to crash |
+
+Corrections to my own record: the F1 condition above was claimed to be in this file by
+commit `e3aadc6`'s message and was **not** (grep: 0 matches) — it is now. And the
+`auth_proxy_test.sh` concurrency check reported "ran concurrently" on a perfectly
+serialised run (1.0/1.9/2.9 s staircase, two `QUEUED` lines) because it compared wall
+time to the **sum** of queue latencies; verdict now comes from `QUEUED` + staircase.
