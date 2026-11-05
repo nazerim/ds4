@@ -1063,3 +1063,32 @@ DECISION SHAPE (fixed before seeing numbers):
 Note: engine-level speed trade (fewer drafts = fewer verify tokens =
 slower when drafts are cheap) stays OUT OF SCOPE offline - this
 answers ONLY 'is the cut decision better in the claimed regime'.
+- 18:4x REGIME REPLAY VERDICT: PROCEED (all four pre-registered
+  conditions met with 2.5x margin; kill-line nowhere near):
+  (a) confcal3 cut-true-rate at >=32k: .342/.361/.365/.404 vs bin
+  bases .732/.761/.787/.808 = 37-42pp below base (bar: 15pp) -
+  cuts are overwhelmingly TRUE rejects; kept-set accept rises
+  (+4-5pp) in every big bin. (b) official coverage .9997-.9999 in
+  all >=32k bins = inert exactly where it matters (2-3 cuts total).
+  (c) no regime inversion (8-32k cuts as good; <8k bin n=111 too
+  thin - flagged as open noise, official outranked there .862 vs
+  .807 - note for v4 small-ctx leg). (d) AUC advantage LOCATED in
+  big ctx: .8443/.8501/.8653 vs .8230/.8232/.8428; merged >=32k
+  bootstrap +2.27pp CI [+2.03,+2.51] (rng 777, 2k paired).
+  ERA STABILITY: cutTR/AUC advantage identical across day13,
+  day14-mid, day14-post+day15 groups -> not an era artifact.
+  The toy-bench A/B loss is now EXPLAINED, not overturned: on
+  fresh <8k conversations drafting-everything wins (no bad-draft
+  mass to cut); at >=32k tool traffic the official gate is inert
+  against a 24% reject tail that confcal3 removes at 62% precision.
+  CAVEATS (unchanged): engine speed economics stay out-of-scope
+  offline (cut rows were also free accelerators when accepted -
+  only a big-context A/B measures the net); gate over-predicts
+  +1.6pp now (watch item FLIPPED vs confcal2's under-prediction).
+  PATH TO v4 (A/B-PROTOCOL needs rewrite as v4): (1) arm B =
+  CONFCAL3 - needs repack + blade verify + review (gated chain,
+  confcal2-era procedure); (2) traffic = big-context tool chains
+  (>=32k, thinking+tool mix, fixed seeds for the paired-t0 leg;
+  small-ctx leg kept as parity-guard since <8k remains official's
+  claimed home); (3) decision rule re-anchored on kept-set accept
+  + verify-token burn + tok/s at >=32k, not pooled toy accept.
