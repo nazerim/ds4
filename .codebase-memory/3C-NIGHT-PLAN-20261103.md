@@ -1305,3 +1305,52 @@ case remains open-by-measurement not by loss.- HEARTBEAT DOCTRINE (operator, 202
   handling any trigger, for as long as any unattended window/chain runs;
   stop re-arming only at window END or campaign close. Applies to the
   current v5.2 watch (sh_1ac5746f0) and every future overnight run.
+## V5.2 WINDOW RESULT 23:29-00:29: FIRST SCORED A/B IN-BAND (86-97k TOKENS) - HOLD. CONF LINE CLOSED.
+Pipeline: era lines 4/4, band gate PASS by MEASUREMENT: selection
+{0:95.7k, 2:92.1k, 3:93.7k, 5:86.5k, 7:97.2k} prompt_tokens (A1==B1
+pairing enforced in gate); scored 5 convs x 1 ckpt; restore verified
+(ARGV-MATCH x2 + live diff PASS, sentinel baselines ALL ZERO, PID 49807).
+VERDICT (pre-registered rules, never edited post-hoc): ADVANCE=false.
+  (i) paired t0 speed median 1.000 PASS (n=2 only - caveat 1)
+  (ii) cut rate 3.1% (1.70->1.65 prop/cycle) FAIL vs >=8%
+  (iii) kept-accept -0.29pp PASS-within-tolerance BUT sign-flipped vs
+        v5.1's +0.45pp; both inside binomial noise (n~1024-1048 proposals,
+        sd ~1.4pp) - quality direction NOT established live in ANY regime
+  (iv) full5 +0.71pp PASS | (v) parity 0.992 PASS
+  STOP FLAG: coverage_overshoot FIRES (keep 96.9% > .9538-equivalent):
+        the gate is near-INERT live in its own home regime.
+THE finding: offline->live transfer FAILS in cut coverage, mechanistically
+explained. val AUC +2.25pp and gate-semantics sim (same blade bytes,
+rescore-through .8501 exact) predicted 12.8-14.6% cuts at >=32k; live
+measured 3.1% at 86-97k (4.8% at 8-23k, v5.1). Day-13 watch item CONFIRMED
+as root cause: confcal3 OVER-predicts confidence (+1.6pp offline), and on
+NOVEL-provenance draft cycles (live replay creates cycles absent from the
+slab; the sim used corpus-provenance cycles) the over-prediction is
+stronger. Fixed threshold .45 + over-confident gate = cuts nothing. The
+"over is the safe direction" reading from day-13 was WRONG: over-prediction
+is exactly what kills the speed case. Separation of ranking skill (real,
+offline) from operating-point coverage (broken, live).
+Caveats (honest):
+ 1. Determinism degrades with depth: 2/5 pairs matched (40%) < the
+    pre-announced >=60% language; 3 diverged (two length-capped 300/300
+    sha-flips + 192v215 + 300v256). Unpaired wall ratios point the same
+    way (B equal-or-faster on 5/5 by <=2%; median parity 0.992), so the
+    no-speed conclusion is robust; the paired leg alone would be thin.
+ 2. Era cycles 616/621 - clean replay+parity only (no third-party traffic
+    unlike v5.1's 1082/1136).
+DECISION (pre-registered branch (b) from 23:00): the conf-adoption line is
+CLOSED ON RECORD. All regimes now measured live: toy(v4 HOLD), 8-23k(v5.1
+HOLD), 86-97k(v5.2 HOLD + coverage STOP). If ever reopened, the lever is
+CALIBRATION to the live score distribution or a threshold re-pre-registration
+(.45 never moved mid-flight - that discipline held), NOT more cycles:
+confcal4 on the identical recipe would reproduce the identical gap.
+Artifacts kept: blade support_AB_confcal3.gguf (sha a25cf9ee...88dd4698),
+run_confcal3/ + official replay under labels3c/, this ledger.
+DAY-16 MANIFEST era-boundaries (bench/replay traffic; copied here before
+any /tmp cleanup): A1 1105 22:58:12->23:53 (PID 43575 official, also holds
+v5.1-restore tail+sentinel), B1 23:53->1106 00:06:4 (PID 49377 BLADE
+confcal3 head), A2 00:06:4->00:17:3 (PID 49527 official, scored), B2
+00:17:4->00:28:3 (PID 49701 BLADE, scored), restore 49807 official from
+00:28:4 (ARGV-verified). v5.1 window eras are on day-15 side (22:19-22:58).
+CLEANUP: /tmp/v5-corpus /tmp/v52-corpus /tmp/ab5 /tmp/ab51 DELETED (real
+session text + superseded evidence); /tmp/ab52 kept until day-16 seal.
