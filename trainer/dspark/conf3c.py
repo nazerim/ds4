@@ -100,27 +100,38 @@ def main():
     slot_idx, commit, valid, meta = masked_views(slab)
     rows = slab["conf_rows"]                      # f16 (total_slots, 4096)
     if a.markov:
-        if not (a.recs and a.parity):
-            raise SystemExit("--markov needs --recs and --parity")
-        from .official3c import kept_cycles
-        (idx, cpos, seed_c, dlen, w_c, klab, nl, props) = kept_cycles(
-            a.recs, a.parity)
-        # cross-assert rebuilt keep-pass vs slab meta (official3c pattern)
-        for col, ours, name in ((0, cpos, "pos"), (1, dlen, "dlen"),
-                                (3, klab, "klab"), (4, w_c, "w"),
-                                (5, nl, "nl")):
-            if not np.array_equal(meta[:, col].astype(np.int64), ours):
-                raise SystemExit(f"slab meta {name} mismatch vs rebuild")
-        if int(dlen.sum()) != rows.shape[0]:
-            raise SystemExit("row count mismatch vs rebuilt dlen sum")
-        prev = np.zeros(rows.shape[0], np.int64)
-        off = 0
-        for c in range(len(idx)):
-            k = int(dlen[c])
-            prev[off] = seed_c[c]
-            if k > 1:
-                prev[off + 1:off + k] = props[c, :k - 1]
-            off += k
+        have_prev = "conf_prev" in slab.files
+        if a.recs and a.parity:
+            from .official3c import kept_cycles
+            (idx, cpos, seed_c, dlen, w_c, klab, nl, props) = kept_cycles(
+                a.recs, a.parity)
+            # cross-assert rebuilt keep-pass vs slab meta (official3c pattern)
+            for col, ours, name in ((0, cpos, "pos"), (1, dlen, "dlen"),
+                                    (3, klab, "klab"), (4, w_c, "w"),
+                                    (5, nl, "nl")):
+                if not np.array_equal(meta[:, col].astype(np.int64), ours):
+                    raise SystemExit(f"slab meta {name} mismatch vs rebuild")
+            if int(dlen.sum()) != rows.shape[0]:
+                raise SystemExit("row count mismatch vs rebuilt dlen sum")
+            prev = np.zeros(rows.shape[0], np.int64)
+            off = 0
+            for c in range(len(idx)):
+                k = int(dlen[c])
+                prev[off] = seed_c[c]
+                if k > 1:
+                    prev[off + 1:off + k] = props[c, :k - 1]
+                off += k
+            if have_prev:
+                # multi-pair slabs carry per-row prev (S3b pairing); the
+                # rebuild path doubles as its equivalence proof
+                if not np.array_equal(prev, slab["conf_prev"].astype(
+                        np.int64)):
+                    raise SystemExit("slab conf_prev != rebuilt prev")
+        elif have_prev:
+            prev = slab["conf_prev"].astype(np.int64)
+        else:
+            raise SystemExit("--markov: slab lacks conf_prev and no "
+                             "--recs/--parity given")
         w1 = np.load(a.tensors)["mtp.2.markov_head.markov_w1.weight"]
         rows = np.concatenate(
             [rows, w1[prev].astype(np.float16)], axis=1)  # (R,4352)

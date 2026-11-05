@@ -84,8 +84,12 @@ def kept_cycles(recs_path, parity_path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--slab", required=True)
-    ap.add_argument("--recs", required=True)
-    ap.add_argument("--parity", required=True)
+    ap.add_argument("--recs", default=None)
+    ap.add_argument("--parity", default=None)
+    ap.add_argument("--slab-replay", action="store_true",
+                    help="multi-pair mode: prev tokens come from the "
+                         "slab's conf_prev (labels3c >= 20261105); skips "
+                         "the single-pair rebuild + H2 (needs no recs)")
     ap.add_argument("--tensors",
                     default="/Volumes/FireCuda520/ds4-train/tensors-20261101/"
                     "mtp_nonexpert_f32.npz")
@@ -95,16 +99,29 @@ def main():
 
     slab = np.load(a.slab, allow_pickle=True)
     meta = slab["meta"]                     # pos,dlen,conv,klab,w,nl
-    (idx, pos, seed, dlen, w, klab, nl, props) = kept_cycles(a.recs,
-                                                             a.parity)
-    # cross-assert reconstruction vs slab meta (cycle-by-cycle)
-    if len(idx) != meta.shape[0]:
-        raise SystemExit(f"kept cycles {len(idx)} != slab cycles "
-                         f"{meta.shape[0]}")
-    for col, ours, name in ((0, pos, "pos"), (1, dlen, "dlen"),
-                            (3, klab, "klab"), (4, w, "w"), (5, nl, "nl")):
-        if not np.array_equal(meta[:, col].astype(np.int64), ours):
-            raise SystemExit(f"slab meta {name} mismatch vs reconstruction")
+    if a.slab_replay:
+        if "conf_prev" not in slab.files:
+            raise SystemExit("--slab-replay: slab has no conf_prev "
+                             "(rebuild with labels3c >= 20261105)")
+        prev = slab["conf_prev"].astype(np.int64)
+        total = int(prev.shape[0])
+        if total != int(slab["slot_label"].shape[0]):
+            raise SystemExit("conf_prev rows != slot_label rows")
+        idx = seed = dlen = None
+    else:
+        if not (a.recs and a.parity):
+            raise SystemExit("--recs and --parity required (or --slab-replay)")
+        (idx, pos, seed, dlen, w, klab, nl, props) = kept_cycles(a.recs,
+                                                                 a.parity)
+    if idx is not None:
+        # cross-assert reconstruction vs slab meta (cycle-by-cycle)
+        if len(idx) != meta.shape[0]:
+            raise SystemExit(f"kept cycles {len(idx)} != slab cycles "
+                             f"{meta.shape[0]}")
+        for col, ours, name in ((0, pos, "pos"), (1, dlen, "dlen"),
+                                (3, klab, "klab"), (4, w, "w"), (5, nl, "nl")):
+            if not np.array_equal(meta[:, col].astype(np.int64), ours):
+                raise SystemExit(f"slab meta {name} mismatch vs reconstruction")
 
     z = np.load(a.tensors)
     w_off = z["mtp.2.confidence_head.proj.weight"].astype(
@@ -113,26 +130,27 @@ def main():
     assert w_off.size == N_EMBD + 256, w_off.shape
     w_h, w_m = w_off[:N_EMBD], w_off[N_EMBD:]
 
-    # prev-token per stored row: cycle rows d=0..dlen-1 -> seed, props[:d-1]
-    total = int(dlen.sum())
-    prev = np.zeros(total, np.int64)
-    slot = np.zeros(total, np.int64)
-    off = 0
-    for c in range(len(idx)):
-        k = int(dlen[c])
-        prev[off] = seed[c]
-        if k > 1:
-            prev[off + 1:off + k] = props[c, :k - 1]
-        slot[off:off + k] = np.arange(k)
-        off += k
-    assert off == total == slab["slot_label"].shape[0]
+    if idx is not None:
+        # prev-token per stored row: cycle rows d=0..dlen-1 -> seed,
+        # props[:d-1] (slab mode took prev from conf_prev above)
+        total = int(dlen.sum())
+        prev = np.zeros(total, np.int64)
+        off = 0
+        for c in range(len(idx)):
+            k = int(dlen[c])
+            prev[off] = seed[c]
+            if k > 1:
+                prev[off + 1:off + k] = props[c, :k - 1]
+            off += k
+        assert off == total == slab["slot_label"].shape[0]
 
     h = slab["conf_rows"].astype(np.float32)
     base_h = h @ w_h                        # h-only component (H2 below)
     mk = w1[prev] @ w_m                     # markov component (H3 below)
     score_h1 = 1.0 / (1.0 + np.exp(-(base_h + mk)))       # engine pairing
-    score_h2 = 1.0 / (1.0 + np.exp(-(base_h + w1[seed.repeat(dlen.tolist())]
-                                    @ w_m)))              # all-prev=seed
+    score_h2 = None if dlen is None else \
+        1.0 / (1.0 + np.exp(-(base_h + w1[seed.repeat(dlen.tolist())]
+                             @ w_m)))                     # all-prev=seed
     # per-hypothesis metrics through the shared eval machinery
     slot_idx, commit, valid, _ = masked_views(slab)
     y = commit.astype(np.float64)
@@ -151,13 +169,17 @@ def main():
     report = {"protocol": {
         "weights": "official confidence_proj + markov_w1 (f32 npz, S5-"
                    "verified bit-identical dequant)",
+        "mode": "slab-replay (conf_prev)" if a.slab_replay
+                else "single-pair rebuild",
         "pairing_H1_engine": "prev_0=seed, prev_d=props[d-1] "
                              "(ds4.c:37033-37064, 80320)",
-        "pairing_H2": "prev_d=seed for all d",
-        "cycles_asserted_vs_slab_meta": int(len(idx)),
+        "pairing_H2": "prev_d=seed for all d" if not a.slab_replay
+                      else "not computed in slab mode",
+        "cycles_asserted_vs_slab_meta": 0 if idx is None else int(len(idx)),
         "rows": total},
-        "H1_engine_pairing": metrics(score_h1),
-        "H2_seed_only_prev": metrics(score_h2)}
+        "H1_engine_pairing": metrics(score_h1)}
+    if score_h2 is not None:
+        report["H2_seed_only_prev"] = metrics(score_h2)
     with open(os.path.join(a.out_dir, "officialreplay_report.json"),
               "w") as f:
         json.dump(report, f, indent=1)

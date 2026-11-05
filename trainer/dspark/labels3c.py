@@ -120,6 +120,7 @@ def build_pair(recs_path: str, parity_path: str | None, q, mode: str,
              "excl_idx": len(excl_idx),
              "quarantine": bool(q)}
     slots_conf = []   # per kept cycle: (conf_rows[dlen,4096], labels[dlen])
+    slot_prev = []    # per-row prev token (S3b pairing: seed, props[d-1])
     mk_seed, mk_next, mk_valid = [], [], []
     mk_file, mk_ridx = [], []
     meta = []
@@ -165,6 +166,11 @@ def build_pair(recs_path: str, parity_path: str | None, q, mode: str,
                     np.float16))  # astype copies; no view outlives the loop
             slot_lbl.append(lbl)
             slot_cyc.append(np.full(dlen, cyc, dtype=np.int32))
+            prev = np.empty(dlen, np.int32)   # engine conf pairing
+            prev[0] = seed if seed >= 0 else labels[0]
+            if dlen > 1:
+                prev[1:] = props[:dlen - 1]
+            slot_prev.append(prev)
             meta.append((pos, int(dlen), int(conv[i]), int(klab) if klab
                          is not None else -1, w, nl))
             stats["kept"] += 1
@@ -192,6 +198,8 @@ def build_pair(recs_path: str, parity_path: str | None, q, mode: str,
                              else np.zeros(0, np.int8))
         out["slot_cycle"] = (np.concatenate(slot_cyc) if slot_cyc
                              else np.zeros(0, np.int32))
+        out["conf_prev"] = (np.concatenate(slot_prev) if slot_prev
+                            else np.zeros(0, np.int32))
         out["meta"] = np.array(meta, dtype=np.int32) if meta else np.zeros(
             (0, 6), np.int32)
     else:
@@ -242,7 +250,8 @@ def main():
                    for k, v in res.items() if k != "stats"}
         else:
             # concat simple fields (meta/slot arrays)
-            for k in ("conf_rows", "slot_label", "slot_cycle", "mk_seed",
+            for k in ("conf_rows", "slot_label", "slot_cycle", "conf_prev",
+                      "mk_seed",
                       "mk_next", "mk_valid", "mk_file", "mk_ridx", "meta"):
                 if k in agg and k in res and len(res[k]):
                     agg[k] = np.concatenate([agg[k], res[k]])
