@@ -73,10 +73,16 @@ lives in the docs listed under POINTERS; this file is the map.
   see memo).
 
 ## Outstanding handoffs (queued, none urgent)
-- **KV lane:** refresh #1020 (`feat/kvstore-tokenizer-fingerprint`,
-  worktree ds4-pr1020) + #1022 (`feat/vision-image-budget`) onto landed
-  main - known 4-file conflict map in PLAN-UPSTREAM-MERGE execution log
-  (PR-STATUS doc has full state; #1163/#785 left MERGEABLE deliberately).
+- **KV lane:** #1020 (`feat/kvstore-tokenizer-fingerprint`) + #1022
+  (`feat/vision-image-budget`) **REFRESHED & MERGEABLE (20261106 ~19:00)** -
+  merged `origin/main` (upstream) into each (276/356 commits, normal merge,
+  no force; pushed to nazerim -> 9cbf7e5 / aba2f94). Note: refresh target was
+  **origin/main** (upstream), NOT fork main - that un-conflicts the upstream
+  PRs; the older "4-file conflict map" in PLAN-UPSTREAM was against fork main
+  and is superseded. Resolutions: #1020 single ds4.c struct-field (keep
+  tokenizer_fp trio + upstream qwen4_session_bytes); #1022 single
+  ds4_server.c (keep vision-budget + upstream SERVER_MAX_IMAGES 256 backstop,
+  define kept for its stack arrays). #1163/#785 remain MERGEABLE (ping due).
 - **Engine lane:** F1 gate before any TP/--batched-session (their
   HANDOVER priority list); stale mock in tests/test_dspark_rewind.py
   (red on main since Nov-3/4 instrumentation, mock-only fix);
