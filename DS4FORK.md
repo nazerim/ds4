@@ -1470,3 +1470,18 @@ Guards: three local goldens under `tests/test-vectors/qwen38-flashnext/`
 (canonical / NAX production / pre-#1149 production); rollback without
 rebuild = `DS4_QWEN4_NO_ATTN_MM_NAX=1` (verified exact vs the pre-nax
 pin). Decision + evidence: `.codebase-memory/PR1149-REVIEW-20261008.md`.
+
+## Post-merge known-stale + wire-format exclusivity (20261106, upstream-merge campaign)
+- `tests/test_qwen4_mtp_prefill.c` (upstream batch-C drop, on-demand
+  make rule only, never in `all:`/`make test:`): asserts V3 reader
+  semantics (`mtp_pos == 0` after legacy-tag replay) that contradict the
+  fork's V1 whole-restore. Dormant, but RED if run manually - treat as
+  known-stale pending a fork-adapt, not a regression signal.
+- Deployment-exclusivity (procedural guarantee, not structural): our V2
+  payload tag `0x51573803` == upstream's v3 tag with different layout.
+  Vanilla-upstream binaries must NEVER be pointed at
+  `/Volumes/FireCuda520/ds4-kv-deepseek` (and vice versa). Both
+  cross-read directions fail closed (three-way size check rejects before
+  any tensor byte), but the guarantee is the rule, not the code. Our
+  merged binary reads all historical fork V1/V2 files permanently
+  (triple-accept); new tail-carrying stores use V4 `0x51573804`.

@@ -256,3 +256,23 @@ clean tail.
 - 08:30 Review #2 (merged-outcome, fresh context) dispatched on
   merge/upstream@12b929d. Branch = all gates green modulo the 4 landing-
   checklist items it will re-verify.
+
+- 08:4x **REVIEW #2 (merged outcome, fresh context ses_e51bcce3d):
+  PASS_WITH_MINORS.** Scope verified clean (75/90 files byte-identical
+  to upstream tip; all 15 diverging = documented conflict set + auto-
+  merge unions; both raw-count deltas traced to upstream supersessions,
+  zero content loss; kvstore link dispatch sound: terminality from walk
+  position, envelope size validated pre-payload, fail-soft fallbacks).
+  Format sovereignty certified (single emission site, triple-accept
+  reader, one predicate + one layout helper -> closure; no path writes
+  what it cannot read). Evidence ledger verbatim-matched except two
+  bookkeeping nits, and the reviewer LIVE-verified our post-incident
+  state (pidfile 3448 + invalid=0) as the F7-restore evidence for the
+  manifest (minor 3 - stopgateF7.log ends at the failed attempt).
+  Minors 1+2 now in DS4FORK.md; minor 4 = future stop-tiers keep a full
+  main-baseline suite log next to the merged one.
+  LANE STATE: merge/upstream@12b929d is LANDED-READY. Landing (merge to
+  main + boot swap) held for operator timing: seal window tonight (clean
+  day-16 era story) or immediately (implies swap at the NEXT engine
+  restart either way, since restart-* rebuilds from main). Rollback:
+  revert -m 1 per batch + pre-swap binary kept as ds4-server.bak.
