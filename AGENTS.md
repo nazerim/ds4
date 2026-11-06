@@ -40,7 +40,9 @@ inference engine in C with Metal, CUDA, and ROCm backends. See `AGENT.md`
 - Qwen3.8 PLE n-gram preload/cache: `PLAN-PLE-PRELOAD.md`
 - Qwen3.8 prefill/decode optimization: `PLAN-PREFILL-M5.md`, `PLAN-INT8-MOE.md` (closed),
   `PLAN-GATED-SCAN.md` (closed), `.codebase-memory/QSA-ATTRIBUTION-20261004.md`
-- EXACT+DSML rewind stall fix (SEPARATE agent, guardrails inside): `PLAN-DSML-REWIND.md` + `ISSUE-EXACT-DSML-REWIND-REBUILD-20261104.md`
+- Live-state + handoffs (merge landed, collection closed, audit final):
+  `.codebase-memory/RESUME-MERGE-CLOSEOUT-20261106.md`; stall fix lane it
+  supersedes: `PLAN-DSML-REWIND.md` (closed, defaults now on).
 - Fork divergence notes: `DS4FORK.md`
 
 ## Conventions
