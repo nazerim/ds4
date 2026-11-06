@@ -1412,3 +1412,13 @@ this block supersedes):
     RESUME POINTERS stale /tmp/ab5,ab51 entries struck same commit.
 REVIEWER-VERIFIED CLEAN (no action): number matrix, gate pairing logic,
 threshold immutability, cleanup, A1-era disclosure accuracy.
+## AUDIT CLOSED - THE LAST 3c LINE (20261106 17:53, pointer)
+Predicted-vs-observed parity audit (PLAN-DSK-CALIBRATION-AUDIT-20261106.md,
+script trainer/dspark/audit_recal_20261106.py, /tmp/dska*.json):
+plumbing innocent (M1 ~3e-4 all arms = quantization noise); population
+innocent (blade drops 6.0-9.8% of official-kept live rows ~= sim's 13% -
+era 3% figure was largely denominator dilution); falsified link =
+coverage->wall-time (v5.2 median 1.000 at real coverage under EXACT
+sampling). Epitaph upgraded: head transfers fine, the speed model it
+served was wrong. Interpretation review dispatched (this commit);
+standing data collection CLOSED same evening (day-16 sealed, d54d059).
