@@ -1422,3 +1422,28 @@ coverage->wall-time (v5.2 median 1.000 at real coverage under EXACT
 sampling). Epitaph upgraded: head transfers fine, the speed model it
 served was wrong. Interpretation review dispatched (this commit);
 standing data collection CLOSED same evening (day-16 sealed, d54d059).
+## AUDIT INTERPRETATION CORRECTION (20261106 ~18:05, review ses_e4fb7acdc CONFIRM_WITH_EDITS) - SUPERSEDES the 17:53 pointer's wording
+'Population innocent (era 3% = denominator dilution)' was WRONG mechanism,
+right verdict: dilution <=2% (98% of era proposals are in gate-able
+cycles). True story is better: blade-on-official-kept rows = 6.0%/9.8%
+ROW drops = 13.0% (32k+) / 16.4% (day16) PROPOSAL-level after prefix
+conversion (mean tail loss 1.92 rows/cut-cycle) - the sim's 12.8-14.6%
+transfers AT FACE VALUE. Era 3.1% = gate self-consistency on its own
+traffic (270->244 gateable cycles, mean dlen 3.604->3.958) + cycle-count
+inflation; v5.1's 4.8% likely all inflation (raw 1741/1740 unlogged -
+caveat). Plumbing defense corrected: blade arms scored with deployed
+bytes (expected noise ~0, observed 0/1-hit-at-tie); official 3.2e-4 is
+BELOW the one-sided 6.3e-4 ceiling; M1 one-sided but all seam
+directions that matter pass through kept rows (residual <=0.03%).
+'Quality-neutral, 62% true-rejects' DELETED - 38% of cuts were
+would-accepts and live accept rates (75-94%) exceed val-corpus, so cuts
+are quality-NEGATIVE on live; speed falsification rests on the fixed
+per-cycle EXACT forward (verifier is width-adaptive, ds4.c:86100 - NOT
+'runs the block regardless'), savings slope at measurement floor, and
++4-10% cycle inflation => tau* retry nets -4..-10%: coverage is the
+wrong lever REGARDLESS of threshold. Engine-lane carry-forwards:
+parity dump stores stale static rows past dlen (comment claims
+zero-padding - wrong) + no skip-counter in audit join. Epitaph final:
+head transfers exactly as calibrated; the speed model was the dead
+link; no retry; verify-side economics is the only lever. Corrected
+full text: PLAN-DSK-CALIBRATION-AUDIT-20261106.md AUDIT RESULTS.

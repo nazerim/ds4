@@ -60,3 +60,12 @@ know. Ordered by surprise-cost.
    leaves cheap residue, not poison; and `tests/test_session_state.c`
    (`DS4_REWIND_RESUME` rollback pin) made arms safe to interleave
    with the collecting engine.
+
+9. PARITY DUMP STALE-ROW BUG (20261106 audit): ds4_td_parity_note copies
+   conf_hidden slots d<dlen only; slots >= dlen in its static
+   hidden_rows[5][4096] are leftovers from the PREVIOUS record while the
+   function comment claims zero-padding beyond draft_len (props ARE
+   zero-padded; rows are not). Harmless to kept-row analyses (consumers
+   truncate at dlen) but silently unmeasurable beyond-dlen scores; fix =
+   read all 5 slots or zero the tail. Found by interpretation review
+   ses_e4fb7acdc; relevant to any future gate-economics replay.
