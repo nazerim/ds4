@@ -1,5 +1,11 @@
 # PLAN — Upstream merge-debt digestion (20261106, **v2**)
 
+> **STATUS 18:11: LANDED.** merge/upstream@12b929d -> main via `a389c87`,
+> boot-swapped (collector 49076 on merged code, non-collect since 17:45),
+> all gates green, review #2 PASS_WITH_MINORS, interpretation review
+> CONFIRM_WITH_EDITS banked. Debt reset to 0; §4 steady state now active.
+> Live-state handoff: RESUME-MERGE-CLOSEOUT-20261106.md.
+
 > v1 was SMASHED by independent review (00:5x). Its audit half (§1) was
 > verified correct; its merge-strategy half was wrong in four load-bearing
 > ways: calendar-based batching does not exist (upstream commit dates are
