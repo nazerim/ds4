@@ -66707,7 +66707,7 @@ static int qwen4_session_load_payload_span(ds4_session *s, FILE *fp, const uint3
      * pre-slicing writer always wrote from tensor offset 0).  The tag is
      * the sole discriminator: counts cannot tell a V1 lagging whole copy
      * from a V2 slice apart. */
-    const bool mtp_whole = !mtp_v2;
+    const bool mtp_whole = !mtp_v2 && !mtp_v4;   /* V4 is a SLICED format */
     if (rc == 0 && mtp_v2 && mtp_rows > rows - rows_from) {
         payload_set_err(err, errlen, "KV checkpoint MTP slice exceeds the delta span");
         rc = 1;
@@ -66811,6 +66811,9 @@ static int qwen4_session_load_payload_span(ds4_session *s, FILE *fp, const uint3
     }
     g->pos = rows;
     g->mtp_pos = mtp_whole ? mtp_rows : rows_from + mtp_rows;
+    /* V4 delta restores mtp_pos = rows-1, matching upstream v3 restore
+     * semantics; benign vs live (>=rows-1) exactly while tail_cached=false
+     * (the state restored below) - revisit if cached-state is ever persisted. */
     if (skip_overwritten) {
         /* Intermediate link: session checkpoint and its validity belong to
          * the terminal link, whose whole token array is the survivor. */
