@@ -289,3 +289,12 @@ clean tail.
   binary) ends 08:44:29; merged-code era 9717 begins 08:46:29 - second
   merged-code disclosure alongside 57826. Rollback: revert -m 1 a389c87
   + make (~4 min); no .bak exists.
+
+PR REFRESH HANDOFF (08:5x): attempted main->feat/kvstore-tokenizer-fingerprint
+in ds4-pr1020 worktree: CONFLICTS in ds4.c, ds4_kvstore.c/.h, ds4_server.c
+(the fingerprint PR touches exactly the payload/kvstore seam V4 changed).
+ABORTED cleanly (tree verified pristine at 5915b7b) - resolution needs the
+KV lane's semantics, not mechanical merge muscle. Handoff: lane repeats
+their own 5915b7b precedent against landed main@edaca14; conflict map known
+(4 files); after their refresh, PRs #1020 + #1022 (nazerim/feat/vision-
+image-budget) un-conflict themselves. #1163 stays MERGEABLE-clean.
