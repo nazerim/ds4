@@ -276,3 +276,16 @@ clean tail.
   day-16 era story) or immediately (implies swap at the NEXT engine
   restart either way, since restart-* rebuilds from main). Rollback:
   revert -m 1 per batch + pre-swap binary kept as ds4-server.bak.
+
+- 08:46 **LANDED a389c87 (merge/upstream@12b929d -> main), BOOT-SWAPPED:
+  merged binary is the LIVE collector since 08:46:29 (PID 9717, ARGV-
+  MATCH-FINAL, invalid=0, early-reject scan=0, sentinel re-armed).**
+  Gates on main binaries: build 0w/0e, G5 clean, session-rewind(MTP) OK,
+  kv-delta OK. dspark-acceptance: INCAPSULATED box-limitation - fixture
+  references gguf/DeepSeek-V4-Flash-DSpark-support-0731.gguf which never
+  existed on this box (pre-Vision-Exp era; target identical pre-merge);
+  runtime DSpark health instead evidenced by boot + sentinel + live day-
+  16 traffic. DAY-16 SEAL MANIFEST addendum: collector eras 3448 (old
+  binary) ends 08:44:29; merged-code era 9717 begins 08:46:29 - second
+  merged-code disclosure alongside 57826. Rollback: revert -m 1 a389c87
+  + make (~4 min); no .bak exists.
