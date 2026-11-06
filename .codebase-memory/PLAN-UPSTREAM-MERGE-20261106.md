@@ -305,3 +305,14 @@ image-budget) un-conflict themselves. #1163 stays MERGEABLE-clean.
   session-free, which never ran). 57826 remains a BOOT-ERA disclosure
   only (merged code was live 08:46-class for ~4 min); zero records to
   flag or drop. Day-16 manifest: cite this line, not the old one.
+
+- 17:46 **DAY-16 SEALED (truncated seal, operator window): 42,791 recs /
+  502 MB / 21 pids, td_validate chain=100% inbreaks=0 all files, manifest
+  notes written (blade-era + 9717 merged-code + 57826 boot-only), rsync
+  backup checksum-clean, active/ recreated empty, engine rebooted
+  NON-COLLECT (49076): banner exact: 1 (first boot on acec7ed defaults),
+  --kv-disk-space-mb 524288 + --mtp-exact-sampling in argv, capture env
+  count=0, invalid=0, sentinel armed. STANDING COLLECTION CLOSED.
+  /tmp/ab52 deleted (last 3c evidence dir; numbers in ledger). Audit
+  substrate final: parity_pid9717.bin (2.96 GB, sealed at stop) +
+  train/20261106-day16 + arms 49377/49701 bins.
