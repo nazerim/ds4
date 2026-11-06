@@ -1,89 +1,100 @@
-# PLAN — DSpark recalibration audit (20261106)
+# PLAN — DSpark recalibration audit, v2 (20261106; v1 SMASHED by review ses_e517bb225)
 
-**Question:** the 3c campaign proved confcal3 ranks well offline (+2.25pp AUC)
-but its gate fired at ~3% live where the rescore-through-bytes simulation
-predicted 12.8-14.6% at >=32k. Is that a *threshold* problem (recalibrate ->
-retry) or a *feature-distribution* problem (epitaph)? This audit decides,
-with zero engine downtime.
+**Question unchanged:** confcal3 ranks (+2.25pp AUC) but the gate cut ~3%
+live where the parity-rescore sim predicted 12.8-14.6% at >=32k (slice
+label per ledger follow-up #10; other sanctioned ranges 9.5-14.9% / ~9%
+whole-corpus - tau* must anchor on the right slice, not the narrowest).
+Threshold problem (recalibrate -> one pre-registered retry window) or
+distribution problem (epitaph)? Zero engine downtime.
 
-**T0 (done 09:40, schema ground truth):** capture records (`ds4_td_rec`,
-ds4.c:78038-78070) = {pos, seed, streak, n_feat, flags, labels[], feat[]
-(captured target-hidden ring)} - **no head score stored**; era stats
-`prop_confidence=0.000` is never populated. So live scores cannot be read -
-they must be *reconstructed*, and the gap measured as **predicted vs
-observed gate behavior**, not score-vs-score. Bonus fact: scores are
-deterministic functions of captured feats through the blade head
-(bit-exact round-trip verified in the 3c deploy audit) - so per-cycle
-predicted decisions ARE computable today.
+## v1's fatal errors (why SMASH was right)
+1. **Wrong tensor.** Capture ring `feat[]` = staged TARGET h[pos-1] taps
+   (layers 40/41/42, fp8) - NOT the head input. The gate scores the
+   DRAFTER final-stage hc_head rows (`metal_graph_dspark_confidence_hidden`
+   = batch_ffn_cur) as [hidden 4096 | markov_w1(prev) 256] -> confidence_proj
+   (q8_0 [4352,1]) -> sigmoid < .45 -> prefix_len (ds4.c:37031/37071/37163/
+   37170, call chain via prepare_dspark_draft 82902->impl 82916->runtime
+   precheck 82537). v1's "rescore the ring" would have scored a tensor the
+   gate never reads; "ring vs live feed" discriminator was a category error.
+2. **Misattributed proof.** "Rescore-through-bytes .8501 EXACT, 62/49281
+   flips" = f32-vs-q8_0 blade-bytes fidelity on PARITY-derived rows -
+   proves head-math through deployed bytes, not ring equivalence. Expected
+   residual for this audit = ~.13% quantization-boundary flips, not
+   "bit-exact".
+3. **Impossible join.** Era stats are ONE aggregate/era (flush at session-
+   free) - no per-cycle slice; `prop_confidence` is MILLISECONDS
+   (propose_confidence_ms, CPU-fallback branch only), never a score -
+   corrected reading of v5.2 follow-up #3; conclusion stands (no live
+   scores readable).
+4. **Closure boot mis-specified** - see Closure section (plain `start`
+   flips the model fingerprint -> invalidates ALL disk-KV; not free).
+5. 57826 has NO capture files (killed mid-era before session-free flush) -
+   era-line disclosure only, out of all joins; PLAN-UPSTREAM line corrected
+   same commit.
 
-## Method
-**A. Substrate join (2h, no engine).** Day-13..15 sealed + day-16 after
-tonight's seal. For each recorded cycle: rescore through
-`support_AB_confcal3.gguf` (dequant path already imported as the tool
-pattern) -> per-cycle gate decision at .45 -> predicted cut% per depth bin.
-Observed cut% per era from era stats lines (B-era prop/cycle vs A-baseline
-ratios; v5.1: 4.8% @ 8-23k, v5.2: 3.1% @ 86-97k, coverage keep 96.9%).
-Key = conv/pos/cycle identity; replay-window traffic (B1/B2 eras, 57826,
-9717-onward) is *the* live-labeled subset.
+## v2 substrate: the parity dump IS the experiment
+`ds4_td_parity_note` (ds4.c:78296) runs immediately post-impl, BEFORE
+buffer reuse, storing **per cycle: engine's own post-gate dlen + props[] +
+5x4096 conf_hidden rows (gate-time input)**. Recorded dlen==0 cycles absent
+by construction (78312 return), and full-cut cycles also commit no train
+record - both recovered as parity-vs-recs positional gaps / era `proposed`
+delta, with denominator control (era prop/cycle dilutes over non-draft
+cycles; sim's "cut% of gate-able proposals" is a different denominator -
+the discriminator MUST condition on gate-able cycles only).
+On-disk: /Volumes/FireCuda520/ds4-parity/20261103-s3/parity_pid{49377,
+49527,49701,9717,...}.bin (+ matching train_pid*.recs) = B1/A2/B2 arms +
+live merged collector era.
+Tool pattern banked: kept_cycles(recs, parity) + dequant rescore
+(trainer/dspark/conf3c.py, official3c.py; join by index+pos cross-assert -
+trap: parity hdr.seed = props[0], NOT the committed seed, ds4.c:78333;
+verify_cap clamp never binds at max_tokens=300; stochastic clamp never
+fires at EXACT=1 - both noted).
 
-**B. Discrepancy profile (2h).** Where predicted-cut cycles and
-observed-not-cut diverge, bin by: depth, conv type (tool vs prose), batch
-shape (single-row verify vs fused), streak length, feature norm drift vs
-training slab (feat[] distributions, day-13 vs now). Two discriminating
-outcomes:
- - shift concentrates in batched/fused-row cycles -> head *inputs* differ
-   between capture-ring and live consumption (engine-side scoring seam -
-   fixable, engine-lane bug);
- - shift uniform across bins, scores simply higher on fresh traffic ->
-   genuine distribution over-prediction -> threshold re-registration
-   plausible (tau* = observed-deciles target), ranking survives
-   (verify AUC on live-space scores per bin before believing it).
+## Method (v2)
+**A. Predicted-vs-observed, per cycle (2h, no engine).** For each parity
+cycle: PREDICTED gate = rescore the recorded conf rows through blade
+head (dequant, threshold .45, prefix rule incl. ascending-rows-before-
+break); OBSERVED = recorded dlen. Outputs: per-era and per-depth-bin
+predicted cut% vs observed cut% over gate-able cycles; flip census should
+match the known ~.13% quantization residual (if not -> tool bug first,
+per sensor lesson).
+**B. Discriminator.** Predicted ~= observed (~3%) -> the sim's 13% came
+from the WRONG POPULATION (slab-provenance cycles vs live novel cycles):
+pure distribution story -> go to C. Predicted >> observed systematically
+(13% predicted, 3% observed on the SAME gate-able cycles) -> engine-side
+scoring seam (buffer reuse timing/fuse_final_hidden) -> genuine ds4.c bug,
+engine lane owns; audit pivots to a minimal repro from parity rows alone.
+Uniform check: bin residuals by batch shape/streak/feature-norm (the rows
+are IN the file - this was the point of the rewrite).
+**C. tau* + counterfactual (1h).** Observed-decile calibration: sweep
+threshold on the live score distribution -> coverage curve, kept-accept
+delta, true-reject share, burn-saved at 90k. Baseline labeling corrected:
+v5.2 speed = paired median 1.000 at n=2 (mean -0.02 marginal FAIL, stop-
+guard parity 0.992 unpaired) - project against that, not a phantom
+"measured 0.992".
+**D. Go/no-go memo (30m).** Rule pre-registered before viewing C: retry
+iff single fixable cause in B OR tau* projects >=10% cut with kept-accept
+>= -0.3pp AND ratio gain >=1.5% - WITH power caveat (v5.2's -0.29pp was
+<1sigma at n~1024; a -0.3pp gate is knife-edge, so the memo states MDE).
+Else: epitaph paragraph + artifact disposition. Retry = ONE window,
+protocol v4 rules, band gate, new pre-registration.
 
-**C. Counterfactual + tau* (1h).** Replay recorded proposal streams at
-swept thresholds: coverage curve (tau -> cut%), kept-accept delta, true-
-reject share of cuts, estimated verify-burn saved at 90k calibrated
-against v5.2's measured 0.992 ratio at 3.1% cut. Output: tau* candidate +
-predicted live cut/ratio.
+Effort: ~half agent-day. First real experiment = B1-era rows (49377.bin):
+predicted cut% on the arm's OWN cycles where the engine observed 4.8/3.1%
+- hours after starting, the campaign's central question has a number.
 
-**D. Go/no-go memo (30m, rule pre-registered BEFORE seeing C):** retry
-only if (i) B shows a fixable single cause, (ii) C projects >=10% cut at
-kept-accept >= -0.3pp at tau*, (iii) predicted ratio gain >=1.5%. Else:
-final epitaph paragraph, artifacts disposition list. Any retry = ONE
-pre-registered A/B window, protocol v4 rules, band gate reused.
-
-**Optional instrumented micro-window** (only if B is inconclusive): one
-dev boot with a debug knob populating per-proposal score logging (engine
-edit ~20 lines, dev-capture redirected) -> direct live score histogram.
-Deferred by design - A-C may not need it.
-
-Effort: ~half agent-day analysis, engine untouched. Trainer lives at
-`trainer/dspark/conf3c.py` (not dspark/). Data deps: day-16 seal must
-land first for its slice; day-13..15 sufficient for v1.
-
-## Risk register
-- Rescore-through-blade reproduces offline scores bit-exact but if the
-  engine's live feature feed differs structurally (not just numerically)
-  from the capture ring, A underestimates B's cause - mitigated by bin
-  profile, exposed by the optional knob.
-- Join keys across eras are session-local; replay-conv ids already
-  documented in the 3c era notes cover the labeled subset.
-- No new training, no confcal4, no threshold touching outside D's
-  pre-registration.
-
-## Collection closure (answers "can we close data collection?")
-YES - after tonight's day-16 seal:
-1. Seal day-16 (runbook + era disclosures: 57826 merged-code ~4min,
-   9717 merged-collector from 08:46:29 - both in PLAN-UPSTREAM log).
-2. Next restart uses the NON-collect default boot (`./ds4-server.sh
-   start-qwen` / `start` - snapshot recipe minus TRAIN_DUMP); collector
-   no longer the 24h standing mode. active/ drains to sealed; blade dirs
-   immutable + backed up (backups/ precedent holds).
-3. Re-enable recipe on record: any future window boots
-   `start-collect` explicitly (the 3c chain pattern already does this per
-   era) - standing collection has zero exclusive consumers; the audit
-   reads only sealed days; V4-format watchpoints read engine logs, not
-   captures.
-4. Keep: sentinel + rewind stats (engine health != collection); delete
-   /tmp/ab52 post-seal as planned.
-Net: disk pressure off, era-hygiene surface stops growing, all doors
-still open, nothing in the audit needs future standing capture.
+## Collection closure (v2, corrected)
+YES after day-16 seal tonight; corrected mechanics:
+1. Seal day-16 (era disclosures incl. 9717 merged-collector from 08:46:29;
+   57826 = boot-era disclosure, NO records - corrected).
+2. Reboot capture-off but behavior-identical:
+   `DSPARK_EXACT=1 DS4_REWIND_RESUME=1 ./ds4-server.sh restart-vision-dspark`
+   (plain `start` = no --dspark AND model-fingerprint flip that invalidates
+   every disk-KV file -> mass re-prefill, per script's CRITICAL comment
+   ds4-server.sh:154-159; plain start-qwen = different model/lane).
+   Without DSPARK_EXACT it silently defaults 0 (:282) and REWIND_RESUME off
+   - changing decode vs the whole collect era. This line IS the fix.
+3. Re-enable for any window = boot `start-collect` explicitly (chain
+   pattern); nothing in the audit or V4 watchpoints needs standing capture;
+   sentinel/rewind stats unaffected.
+4. Post-seal: delete /tmp/ab52; blade sealed dirs immutable + backed up.

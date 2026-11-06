@@ -298,3 +298,10 @@ KV lane's semantics, not mechanical merge muscle. Handoff: lane repeats
 their own 5915b7b precedent against landed main@edaca14; conflict map known
 (4 files); after their refresh, PRs #1020 + #1022 (nazerim/feat/vision-
 image-budget) un-conflict themselves. #1163 stays MERGEABLE-clean.
+
+- CORRECTION (57826 records): the era-tally line's 'records valid' is
+  WRONG per audit-scope review - find of parity/train dirs shows NO
+  57826 files (era ended via pkill mid-life; stats+captures flush at
+  session-free, which never ran). 57826 remains a BOOT-ERA disclosure
+  only (merged code was live 08:46-class for ~4 min); zero records to
+  flag or drop. Day-16 manifest: cite this line, not the old one.
