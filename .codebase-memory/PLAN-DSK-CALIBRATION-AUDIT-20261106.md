@@ -138,3 +138,16 @@ not gate coverage. No new pre-registration needed: closing stays.
 
 Post-conditions met: zero engine time used; all evidence files sealed;
 script committed (see next); no blade changes.
+
+## DISPOSITIONS (closed off 20261106 ~18:00)
+- Blade artifacts (conf_s3cal_20261105.npz 5.6GB, run_confcal3/,
+  run_officialreplay_s3cal/, support_AB_confcal3.gguf, slab prev):
+  KEEP flagged closed-line - zero storage pressure, sole consumer is a
+  hypothetical verify-side-economics reopen (different objective than
+  ranking). Purge only if blade space ever binds.
+- PR #1163 + #785: re-verified MERGEABLE upstream post-merge - deliberately
+  NOT touched (no re-push churn that resets review state; next action =
+  wait on antirez). #1020/#1022: KV-lane refresh handoff stands
+  (4-file conflict map in PLAN-UPSTREAM execution log).
+- Standing collection: CLOSED (day-16 sealed d54d059). Re-enable = per-
+  window start-collect, documented in DS4FORK + PLAN docs.
