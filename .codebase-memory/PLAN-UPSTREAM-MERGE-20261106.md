@@ -241,3 +241,18 @@ clean tail.
   than live chain-replay does). Review #1 (ses_e530d83b9) claim-2 traces
   exactly those runtime branches - fix waits for its verdict rather than
   stacking speculation.
+
+- 08:26 **C9 GREEN (v1.1 = 12b929d): kv-delta(MTP) 18->OK, session-rewind
+  (MTP) stays OK. All functional gates passed.**
+- 08:29 **F7 boot-side SHALLOW-VERDICT + leak incident**: merged binary
+  boots clean vs production KV (543 files visible, zero error lines in
+  8s window) but real resume requires live traffic -> moved to landing
+  checklist as 'live-resume watchpoint on first sessions after boot
+  swap'. INCIDENT: window leaked its dev boot (argv starts '--ctx',
+  pkill pattern 'ds4-server --model' missed it) -> restore blocked x2 ->
+  PID-kill recovery; collector down 2.5 min total (3448 restored,
+  ARGV-MATCH-FINAL, invalid=0, sentinel armed). RULE: kill engines by
+  PIDFILE pid, never argv pattern.
+- 08:30 Review #2 (merged-outcome, fresh context) dispatched on
+  merge/upstream@12b929d. Branch = all gates green modulo the 4 landing-
+  checklist items it will re-verify.
