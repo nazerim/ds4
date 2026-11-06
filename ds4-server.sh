@@ -52,7 +52,8 @@ TOKENS="${TOKENS:-}"   # default completion cap when a request omits max_tokens 
 # Two DISTINCT speculative-decoding pathways, not interchangeable:
 #  - DSpark  (--dspark): block drafter; REQUIRES the 0731 support GGUF and 0731
 #    main models only (checkpoint-specific). Non-greedy uses opportunistic
-#    sampling; set DSPARK_EXACT=1 for --mtp-exact-sampling (target distribution).
+#    sampling; default ON since 2026-11-06 (--mtp-exact-sampling, target
+#    distribution); DSPARK_EXACT=0 restores the legacy opportunistic mode.
 #  - Legacy MTP (--mtp-draft): one-stage nextn drafter (May 2026 GGUF). Pass the
 #    drafter via --mtp-model WITHOUT --dspark; ds4 detects the kind by tensor
 #    names. Upstream: DSpark replaces this for the 0731 checkpoint.
@@ -279,7 +280,11 @@ DSPARK_SCHED_WINDOW="${DS4_DSPARK_SCHEDULER_WINDOW:-12}"
 # DSPARK_EXACT=1 adds --mtp-exact-sampling: at non-zero temperature the drafts
 # follow the ordinary target distribution instead of opportunistic greedy-suffix
 # matching (default confidence 0.8 when unset explicitly).
-DSPARK_EXACT="${DSPARK_EXACT:-0}"
+# Default 1 since 2026-11-06: exact is the production standard for this family
+# (every collect era day-13..16 + the field-proven rewind fix runs on it);
+# DSPARK_EXACT=0 is the deliberate rollback lever to the seed-batch era
+# (mirror-invalid data - see arm_collect_env banner).
+DSPARK_EXACT="${DSPARK_EXACT:-1}"
 MAX_LOG_ROTATIONS=10
 
 # Debug mode: set DEBUG=1 to enable verbose output
@@ -946,7 +951,7 @@ case "${1:-}" in
     echo "  DSPARK_CONFIDENCE   - DSpark confidence threshold 0..1 (default: 0.45, 2026-10-29 tuned)"
     echo "  DS4_DSPARK_SCHEDULER_WINDOW - engagement probe window (default: 12)"
     echo "  DSPARK_EXACT        - 1 = --mtp-exact-sampling (target distribution at"
-    echo "                        non-zero temperature; default 0 = opportunistic)"
+    echo "                        non-zero temperature; default 1, 0 = legacy opportunistic)"
     echo ""
     echo "Environment:"
     echo "  DEBUG=1             - Enable verbose output"
