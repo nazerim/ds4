@@ -3,7 +3,9 @@ Authoritative live state for any session starting now. Night-history detail
 lives in the docs listed under POINTERS; this file is the map.
 
 ## Live state
-- **main == nazerim/main == `fc2b7e3`** (clean tree). HEAD region carries
+- **main == nazerim/main == the commit carrying this file (`git log -1`
+  to confirm; verify `git status --porcelain` empty + remote sync on read).**
+  HEAD region carries
   the landed upstream merge `a389c87` (234 commits through origin/main
   b3f50180 as batches A/B/C + Option-A V4 payload format; rollback =
   `git revert -m 1 a389c87` + `make`, ~4 min; merge worktree
@@ -11,7 +13,9 @@ lives in the docs listed under POINTERS; this file is the map.
 - **Engine: PID 49076, merged code, NON-collect mode** (capture env
   absent - verified). Serving on 8001 since 17:45:39 under new defaults:
   `DSPARK_EXACT=1` + `DS4_REWIND_RESUME=1` are now family defaults
-  (script `acec7ed`/`:354`); `exact: 1` verification = terminal banner +
+  (script `acec7ed`; DSPARK_EXACT default at ds4-server.sh:287, rewind
+  export at :359 — older docs' `:354` predates the shift);
+  `exact: 1` verification = terminal banner +
   argv `--mtp-exact-sampling`, NEVER log grep. One rewind sentinel armed.
 - **Standing data collection CLOSED.** day-16 sealed TRUNCATED
   (17:45; 42,791 recs, chain 100%, disclosures incl. 57826 boot-era-only
@@ -99,7 +103,9 @@ lives in the docs listed under POINTERS; this file is the map.
   audit_recal_20261106.py`; JSONs in /tmp + copies in
   `/Volumes/FireCuda520/ds4-train/labels3c/`.
 - 3c campaign history/epitaph: `RESUME-3C-20261106.md` (updated; its
-  pending list is DONE) + `3C-NIGHT-PLAN-20261103.md` (append-only
+  3c-owned pending items 1-2 DONE + item 4 cleaned; item 3 = engine-lane
+  leftovers, tracked in this file's Outstanding handoffs) +
+  `3C-NIGHT-PLAN-20261103.md` (append-only
   ledger, ends at AUDIT INTERPRETATION CORRECTION block).
 - Engine behaviors learned: `NOTES-BENCH-SIDE-ENGINE-BEHAVIOR-20261105.md`
   (+item 9). Engine-lane map: `HANDOVER-DSPARK-LANE-20261105.md` (dated -
