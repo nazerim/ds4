@@ -98,3 +98,43 @@ YES after day-16 seal tonight; corrected mechanics:
    pattern); nothing in the audit or V4 watchpoints needs standing capture;
    sentinel/rewind stats unaffected.
 4. Post-seal: delete /tmp/ab52; blade sealed dirs immutable + backed up.
+
+## AUDIT RESULTS (step A/B done 17:55, substrate = sealed day-16 eras)
+Files: /tmp/dska.json (era-matched heads), /tmp/dska2.json (blade-on-
+official-rows); script trainer/dspark/audit_recal_20261106.py.
+
+1. PLUMBING: INNOCENT. M1 (offline re-score of KEPT rows falls <.45):
+   B2-blade 0/1011; B1 1/2847; day16-official 38/119923 - all ~3e-4 =
+   the quantization-boundary noise class, matching the documented
+   62/49281 flip rate. Engine-gate decisions == offline recompute on the
+   identical stored tensors. No ds4.c seam. Parity substrate validated
+   (ppos==pos join across 37k+ cycles).
+
+2. POPULATION: NOT the villain either. Head-vs-official coverage on live
+   rows: blade-on-A2-rows 6.0%, blade-on-day16-rows 9.8% of
+   official-kept rows would drop - SAME ORDER as the sim's 12.8-14.6%.
+   The "coverage collapse" story was partly a DENOMINATOR ILLUSION:
+   sim counted gate-able proposal ROWS; era stats diluted over ALL
+   cycles' proposals/cycle (1.70->1.65=3%). On live data the head does
+   roughly what calibration said it would.
+
+3. THE REAL FALSIFIED ASSUMPTION: coverage -> wall-time. With genuine
+   ~6-10% row coverage at 86-97k ctx, v5.2 STILL measured paired t0
+   median 1.000 (mean -0.02 marginal FAIL). Dropping prefix-truncated
+   proposal rows does not shrink verify cost under EXACT sampling -
+   the verifier runs the block regardless; cut rows are the ones that
+   would have been rejected anyway (quality-neutral, 62% true-rejects
+   per the earlier sim). Depth is the lever the gate cannot pull: mean
+   kept/cycle 3.21 (day16 official, 32k+) vs 3.60 A2@32k - accept
+   tails are long; verify-tail cost, not proposal count, dominates.
+
+CONCLUSION: conf-line epitaph UPGRADES from "head transfers poorly" to
+"head transfers FINE; the speed model it served was wrong." Threshold
+re-registration would buy ~7pp more coverage and ~0 wall-time - NOT a
+retry worth a window. Future DSpark speed work should target the verify
+side (position-dependent early-exit / marginal-cost block sizing -
+adjacent to upstream's active Metal verify-speedup PRs #1179/#1149),
+not gate coverage. No new pre-registration needed: closing stays.
+
+Post-conditions met: zero engine time used; all evidence files sealed;
+script committed (see next); no blade changes.

@@ -45,8 +45,8 @@ sys.path.insert(0, "/Users/naz/Projects/ds4/tools")
 sys.path.insert(0, "/Users/naz/Projects/ds4/trainer")
 
 from repack_dspark_tensor import q8_0_dequant, walk_tensors  # noqa: E402
-from labels3c import (PARITY_HDR, PARITY_STRIDE, PAR_PROPS,  # noqa: E402
-                      REC_HDR, RECORD_BYTES, N_EMBD)
+from dspark.labels3c import (PARITY_HDR, PARITY_STRIDE, PAR_PROPS,  # noqa: E402
+                             REC_HDR, RECORD_BYTES, N_EMBD)
 
 THRESH, SLOT = 0.45, 5
 BLADE = ("/Volumes/FireCuda520/ds4-train/repack_test/"
