@@ -1,19 +1,29 @@
-From f8a454af152744aaa4c96578d694430953f9e285 Mon Sep 17 00:00:00 2001
+From f1a1aa6865b34ced286f9038490ba26a73b00fdb Mon Sep 17 00:00:00 2001
 From: Naz <nazerim@gmail.com>
 Date: Sun, 8 Nov 2026 15:19:39 +0800
 Subject: [PATCH] Clear transient buffers on shared-event drain success paths
 
-Both shared-event drain helpers return success without clearing
-g_transient_buffers, while every error branch (and every non-event
-drain via ds4_gpu_finish_command_buffer) clears it. Decode loops that
-drain entirely through these helpers therefore accumulate raw buffer
-refs until the next non-event drain; on lanes where that never happens
-(ssd-streaming IQ2/MXFP4 shared-overlap decode, and ROCm, where
-commit_and_wait_selected_readback is the default path) the list grows
-unboundedly and every later drain pays a full scan. Reproduced on
-Metal (V4.1 Flash Q2 SSD streaming: list +~90/token, decode 19 -> 2.5
-t/s over one session; ds4-bench 64k gen_tps 6.6 -> 23.8 after
-equivalent reaping).
+Both shared-event drain helpers (ds4_gpu_signal_batch_and_wait_event,
+ds4_gpu_commit_and_wait_selected_readback) return success without
+clearing g_transient_buffers, while every drain-path error branch in
+the same functions - and every non-event drain via
+ds4_gpu_finish_command_buffer - does. Entries for the just-drained
+batch therefore linger until the next non-event reaping drain (at
+latest the next end_commands at layer or token close), releasing
+GPU-finished buffer refs later than their own error branches do and
+breaking the invariant that the list only references buffers of
+not-yet-drained batches.
+
+The window is bounded on main, but a reaper that filters (by owner,
+by generation, ...) turns the same lingering refs into unbounded
+retention plus an O(list) scan at every later reap. Observed in our
+fork's owner-scoped pool: ~90 entries/token growth, decode collapsing
+19 -> 2.5 t/s over one agentic session, ds4-bench 64k gen_tps
+6.6 -> 23.8 after restoring reap symmetry. Metal-only: CUDA/ROCm do
+not compile ds4_metal.m.
+
+The success-path clear restores the invariant and releases
+already-signaled buffers at the same point the error branches do.
 ---
  ds4_metal.m | 10 ++++++++++
  1 file changed, 10 insertions(+)
