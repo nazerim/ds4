@@ -5,16 +5,19 @@ set -euo pipefail
 # Copy to ds4 directory and run: ./ds4-server.sh [start|stop|restart|status]
 
 SERVER_CMD="./ds4-server"
-PID_FILE="./ds4-server.pid"
-# model-aware ctx default (1M for DeepSeek, 262k for Qwen3.8) resolved in
-# start_server; env CTX overrides both.
+# Default-profile pid file; per-family profiles (qwen, v41) own their own and
+# reassign PID_FILE in start_server. Keep the literal only here.
+DEFAULT_PID_FILE="./ds4-server.pid"
+PID_FILE="$DEFAULT_PID_FILE"
+# model-aware ctx default (1M DeepSeek, 262k Qwen3.8, 256k V4.1) resolved in
+# start_server; env CTX overrides all.
 CTX="${CTX:-}"
-PORT="${PORT:-}"   # per-model default resolved in start_server (DeepSeek 8001, Qwen 8002)
+PORT="${PORT:-}"   # per-model default resolved in start_server (DeepSeek 8001, Qwen 8002, V4.1 8003)
 # Auth-gated reverse proxy in front of ds4-server. Keep the server on loopback;
 # clients hit the proxy's LAN address. Requires DS4_API_KEY (refuses to start without).
 PROXY_CMD="./auth_proxy.py"
 PROXY_PID_FILE="./auth_proxy.pid"
-PROXY_PORT="${PROXY_PORT:-8100}"   # LAN-facing proxy port (8001=DeepSeek, 8002=Qwen stay loopback)
+PROXY_PORT="${PROXY_PORT:-8100}"   # LAN-facing proxy port (8001=DeepSeek, 8002=Qwen, 8003=V4.1 stay loopback)
 PROXY_HOST="${PROXY_HOST:-0.0.0.0}"
 # Bind address. Default 127.0.0.1 (loopback). Override with HOST env, e.g.
 # HOST=0.0.0.0 or HOST=192.168.1.20 to expose the server on the LAN.
@@ -111,6 +114,31 @@ QWEN_MIXED_QUANTUM="${QWEN_MIXED_QUANTUM:-512}"
 QWEN_PORT="${QWEN_PORT:-8002}"
 QWEN_PID_FILE="./ds4-server-qwen.pid"
 QWEN_KV_DIR="${QWEN_KV_DIR:-/Volumes/FireCuda520/ds4-kv-qwen}"
+# DeepSeek V4.1 Flash: start-v41 / restart-v41. Own GGUF/tokenizer/graph - V4
+# Flash weights and DSpark support files are NOT interchangeable with it. On a
+# 128 GB machine the only viable mode is SSD streaming (152 GiB main weights;
+# the 189 GiB Engram rows always stream from the file either way), so the GGUF
+# must live on the fast INTERNAL SSD (gguf/ here), never the blade. Vision is
+# Metal-only and optional (text serves without the encoder). Own pid/log/KV
+# profile, mirroring the qwen split. See docs/MODELS.md#deepseek-v41-flash.
+V41_MODEL="${V41_MODEL:-gguf/DeepSeek-V4.1-Flash-1017-IQ2_XXS-Q2_K-imatrix.gguf}"
+V41_VISION="${V41_VISION:-gguf/DeepSeek-V4.1-Flash-Vision.gguf}"
+# 256k native ctx. V4.1's compressed KV geometry is ~8.3 KiB/token
+# (ds41_graph_bytes) => ~2.2 GiB static buffer at 262144 - the real budget on
+# this box is the SSD-streaming expert cache + Metal wired ceiling, not KV.
+# Each concurrent slot needs its own context memory AND contends expert-cache
+# loads on one SSD feed - single slot is the DECIDED mode for streaming on
+# this box (operator 2026-11-06), not a pending experiment. No --batched-session.
+V41_CTX="${V41_CTX:-262144}"
+V41_TOKENS="${V41_TOKENS:-65536}"
+V41_PORT="${V41_PORT:-8003}"
+V41_PID_FILE="./ds4-server-v41.pid"
+V41_KV_DIR="${V41_KV_DIR:-/Volumes/FireCuda520/ds4-kv-v41}"
+# 256k anchors run ladder-scale checkpoints (DeepSeek-era measure: ~100-140 GiB
+# per 328k conversation at 1M ctx; a quarter at 256k) - 128 GiB fits two.
+V41_KV_SIZE="${V41_KV_SIZE:-131072}"
+# 1 = --ssd-streaming (the 128 GB mode); 0 = fully resident (needs 256 GB+).
+V41_SSD_STREAM="${V41_SSD_STREAM:-1}"
 # Cache-miss trace: set TRACE_PATH to a file path (e.g. ./log/ds4.trace) to make
 # the server write the exact cache-decision + first-mismatch token window for
 # every request. Used for debugging KV divergence (see DS4FORK.md KVCACHE —
@@ -198,20 +226,22 @@ arm_collect_env() {
 # Alternative model map: short name -> full GGUF path
 # Add entries here for each model variant. Use `start-<name>` / `restart-<name>`.
 # Uses parallel indexed arrays (bash 3.2 compatible — macOS default).
-MODEL_KEYS=("0731" "vision" "qwen")
+MODEL_KEYS=("0731" "vision" "qwen" "v41")
 MODEL_PATHS=(
     "gguf/DeepSeek-V4-Flash-Layers37-42Q4KExperts-OtherExpertLayersIQ2XXSGateUp-Q2KDown-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-fixed-0731.gguf"
     "gguf/DeepSeek-V4-Flash-Vision-Exp-Layers37-42Q4KExperts-OtherExpertLayersIQ2XXSGateUp-Q2KDown-AProjQ8-SExpQ8-OutQ8.gguf"
     "$QWEN_MODEL"
+    "$V41_MODEL"
 )
 
 # Alternative DSpark (draft) model map: short name -> full GGUF path.
 # Used by start-<model>-dspark / restart-<model>-dspark. If a key has no
 # entry, the default DSPARK_MODEL above is used instead.
-DSPARK_KEYS=("0731" "vision")
+DSPARK_KEYS=("0731" "vision" "v41")
 DSPARK_PATHS=(
     "/Users/naz/Projects/ds4/gguf/DeepSeek-V4-Flash-DSpark-support-0731.gguf"
     "gguf/DeepSeek-V4-Flash-Vision-Exp-DSpark-support.gguf"
+    "gguf/DeepSeek-V4.1-Flash-DSpark.gguf"
 )
 # Per-model legacy MTP drafter map (start-<model>-mtp).
 MTP_KEYS=()
@@ -225,6 +255,82 @@ resolve_default_link() {
     case "$next" in /*) t="$next" ;; *) t="$(dirname "$t")/$next" ;; esac
   done
   printf '%s\n' "$t"
+}
+
+# Blade guard: a /Volumes KV path whose mount is gone must NOT mkdir onto
+# the internal SSD (silent fallback that bit us on 2026-10-03 - the store
+# was "empty" because it had been created under an unmounted volume root).
+# Compare the device id of the volume root against the SSD's root device:
+# an unmounted-but-present /Volumes/<name> dir resolves to disk3s1s1, not
+# the blade, so a plain -d check would wrongly pass. Checked pre-stop in
+# preflight_engine (restart with an unmounted blade must not kill a live
+# engine) AND again here post-profile-resolution before any mkdir.
+kv_volume_ok() {
+  local dir="$1"
+  case "$dir" in
+    /Volumes/*) ;;
+    *) return 0 ;;
+  esac
+  local kv_vol="${dir#/Volumes/}"
+  kv_vol="/Volumes/${kv_vol%%/*}"
+  if [ ! -d "$kv_vol" ] || \
+     [ "$(df -P "$kv_vol" 2>/dev/null | awk 'NR==2{print $1}')" = \
+       "$(df -P / | awk 'NR==2{print $1}')" ]; then
+    echo "Error: KV volume not mounted: $kv_vol (KV dir $dir)."
+    echo "       Mount the blade or point KV_DIR/QWEN_KV_DIR/V41_KV_DIR at a live path."
+    return 1
+  fi
+  return 0
+}
+
+# Speculation-family gate. The default support files are checkpoint-specific
+# V4 Flash artifacts (0731 DSpark support / May-2026 nextn drafter); per-model
+# entries live in DSPARK_KEYS (specp = resolved per-model path, empty => the
+# checkpoint-specific default would be used). Runs pre-stop in preflight_engine
+# and again in start_server (plain-start arm) - keep both arms in sync here.
+spec_gate_ok() {
+  local target="$1" specm="$2" specp="${3:-}"
+  [ -n "$specm" ] || return 0
+  case "$target" in
+    *V4.1*|*v4.1*)
+      # V4.1 has its own drafter (DSPARK_KEYS "v41", built by
+      # gguf-tools/deepseek41_dspark.py). The 0731/nextn defaults are V4 Flash
+      # artifacts, so an EMPTY specp (pathway default) must be refused here.
+      case "$specm" in
+        mtp)
+          echo "Error: the legacy nextn drafter is a V4 Flash artifact."
+          echo "       V4.1 uses its own DSpark drafter: start-v41-dspark."
+          return 1 ;;
+        dspark)
+          if [ -z "$specp" ]; then
+            echo "Error: V4.1 needs its own support GGUF (DSPARK_KEYS 'v41' not resolved)."
+            echo "       Build it: gguf-tools/deepseek41_dspark.py (see docs/SPECULATIVE_DECODING.md)."
+            return 1
+          fi ;;
+      esac ;;
+    *Qwen*|*qwen*|*QWEN*)
+      case "$specm" in
+        mtp)
+          echo "Error: the legacy nextn drafter is a V4 Flash artifact."
+          echo "       Qwen3.8 uses its built-in MTP (start-qwen already sets --mtp)."
+          return 1 ;;
+        dspark)
+          if [ -z "$specp" ]; then
+            echo "Error: Qwen3.8 has no DSpark drafter (built-in MTP only)."
+            return 1
+          fi ;;
+      esac ;;
+    *Vision*)
+      # (broad pattern mirrors the deleted plain-start guard: any Vision-named
+      # checkpoint refuses the 0731 default support; V4.1's own Vision file is
+      # caught by the earlier *V4.1* arm.)
+      if [ "$specm" = "dspark" ] && [ -z "$specp" ]; then
+        echo "Error: the Vision checkpoint needs its own DSpark drafter (0731 support is checkpoint-specific)."
+        echo "       Use start-vision-dspark (resolves the per-model support entry)."
+        return 1
+      fi ;;
+  esac
+  return 0
 }
 
 lookup_model() {
@@ -256,7 +362,7 @@ lookup_dspark_model() {
     local i
     for i in "${!DSPARK_KEYS[@]}"; do
         if [ "${DSPARK_KEYS[$i]}" = "$key" ]; then
-            echo "${DSPARK_PATHS[$i]}"
+            echo "${DSPARK_PATHS[$i]:-}"
             return 0
         fi
     done
@@ -320,8 +426,22 @@ start_server() {
 
   # Model-aware runtime resolution: pid/log/kv/ctx defaults per engine family.
   local resolved_link
+  IS_V41=0
   resolved_link=$(resolve_default_link)
   case "${model_path:-$resolved_link}" in
+    *V4.1*|*v4.1*)
+      # DeepSeek V4.1 Flash: own profile; SSD streaming is this box's memory
+      # mode (see V41_* header). The rewind-window gate is inert here.
+      IS_QWEN=0
+      IS_V41=1
+      CTX="${CTX:-$V41_CTX}"
+      TOKENS="${TOKENS:-$V41_TOKENS}"
+      PORT="${PORT:-$V41_PORT}"
+      PID_FILE="$V41_PID_FILE"
+      KV_DIR="$V41_KV_DIR"
+      KV_SIZE="$V41_KV_SIZE"
+      LOG_FILE="$LOG_DIR/ds4-v41.log"
+      ;;
     *Qwen3.8*|*qwen3.8*)
       IS_QWEN=1
       CTX="${CTX:-$QWEN_CTX}"
@@ -359,19 +479,31 @@ start_server() {
       export DS4_REWIND_RESUME="${DS4_REWIND_RESUME:-1}"
       ;;
   esac
-  local OTHER_PID_FILE
-  if [ "${IS_QWEN}" = "1" ]; then OTHER_PID_FILE="./ds4-server.pid"; else OTHER_PID_FILE="$QWEN_PID_FILE"; fi
-  if [ -f "$OTHER_PID_FILE" ]; then
-    local other_pid
-    other_pid=$(cat "$OTHER_PID_FILE")
-    if kill -0 "$other_pid" 2>/dev/null; then
-      echo "Error: the other model is loaded (PID $other_pid, $OTHER_PID_FILE)."
-      echo "       One engine at a time - use restart[-qwen] to stop it and switch,"
-      echo "       or: $0 stop"
-      return 1
-    fi
-    rm -f "$OTHER_PID_FILE"
+  # Speculation-family gate, before any state touch (mirrored pre-stop in
+  # preflight_engine for the restart arm).
+  spec_gate_ok "${model_path:-$resolved_link}" "$spec_mode" "$spec_model_path" || return 1
+  # One engine at a time: every engine's pid file except this profile's.
+  local OTHER_PID_FILES other_pid
+  if [ "${IS_V41}" = "1" ]; then
+    OTHER_PID_FILES="$DEFAULT_PID_FILE $QWEN_PID_FILE"
+  elif [ "${IS_QWEN}" = "1" ]; then
+    OTHER_PID_FILES="$DEFAULT_PID_FILE $V41_PID_FILE"
+  else
+    OTHER_PID_FILES="$QWEN_PID_FILE $V41_PID_FILE"
   fi
+  local OTHER_PID_FILE
+  for OTHER_PID_FILE in $OTHER_PID_FILES; do
+    if [ -f "$OTHER_PID_FILE" ]; then
+      other_pid=$(cat "$OTHER_PID_FILE")
+      if kill -0 "$other_pid" 2>/dev/null; then
+        echo "Error: the other model is loaded (PID $other_pid, $OTHER_PID_FILE)."
+        echo "       One engine at a time - use restart[-qwen|-v41] to stop it and switch,"
+        echo "       or: $0 stop"
+        return 1
+      fi
+      rm -f "$OTHER_PID_FILE" "$OTHER_PID_FILE.port"
+    fi
+  done
 
   if [ -f "$PID_FILE" ]; then
     local pid
@@ -380,29 +512,12 @@ start_server() {
       echo "ds4-server is already running (PID: $pid)"
       return 1
     else
-      rm -f "$PID_FILE"
+      rm -f "$PID_FILE" "$PID_FILE.port"
     fi
   fi
 
-  # Blade guard: a /Volumes KV path whose mount is gone must NOT mkdir onto
-  # the internal SSD (silent fallback that bit us on 2026-10-03 - the store
-  # was "empty" because it had been created under an unmounted volume root).
-  # Compare the device id of the volume root against the SSD's root device:
-  # an unmounted-but-present /Volumes/<name> dir resolves to disk3s1s1, not
-  # the blade, so a plain -d check would wrongly pass.
-  case "$KV_DIR" in
-    /Volumes/*)
-      local kv_vol="${KV_DIR#/Volumes/}"
-      kv_vol="/Volumes/${kv_vol%%/*}"
-      if [ ! -d "$kv_vol" ] || \
-         [ "$(df -P "$kv_vol" 2>/dev/null | awk 'NR==2{print $1}')" = \
-           "$(df -P / | awk 'NR==2{print $1}')" ]; then
-        echo "Error: KV volume not mounted: $kv_vol (KV_DIR=$KV_DIR)."
-        echo "       Mount the blade or point KV_DIR/QWEN_KV_DIR at a live path."
-        return 1
-      fi
-      ;;
-  esac
+  # Blade guard (see kv_volume_ok): the profile's KV dir is resolved above.
+  kv_volume_ok "$KV_DIR" || return 1
 
   # Ensure KV cache and log directories exist
   mkdir -p "$KV_DIR" "$LOG_DIR"
@@ -445,9 +560,23 @@ start_server() {
   # `download_model.sh ds4f-vision-*` has relinked it; serve it WITH the
   # encoder, and only then.  A Vision-Exp link without the encoder is fatal
   # (image support would silently vanish).
-  DEFAULT_MODEL_RESOLVED=$(readlink "ds4flash.gguf" 2>/dev/null || echo "ds4flash.gguf")
+  DEFAULT_MODEL_RESOLVED="$resolved_link"   # same full-chain resolution as the profile case
   VISION_ARGS=()
-  if [ "${IS_QWEN:-0}" = "1" ]; then
+  if [ "${IS_V41:-0}" = "1" ]; then
+    # V4.1 Flash: streaming memory mode + optional matching encoder. The V4
+    # Flash encoders do NOT work with V4.1; text serves fine without one.
+    if [ "$V41_SSD_STREAM" = "1" ]; then
+      VISION_ARGS+=(--ssd-streaming)
+      echo "V4.1 Flash: SSD streaming on (V41_SSD_STREAM=0 only on 256 GB+ resident hosts)"
+    fi
+    if [ -f "$V41_VISION" ]; then
+      VISION_ARGS+=(--vision "$V41_VISION")
+      echo "V4.1 vision encoder attached: $V41_VISION (Metal-only path)"
+    else
+      echo "Note: V4.1 vision encoder not found ($V41_VISION) - text only."
+      echo "      Enable with: ./download_model.sh ds41f-vision"
+    fi
+  elif [ "${IS_QWEN:-0}" = "1" ]; then
     if [ ! -f "$QWEN_VISION" ]; then
       echo "Error: Qwen vision encoder not found: $QWEN_VISION"
       echo "       Run: ./download_model.sh qwen38-vision"
@@ -478,12 +607,6 @@ start_server() {
           echo "       Run: ./download_model.sh ds4f-vision-encoder"
           return 1
         fi
-        if [ "$spec_mode" = "dspark" ] && [ "$spec_used" = "$DSPARK_MODEL" ]; then
-          echo "Error: the default Vision-Exp model needs its own drafter"
-          echo "       (gguf/DeepSeek-V4-Flash-Vision-Exp-DSpark-support.gguf), not the 0731 one."
-          echo "       Use start-0731-dspark for text, or set DSPARK_MODEL to the Vision-Exp support GGUF."
-          return 1
-        fi
         VISION_ARGS+=(--vision "$VISION_ENCODER")
         echo "Vision encoder attached: $VISION_ENCODER"
         ;;
@@ -497,16 +620,6 @@ start_server() {
   MODEL_ARGS=()
   if [ -n "$model_path" ]; then
     MODEL_ARGS+=(--model "$model_path")
-  fi
-
-  # Checkpoint-specific drafters: the default DSpark support GGUF is 0731-only.
-  if [ "$spec_mode" = "dspark" ] && [ "$spec_used" = "$DSPARK_MODEL" ]; then
-    case "${model_path:-$(resolve_default_link)}" in
-      *Vision-Exp*|*Qwen3.8*|*qwen3.8*)
-        echo "Error: DSpark default support GGUF is checkpoint-specific (0731)."
-        echo "       This model needs its own drafter (Qwen3.8: built-in MTP, no DSpark)."
-        return 1 ;;
-    esac
   fi
 
   # Build speculative-decoding arguments (pathway-specific; --mtp is shared)
@@ -600,10 +713,10 @@ start_server() {
 stop_server() {
   local pf
   FOUND_EXTRA=""
-  for pf in "./ds4-server.pid" "$QWEN_PID_FILE"; do
+  for pf in "$DEFAULT_PID_FILE" "$QWEN_PID_FILE" "$V41_PID_FILE"; do
     [ "$pf" = "$PID_FILE" ] || FOUND_EXTRA="$FOUND_EXTRA $pf"
   done
-  if [ ! -f "$PID_FILE" ] && [ ! -f "$QWEN_PID_FILE" ]; then
+  if [ ! -f "$PID_FILE" ] && [ ! -f "$QWEN_PID_FILE" ] && [ ! -f "$V41_PID_FILE" ]; then
     echo "No PID file found. Is ds4-server running?"
     return 0
   fi
@@ -648,6 +761,14 @@ stop_one_pidfile() {
 }
 
 status_server() {
+  if [ -f "$V41_PID_FILE" ] && [ "$V41_PID_FILE" != "$PID_FILE" ]; then
+    local vpid
+    vpid=$(cat "$V41_PID_FILE")
+    if kill -0 "$vpid" 2>/dev/null; then
+      echo "ds4-server (v4.1 flash) is running (PID: $vpid)"
+      return 0
+    fi
+  fi
   if [ -f "$QWEN_PID_FILE" ] && [ "$QWEN_PID_FILE" != "$PID_FILE" ]; then
     local qpid
     qpid=$(cat "$QWEN_PID_FILE")
@@ -695,17 +816,19 @@ start_proxy() {
   # Upstream follows whichever engine is actually loaded, at the port the
   # engine was ACTUALLY started on (per-pid .port file; env-default fallback).
   local upstream_port="" upname="none" efile ep
-  for efile in "./ds4-server.pid" "$QWEN_PID_FILE"; do
+  for efile in "$DEFAULT_PID_FILE" "$QWEN_PID_FILE" "$V41_PID_FILE"; do
     if [ -f "$efile" ] && kill -0 "$(cat "$efile")" 2>/dev/null; then
       ep=$(cat "$efile.port" 2>/dev/null || echo "")
       if [ -z "$ep" ]; then
         case "$efile" in
           *qwen*) ep="$QWEN_PORT" ;;
+          *v41*) ep="$V41_PORT" ;;
           *) ep=8001 ;;
         esac
       fi
       upstream_port="$ep"
-      case "$efile" in *qwen*) upname="Qwen3.8" ;; *) upname="DeepSeek" ;; esac
+      case "$efile" in *qwen*) upname="Qwen3.8" ;; *v41*) upname="V4.1 Flash" ;; *) upname="DeepSeek" ;; esac
+      break   # one engine at a time; first live pid file wins (deterministic)
     fi
   done
   if [ -z "$upstream_port" ]; then
@@ -719,7 +842,7 @@ start_proxy() {
       echo "auth_proxy is already running (PID: $pid)"
       return 1
     else
-      rm -f "$PROXY_PID_FILE"
+      rm -f "$PROXY_PID_FILE" "$PROXY_PID_FILE.upstream"
     fi
   fi
   echo "Starting auth_proxy on ${PROXY_HOST}:${PROXY_PORT} -> 127.0.0.1:${upstream_port} (${upname}, auth required)..."
@@ -786,24 +909,48 @@ status_proxy() {
 # Fail loudly BEFORE stopping a running engine: a bad path or missing encoder
 # must not leave the box with no engine and a stale proxy upstream.
 preflight_engine() {
-  local mp="$1" target
+  local mp="$1" target specm="${2:-}" specp="${3:-}" kvd
   if [ -n "$mp" ]; then target="$mp"; else target=$(resolve_default_link); fi
+  # Rejections that must land BEFORE a live engine is stopped (restart arm).
   if [ ! -f "$target" ]; then
     echo "Error: model file not found: $target"
+    case "$target" in
+      *V4.1*|*v4.1*) echo "       Run: ./download_model.sh ds41f-q2 (streams from the internal SSD)" ;;
+      *Qwen*|*qwen*) echo "       Run: ./download_model.sh qwen38-q4k" ;;
+    esac
     return 1
   fi
+  # Speculation family (no resolved per-model support => the default would be
+  # a wrong-checkpoint artifact), and a resolved support file that is missing
+  # on disk - both fatal before the stop, matching the in-function checks.
+  spec_gate_ok "$target" "$specm" "$specp" || return 1
+  if [ -n "$specp" ] && [ ! -f "$specp" ]; then
+    echo "Error: $specm support model not found: $specp"
+    return 1
+  fi
+  # Enforcement arms mirror start_server's profile globs EXACTLY (a wider
+  # pattern here would impose encoder/KV demands on paths the profile would
+  # not route to this family). Hint lines above may stay broad.
   case "$target" in
     *Qwen3.8*|*qwen3.8*)
+      kvd="$QWEN_KV_DIR"
       if [ ! -f "$QWEN_VISION" ]; then
         echo "Error: Qwen vision encoder not found: $QWEN_VISION (run ./download_model.sh qwen38-vision)"
         return 1
       fi ;;
+    *V4.1*|*v4.1*)
+      kvd="$V41_KV_DIR" ;;   # vision encoder optional for V4.1 (text serves without)
     *Vision-Exp*)
+      kvd="$KV_DIR"
       if [ ! -f "$VISION_ENCODER" ]; then
         echo "Error: DeepSeek vision encoder not found: $VISION_ENCODER"
         return 1
       fi ;;
+    *)
+      kvd="$KV_DIR" ;;
   esac
+  # Profile KV volume must be mounted too (blade guard, pre-stop).
+  kv_volume_ok "$kvd" || return 1
   return 0
 }
 
@@ -821,13 +968,16 @@ case "${1:-}" in
     stop_server
     ;;
   restart)
-    if preflight_engine ""; then stop_server; start_server "" "" ""; fi
+    preflight_engine "" "" || exit 1
+    stop_server; start_server "" "" ""
     ;;
   restart-mtp)
-    if preflight_engine ""; then stop_server; start_server "" mtp ""; fi
+    preflight_engine "" mtp || exit 1
+    stop_server; start_server "" mtp ""
     ;;
   restart-dspark)
-    if preflight_engine ""; then stop_server; start_server "" dspark ""; fi
+    preflight_engine "" dspark || exit 1
+    stop_server; start_server "" dspark ""
     ;;
   status)
     status_server
@@ -890,7 +1040,7 @@ case "${1:-}" in
     fi
 
     if [ "$do_restart" = 1 ]; then
-      preflight_engine "$model_path" || exit 1
+      preflight_engine "$model_path" "$spec_mode" "$spec_model_path" || exit 1
       stop_server; start_server "$model_path" "$spec_mode" "$spec_model_path"
     else
       start_server "$model_path" "$spec_mode" "$spec_model_path"
@@ -906,6 +1056,8 @@ case "${1:-}" in
     echo "  start-dspark        - Start with DSpark block speculation (--mtp ... --dspark)"
     echo "  start-<model>       - Start ds4-server with an alternative model"
   echo "  start-qwen          - Qwen3.8 Flash Next Q4_K + vision + batched MTP (ctx 262k; QWEN_* env-overridable)"
+  echo "  start-v41           - DeepSeek V4.1 Flash Q2 + SSD streaming (ctx 256k; V41_* env;"
+  echo "                        vision auto-attached when the ds41f-vision encoder is present)"
   echo "  start-collect       - Vision-Exp + dspark EXACT + TRAIN_DUMP/PARITY capture armed"
   echo "                        (restart-collect = same with stop; DS4_TD_*/DSPARK_EXACT env-"
   echo "                        overridable; NEVER plain start/restart while collecting -"
@@ -928,12 +1080,13 @@ case "${1:-}" in
     echo "Auth proxy: keep ds4-server on loopback; remote clients hit the proxy."
     echo "  PROXY_HOST        - Proxy bind address (default: 0.0.0.0)"
     echo "  PROXY_PORT        - Proxy port (default: 8100)"
-    echo "                        NOTE: upstream (8001 DeepSeek / 8002 Qwen) is"
+    echo "                        NOTE: upstream (8001 DeepSeek / 8002 Qwen / 8003 V4.1) is"
     echo "                        detected at proxy start - run restart-proxy"
     echo "                        after switching engines."
     echo "  DS4_API_KEY       - Bearer token clients must present (required to start proxy)"
     echo ""
-    echo "Available models (default: ds4flash.gguf = Vision-Exp, served with --vision $VISION_ENCODER):"
+    echo "Available models (plain start serves ds4flash.gguf - whatever download_model.sh linked"
+    echo "  last; Vision-Exp gets --vision $VISION_ENCODER, V4.1 its own streaming profile):"
     for i in "${!MODEL_KEYS[@]}"; do
       echo "  ${MODEL_KEYS[$i]}  -> ${MODEL_PATHS[$i]}"
     done
@@ -969,6 +1122,9 @@ case "${1:-}" in
     echo "  KV_DIR / KV_SIZE    - DeepSeek KV store dir + disk budget MiB (defaults:"
     echo "                        /Volumes/FireCuda520/ds4-kv-deepseek, 262144 = 256 GiB;"
     echo "                        QWEN_KV_DIR/QWEN_KV_SIZE mirror it per profile)"
+    echo "  V41_*               - V4.1 profile: V41_MODEL/V41_VISION/V41_CTX (262144)/"
+    echo "                        V41_TOKENS (65536)/V41_PORT (8003)/V41_KV_DIR/V41_KV_SIZE;"
+    echo "                        V41_SSD_STREAM=0 for full residency (256 GB+ hosts only)."
     echo "  DS4_THINK_TRIPWIRE  - '1' enables the thinking-loop tripwire server-wide"
     echo "                        (default: 1). DS4_TRIPWIRE_MIN_TOKENS sets the"
     echo "                        repetition-volume (default 1200, range 600-2560)."

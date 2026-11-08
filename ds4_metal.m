@@ -1524,6 +1524,7 @@ static double g_gpu_decode_busy_accum;
 static double g_gpu_decode_wall_accum;
 static uint64_t g_gpu_decode_cbs;
 static int g_gpu_decode_phase;
+static int g_gpu_decode_phase_ever_set;
 static double g_gpu_decode_phase_t0;
 
 void ds4_gpu_set_decode_phase(int decode) {
@@ -1535,6 +1536,7 @@ void ds4_gpu_set_decode_phase(int decode) {
         g_gpu_decode_phase_t0 = 0.0;
     }
     g_gpu_decode_phase = decode != 0;
+    g_gpu_decode_phase_ever_set = 1;
 }
 
 int ds4_gpu_decode_phase(void) {
@@ -10864,6 +10866,11 @@ int ds4_gpu_commit_and_wait_selected_readback(uint64_t event_value, const char *
             ds4_gpu_release_transient(NO);
             return 0;
         }
+        /* Same batch-end release as ds4_gpu_signal_batch_and_wait_event():
+         * this event-drained batch is committed and signaled, its transient
+         * retains are dead. Missing this grew the global list per batch and
+         * slowed every later release scan. */
+        ds4_gpu_release_transient(NO);
         return 1;
     }
 
@@ -12286,6 +12293,15 @@ static int ds4_gpu_signal_batch_and_wait_event(const char *label) {
             ds4_gpu_release_transient(NO);
             return 0;
         }
+        /* Batch end also has to release the transient retains, exactly like
+         * ds4_gpu_finish_command_buffer() does on every non-event drain path:
+         * this command buffer is committed and fully signaled here, so its
+         * argument buffers are no longer live. Without this the global
+         * transient list grew by every retain per event-drained batch and
+         * each subsequent release scan paid O(accumulated) - decode slowed
+         * linearly with session length (measured: +2 entries/batch, list to
+         * 129k in 2 minutes of soak). */
+        ds4_gpu_release_transient(NO);
         return 1;
     } else {
         ds4_gpu_close_batch_encoder();
@@ -15162,8 +15178,46 @@ void ds4_gpu_stream_expert_cache_reset_route_hotness(void) {
         g_stream_expert_cache_decode_tokens;
 }
 
+static uint32_t ds4_gpu_stream_expert_cache_hotness_decay_tokens(void) {
+    /* Default preserves upstream behavior: halve the whole hotness table every
+     * 16 processed tokens.  A longer horizon (env) lets route hotness act as a
+     * real LFU signal that survives multi-thousand-token append bursts, instead
+     * of collapsing to all-zero and degrading eviction to pure recency. */
+    static uint32_t cached = 0;
+    if (cached == 0) {
+        cached = DS4_METAL_STREAM_EXPERT_HOTNESS_DECAY_TOKENS;
+        const char *env = getenv("DS4_METAL_STREAM_EXPERT_HOTNESS_DECAY_TOKENS");
+        if (env && env[0]) {
+            char *end = NULL;
+            const long v = strtol(env, &end, 10);
+            if (end != env && v >= 1) {
+                cached = v > 1000000 ? 1000000u : (uint32_t)v;
+            }
+        }
+    }
+    return cached;
+}
+
+static bool ds4_gpu_stream_expert_cache_hotness_decode_only(void) {
+    /* Credit route hotness only while the server is in the decode phase.
+     * Prefill routing outnumbers decode routing several-fold in agent
+     * traffic, and prefill is latency-tolerant: letting it drive eviction
+     * evicts the decode working set that pays per-token SSD exposure. */
+    static int cached = -1;
+    if (cached < 0) {
+        const char *env = getenv("DS4_STREAM_HOTNESS_DECODE_ONLY");
+        cached = env && env[0] && env[0] != '0' ? 1 : 0;
+    }
+    /* Honored only once the host has driven the phase flag (server request
+     * loop). In tools like the REPL the flag never moves; treating "unset"
+     * as "not decoding" would silently disable ALL hotness credits - the
+     * exact failure this gate exists to fix, not cause. */
+    return cached && g_gpu_decode_phase_ever_set != 0;
+}
+
 static void ds4_gpu_stream_expert_cache_maybe_decay_route_hotness(void) {
     if (g_stream_expert_cache_decode_tokens == 0) return;
+    const uint32_t horizon = ds4_gpu_stream_expert_cache_hotness_decay_tokens();
     if (g_stream_expert_cache_hotness_decay_token == 0) {
         g_stream_expert_cache_hotness_decay_token =
             g_stream_expert_cache_decode_tokens;
@@ -15171,10 +15225,9 @@ static void ds4_gpu_stream_expert_cache_maybe_decay_route_hotness(void) {
     }
     while (g_stream_expert_cache_decode_tokens -
            g_stream_expert_cache_hotness_decay_token >=
-           DS4_METAL_STREAM_EXPERT_HOTNESS_DECAY_TOKENS) {
+           horizon) {
         ds4_gpu_stream_expert_cache_decay_route_hotness();
-        g_stream_expert_cache_hotness_decay_token +=
-            DS4_METAL_STREAM_EXPERT_HOTNESS_DECAY_TOKENS;
+        g_stream_expert_cache_hotness_decay_token += horizon;
     }
 }
 
@@ -15195,13 +15248,22 @@ static void ds4_gpu_stream_expert_cache_note_route_hotness(
     }
 }
 
-static void ds4_gpu_stream_expert_cache_note_selected_hotness(
+static void ds4_gpu_stream_expert_cache_note_selected_hotness_gated(
         uint32_t       layer,
         const int32_t *selected_ids,
-        uint32_t       n_selected) {
+        uint32_t       n_selected,
+        int            respect_decode_gate) {
     if (!selected_ids ||
         layer >= DS4_METAL_STREAM_EXPERT_CACHE_MAX_LAYER ||
         n_selected == 0) {
+        return;
+    }
+    /* Explicit seeding (hotlist/profiler seed_selected) must keep its defense
+     * credit even in decode-only mode: a seeded entry left at hotness 0 would
+     * become the FIRST eviction victim, inverting the whole point of seeding. */
+    if (respect_decode_gate &&
+        ds4_gpu_stream_expert_cache_hotness_decode_only() &&
+        !ds4_gpu_decode_phase()) {
         return;
     }
     ds4_gpu_stream_expert_cache_maybe_decay_route_hotness();
@@ -15218,6 +15280,14 @@ static void ds4_gpu_stream_expert_cache_note_selected_hotness(
     }
 }
 
+static void ds4_gpu_stream_expert_cache_note_selected_hotness(
+        uint32_t       layer,
+        const int32_t *selected_ids,
+        uint32_t       n_selected) {
+    ds4_gpu_stream_expert_cache_note_selected_hotness_gated(
+            layer, selected_ids, n_selected, 1);
+}
+
 static void ds4_gpu_stream_expert_cache_note_frequency_hotness(
         uint32_t        layer,
         const uint32_t *frequency,
@@ -15227,6 +15297,12 @@ static void ds4_gpu_stream_expert_cache_note_frequency_hotness(
     }
     if (n_total_expert > DS4_METAL_STREAM_EXPERT_CACHE_MAX_EXPERT) {
         n_total_expert = DS4_METAL_STREAM_EXPERT_CACHE_MAX_EXPERT;
+    }
+    /* Batch selected-id prep mostly runs for prefill sweeps; a decode-phase
+     * frequency note (e.g. batched decode paths) must still be credited. */
+    if (ds4_gpu_stream_expert_cache_hotness_decode_only() &&
+        !ds4_gpu_decode_phase()) {
+        return;
     }
     ds4_gpu_stream_expert_cache_maybe_decay_route_hotness();
     for (uint32_t expert = 0; expert < n_total_expert; expert++) {
@@ -18939,9 +19015,10 @@ int ds4_gpu_stream_expert_cache_seed_selected(
     }
     if (!g_initialized && !ds4_gpu_init()) return 0;
 
-    ds4_gpu_stream_expert_cache_note_selected_hotness(layer,
-                                                      selected_ids,
-                                                      n_selected);
+    ds4_gpu_stream_expert_cache_note_selected_hotness_gated(layer,
+                                                            selected_ids,
+                                                            n_selected,
+                                                            0);
     for (uint32_t i = 0; i < n_selected; i++) {
         if (selected_ids[i] < 0 || (uint32_t)selected_ids[i] >= n_total_expert) {
             fprintf(stderr,
@@ -47438,7 +47515,7 @@ int ds4_gpu_dsv41_hc_block_input_rows(ds4_gpu_tensor *mix, ds4_gpu_tensor *x, ds
             memset([completion contents], 0, (size_t)max_rows * row_words * sizeof(uint32_t));
             [g_dsv4_completion_cache setObject:completion forKey:@"v41_block_input"];
         }
-        [g_transient_buffers addObject:completion];
+        ds4_gpu_retain_transient(completion);
         const NSUInteger shared_bytes = 96u * sizeof(float);   /* the norm/mix reductions */
         if (!pipeline || !completion || pipeline.maxTotalThreadsPerThreadgroup < 256u ||
             shared_bytes > [g_device maxThreadgroupMemoryLength]) return 0;
@@ -50611,7 +50688,7 @@ static id<MTLBuffer> ds4_gpu_v41_deferred_counter(void) {
         memset([buffer contents], 0, 256);
         [g_dsv4_completion_cache setObject:buffer forKey:@"v41_deferred_hc"];
     }
-    [g_transient_buffers addObject:buffer];
+    ds4_gpu_retain_transient(buffer);
     return buffer;
 }
 
@@ -50624,7 +50701,7 @@ static id<MTLBuffer> ds4_gpu_v41_collapse_slots(void) {
         if (!buffer) return nil;
         [g_dsv4_completion_cache setObject:buffer forKey:@"v41_collapse_slots"];
     }
-    [g_transient_buffers addObject:buffer];
+    ds4_gpu_retain_transient(buffer);
     return buffer;
 }
 
