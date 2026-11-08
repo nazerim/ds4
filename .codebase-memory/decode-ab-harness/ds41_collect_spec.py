@@ -3,38 +3,43 @@
 
 Usage: python3 ds41_collect_spec.py log/ds4-v41.log [more.log ...]
 
-Reads rotated leg logs (boot-restart rotation semantics: leg data may span
-several files) and reports:
-  - every 'dspark req:' delta as a machine-parsed row (ctx span, cycles,
-    proposed, accepted, accept_rate, spec_ms)
-  - aggregate: requests seen, speculating share, weighted accept rate,
-    avg accepted/cycle
-  - decode-rate comparison medians (artifact-proof 'avg=' field) for
-    speculating vs non-speculating requests, segmented by prompt start ->
-    finish spans (see README normalization rules)
-Correlating a request with its spec rows: both lines carry 'ctx=<span>' and
-'req:' lines follow their request's final 'finish=' line in log order.
+Reads leg logs (boot-restart rotation semantics: a leg may span several
+files - pass them oldest..newest) and reports:
+  - leg span wall (first prompt start -> last finish) and total-generation
+    overall t/s (includes prefill; the cross-leg wall comparable)
+  - every 'dspark req:' delta parsed: per-request rows, aggregate cycles /
+    proposed / accepted, weighted accept rate, accepted per cycle
+  - decode-rate medians from the artifact-proof avg= field, split by
+    speculating vs zero-cycles request (see README normalization rules)
 """
 import re
 import statistics
 import sys
 
+TS = r'^\d+ (\d{2}:\d{2}:\d{2}) '
 SPEC_RE = re.compile(
-    r'^\d+ (\d{2}:\d{2}:\d{2}) ds4-server: (chat|completion) ctx=(\S+) '
-    r'dspark req: cycles=(\d+) proposed=(\d+) accepted_draft=(\d+) '
+    TS + r'ds4-server: (chat|completion) ctx=(\S+) dspark req: '
+    r'cycles=(\d+) proposed=(\d+) accepted_draft=(\d+) '
     r'accept_rate=([\d.]+)% avg_accept=([\d.]+).*spec_ms=([\d.]+)')
+PROMPT_RE = re.compile(
+    TS + r'ds4-server: (?:chat|completion) ctx=\S+ .*prompt start')
 FIN_RE = re.compile(
-    r'^\d+ \d{2}:\d{2}:\d{2} ds4-server: (chat|completion) ctx=(\S+) .*gen=(\d+).*finish=(\w+).*([0-9.]+)s\s*$')
+    TS + r'ds4-server: (chat|completion) ctx=(\S+) .*gen=(\d+).*finish=(\w+)'
+    r'.*([0-9.]+)s\s*$')
 DEC_RE = re.compile(
-    r'^\d+ \d{2}:\d{2}:\d{2} .*gen=\d+ \S+ .*(?:TOOLS )?(?:THINKING )?'
-    r'decoding chunk=[\d.]+ t/s avg=([\d.]+)')
+    TS + r'ds4-server: (?:chat|completion).*gen=\d+ \S+ .*(?:TOOLS )?'
+    r'(?:THINKING )?decoding chunk=[\d.]+ t/s avg=([\d.]+)')
 
 
-def collect(paths):
-    rows = []          # spec rows
-    fin = []           # (ctx, gen, toolish?) from finish lines
-    dec = []           # (ctx, avg) decode samples
-    ctx = None         # current request's ctx span for decode segmentation
+def hms(t):
+    h, m, s = map(int, t.split(':'))
+    return h * 3600 + m * 60 + s
+
+
+def collect(paths, since=None):
+    rows, dec, fin = [], [], []
+    t_start = t_end = None
+    ctx = None
     for p in paths:
         try:
             fh = open(p, errors='ignore')
@@ -44,63 +49,102 @@ def collect(paths):
             for line in fh:
                 m = SPEC_RE.search(line)
                 if m:
-                    rows.append({'t': m.group(1), 'kind': m.group(2),
-                                 'ctx': m.group(3), 'cycles': int(m.group(4)),
+                    if since is not None and hms(m.group(1)) < since:
+                        continue
+                    rows.append({'t': m.group(1), 'ctx': m.group(3),
+                                 'cycles': int(m.group(4)),
                                  'proposed': int(m.group(5)),
                                  'accepted': int(m.group(6)),
                                  'rate': float(m.group(7)),
                                  'avg_acc': float(m.group(8)),
                                  'ms': float(m.group(9))})
                     continue
-                m = re.match(r'^\d+ \d{2}:\d{2}:\d{2} ds4-server: chat ctx=(\S+) .*(?:prompt start)', line)
+                m = PROMPT_RE.search(line)
                 if m:
-                    ctx = m.group(1)
+                    if since is not None and hms(m.group(1)) < since:
+                        continue
+                    t = hms(m.group(1))
+                    t_start = t if t_start is None else min(t_start, t)
+                    t_end = t if t_end is None else max(t_end, t)
+                    # ctx span lives in the prompt line: capture it for
+                    # decode segmentation (same field order as spec rows)
+                    mc = re.search(r'ctx=(\S+)', line)
+                    if mc:
+                        ctx = mc.group(1)
                     continue
                 m = FIN_RE.search(line)
                 if m:
-                    fin.append((m.group(2), int(m.group(3))))
+                    if since is not None and hms(m.group(1)) < since:
+                        continue
+                    t = hms(m.group(1))
+                    t_end = t if t_end is None else max(t_end, t)
+                    fin.append((m.group(3), int(m.group(4))))
                     continue
                 m = DEC_RE.search(line)
                 if m and ctx:
-                    dec.append((ctx, float(m.group(1))))
-    return rows, dec
+                    if since is not None and hms(m.group(1)) < since:
+                        continue
+                    dec.append((ctx, float(m.group(2))))
+    return rows, dec, fin, (t_start, t_end)
 
 
 def main(paths):
-    rows, dec = collect(paths)
+    since = None
+    if paths and paths[0].startswith('--since'):
+        if paths[0] == '--since':
+            since = paths[1] if len(paths) > 1 else None
+            paths = paths[2:]
+        else:  # --since=HH:MM:SS
+            since = paths[0].split('=', 1)[1]
+            paths = paths[1:]
+        if since is not None and not re.match(r'^\d{2}:\d{2}:\d{2}$', since):
+            sys.exit("--since needs HH:MM:SS")
+    since_s = hms(since) if since else None
+    rows, dec, fin, (t0, t1) = collect(paths, since_s)
     spec = [r for r in rows if r['cycles'] > 0]
     zero = [r for r in rows if r['cycles'] == 0]
+    gen_total = sum(g for _, g in fin)
+    if t0 is not None and t1 is not None and t1 > t0:
+        wall = t1 - t0
+        print(f'leg span: {wall/60:.1f} min, requests-finished={len(fin)}, '
+              f'gen={gen_total} -> {gen_total/wall:.2f} t/s overall wall')
     print(f'requests w/ telemetry: {len(rows)}  speculating: {len(spec)}  '
           f'zero-cycles: {len(zero)}')
     if spec:
         cyc = sum(r['cycles'] for r in spec)
         prop = sum(r['proposed'] for r in spec)
         acc = sum(r['accepted'] for r in spec)
+        # cycles>0/proposed=0 rows are confidence-gated attempts (speculate
+        # entered but the drafter withheld): keep them counted, avoid /0.
+        wacc = f"{100.0*acc/prop:.1f}%" if prop else 'n/a'
+        apc = f'{acc/cyc:.3f}' if cyc else 'n/a'
+        tv = f'{1+acc/cyc:.2f}' if cyc else 'n/a'
         print(f'aggregate: cycles={cyc} proposed={prop} accepted={acc}  '
-              f'weighted accept={100.0*acc/prop:.1f}%  '
-              f'accepted/cycle={acc/cyc:.3f}')
+              f'weighted accept={wacc}  '
+              f'accepted/cycle={apc}  '
+              f'~tokens/verify={tv}')
         print('top spec rows:')
         for r in sorted(spec, key=lambda r: -r['accepted'])[:10]:
             print(f"  {r['t']} ctx={r['ctx'][:18]:18s} cycles={r['cycles']:5d} "
                   f"prop={r['proposed']:6d} acc={r['accepted']:6d} "
                   f"rate={r['rate']:5.1f}% spec_ms={r['ms']:8.0f}")
-    print('per-request detail (last 20):')
-    for r in rows[-20:]:
+    print('per-request detail (last 24):')
+    for r in rows[-24:]:
         print(f"  {r['t']} ctx={r['ctx'][:18]:18s} cycles={r['cycles']:5d} "
               f"prop={r['proposed']:6d} acc={r['accepted']:6d} rate={r['rate']:5.1f}%")
-    # decode-rate comparison, artifact-proof avg= field only
     spec_ctx = {r['ctx'] for r in spec}
     zero_ctx = {r['ctx'] for r in zero}
     svals = [v for c, v in dec if c in spec_ctx]
     zvals = [v for c, v in dec if c in zero_ctx]
+    for label, vals in (('speculating', svals), ('zero-cycles', zvals)):
+        if vals:
+            vals.sort()
+            print(f'decode avg= {label}: median {statistics.median(vals):.2f} '
+                  f'p90 {vals[int(len(vals)*.9)]:.2f} max {vals[-1]:.2f} '
+                  f'n={len(vals)}')
     if svals and zvals:
-        print(f'decode avg= medians: speculating {statistics.median(svals):.2f} '
-              f'(n={len(svals)})  zero-cycles {statistics.median(zvals):.2f} '
-              f'(n={len(zvals)})  ratio {statistics.median(svals)/statistics.median(zvals):.3f}')
-    elif svals or zvals:
-        vals = svals or zvals
-        print(f'decode avg= median ({len(svals) and "spec" or "zero"} only): '
-              f'{statistics.median(vals):.2f} (n={len(vals)})')
+        print(f'within-leg ratio (spec/zero medians): '
+              f'{statistics.median(svals)/statistics.median(zvals):.3f}')
 
 
 if __name__ == '__main__':
