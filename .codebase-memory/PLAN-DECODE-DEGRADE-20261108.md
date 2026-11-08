@@ -361,3 +361,7 @@ branch staged (push/post on operator ack) -> lane config -> reports close.
 No changes to upstream-owned semantics when env unset (fork ships flag-gated patches; real
 merge doctrine). No force-push. Secrets policy unchanged. Single-slot stays. DSpark lane
 stays falsified-for-workload until #676-class evidence changes; untouched here.
+[OVERRIDDEN 2026-11-09: dspark-on-server is PROVEN for the workload — the
+"until" evidence arrived via per-request stats + 3 bench shapes + overnight
+corewars (accept 67.2%, +6.7-13% decode bands, flat-in-age). Lane = standing
+config at 512k. See HANDOFF-DECODE-FIX-DSPARK-20261108.md §3-5.]
