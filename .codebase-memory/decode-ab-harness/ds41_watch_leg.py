@@ -136,7 +136,7 @@ def main():
                        f'dec_med all={dall} 15m={drec} rss={rss} swap={swap} '
                        f'boots={boots} ctx={ctx_line}{alert}\n')
             snap.flush()
-            if reqs >= 20 and time.time() - t_last_fin > a.quiet:
+            if reqs >= 20 and inflight == 0 and time.time() - t_last_fin > a.quiet:
                 snap.write(f'# QUIET {a.quiet}s after {reqs} reqs -> leg done '
                            f'{time.strftime("%H:%M:%S")}\n')
                 break
