@@ -674,7 +674,9 @@ int ds4_session_eval_speculative(ds4_session *s, int first_token,
 /* Same as ds4_session_eval_speculative but masks exclude_token (a vocabulary
  * id, -1 = none) out of every draft and target sampling distribution in the
  * block: DSML-suppressed tool-less chat can speculate without ever emitting
- * the marker token, distribution-identical to per-step sample_excluding. */
+ * the marker token, distribution-identical to per-step sample_excluding in
+ * exact-sampling mode. first_token is emitted verbatim (accepted[0]) on all
+ * paths: the caller must not supply the excluded id as first_token. */
 int ds4_session_eval_speculative_ex(ds4_session *s, int first_token,
                                     int max_tokens, int eos_token,
                                     float temperature, int top_k,

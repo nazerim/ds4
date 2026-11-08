@@ -16535,9 +16535,21 @@ decode_again:
             toks[0] = token;
             ntok = 1;
         } else if (!s->batched_mode &&
+            (dsml_token_id < 0 || ds4_engine_mtp_exact_sampling(s->engine)) &&
             ds4_engine_mtp_draft_tokens(s->engine) > 1 &&
             !mtp_spec_disabled)
         {
+            /* dsml_token_id carries the tool-less DSML suppression marker
+             * (>=0 for tool-less chat on DSML vocabularies, -1 otherwise).
+             * Tool-less speculation is gated to exact-sampling mode: the
+             * masked rejection/residual path is distribution-identical to
+             * per-step sample_excluding there, while noexact accepts only
+             * drafts matching the target argmax - a greedy bias that suits
+             * tool traffic by operator decision and must not silently
+             * reach ordinary sampling traffic.  ignore_eos tool-less
+             * requests keep the pre-existing unsuppressed token-selection
+             * quirk (branch order above) and speculating greedy-verify is
+             * token-identical to their old per-step greedy path. */
             if (j->req.ignore_eos) {
                 ntok = ds4_session_eval_speculative_argmax_ignoring_eos(
                     slot->session, token, step_cap,
@@ -16545,14 +16557,6 @@ decode_again:
                     toks, (int)(sizeof(toks) / sizeof(toks[0])),
                     err, sizeof(err));
             } else {
-                /* dsml_token_id carries the tool-less DSML suppression marker
-                 * (>=0 for tool-less chat on DSML vocabularies, -1 otherwise:
-                 * has_tools requests legitimately stream DSML syntax, and
-                 * non-DSML models never set the id). Passing it through makes
-                 * every draft and target distribution inside the block match
-                 * the per-step sample_excluding above; tool-less chat on V4.x
-                 * used to be gated OUT of speculation entirely because no
-                 * speculative sampler honoured the exclusion. */
                 ntok = ds4_session_eval_speculative_ex(
                     slot->session, token, step_cap,
                     eos_token, temperature, top_k, top_p, min_p, &rng,
