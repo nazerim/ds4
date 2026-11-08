@@ -414,7 +414,8 @@ int ds4_session_create(ds4_session **out, ds4_engine *e, int ctx_size);
 void ds4_session_free(ds4_session *s);
 /* Per-request DSpark speculation stats (DS4_DSPARK_STATS=1): snapshot at
  * request start, render the per-request delta at request end. line() returns
- * false when disabled or speculation did not run. */
+ * false only when stats are disabled; cycles=0 prints as a positive
+ * "speculation inactive" observation. */
 void ds4_session_dspark_stats_begin(ds4_session *s);
 bool ds4_session_dspark_stats_line(ds4_session *s, char *out, size_t outlen);
 int ds4_session_power(ds4_session *s);

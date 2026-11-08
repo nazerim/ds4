@@ -77364,7 +77364,9 @@ bool ds4_session_dspark_stats_line(ds4_session *s, char *out, size_t outlen) {
     const uint64_t cycles   = st->cycles - b->cycles;
     const uint64_t proposed = st->proposed_tokens - b->proposed_tokens;
     const uint64_t accepted = st->accepted_draft_tokens - b->accepted_draft_tokens;
-    if (cycles == 0 && proposed == 0) return false;
+    /* Zero cycles is the signal, not a reason for silence: emitting it makes
+     * "speculation did not run on this server lane" positively observable per
+     * request instead of resting on absence of output. */
     const double accept_rate = proposed ?
         100.0 * (double)accepted / (double)proposed : 0.0;
     const double avg_accept = cycles ?
