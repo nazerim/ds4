@@ -66,8 +66,12 @@ Batched-mode exclusion (docs SERVER.md:92-96) stands — irrelevant to single sl
   different machine; NEVER adjust for local lane state, still 262144).
   BOOT REQUIREMENT: v41 lanes now need V41_CTX=524288 env until script default
   changes (script default still 262144; plain restart would silently shrink!).
-- **COREWARS OVERNIGHT VERDICT (148 reqs / 116,988 tok / 2h15m wall, 0 errors,
-  no reboots, RSS 80.9G flat, swap 0.8G flat): 512k+all-spec lane PASSES.**
+- **COREWARS OVERNIGHT VERDICT (run proper, 23:42:59 anchor: 70 reqs / 46,793
+  tok / 63.9 min / 0 errors / weighted accept 68.0% / 3.28 tok-verify /
+  flat-in-age decode / peak depth 124k; divergence-anchor at common=5498
+  handled cleanly. Post-boot window totals 148/117k cumulate an earlier
+  pre-run session 22:32-23:42.) 0 errors, no reboots, RSS 80.9G flat,
+  swap 0.8G flat: 512k+all-spec lane PASSES.**
   Age-flat decode (20-min medians 20.4-23.7, no drift = leak fix holds over a
   2h15m agentic run at depth). Accept rises with depth (65->68.6%), decode
   holds ~mid-band to 110k+ (19.5 vs 22.1 - shallowest band 0-30k is
