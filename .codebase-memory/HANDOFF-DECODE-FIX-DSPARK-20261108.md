@@ -86,9 +86,14 @@ Batched-mode exclusion (docs SERVER.md:92-96) stands — irrelevant to single sl
    wins (+13% wall / +6.7% decode-median). Default lane recommendation:
    dspark noexact (DSPARK_EXACT=0) for agent/tool traffic; plain stays for
    tool-less-heavy use.
-1b. Extension candidate (small win left on table): tool-less chat cannot
-   speculate (DSML-suppression sampler has no speculative variant) — patch
-   would cover ordinary turns too.
+1b. DONE c759147 + review fix: tool-less chat speculates via
+   masked ds4_session_eval_speculative_ex — gated to EXACT-sampling lanes
+   (noexact would silently argmax-bias sampling traffic; review found it).
+   Trade-off: noexact lane (bench winner) gets NO tool-less win; exact lane
+   gets tool-less spec + tool resample overhead. Operator lane choice now =
+   traffic-profile choice. Follow-ups from review: hook test for mask
+   primitives (finding 4); ignore_eos tool-less unsuppressed first-token
+   quirk predates patch (finding 6, documented).
 1c. Optional: same-boot A/B (restart-v41 plain, rerun bench) to tighten the
    control from prior-boot to interleaved.
 2. **Upstream response on #1330/#1331** — watch; retest legs if changes requested
