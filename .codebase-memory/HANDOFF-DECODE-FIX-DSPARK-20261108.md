@@ -50,9 +50,10 @@ Verified effect: deterministic 24-turn soak worst turn 597→137 s, transient li
    - short-burst shape-2 was a wash (−3.1% med, small n; cold-draft opener cost).
 4. **512k ctx raised + corewars overnight** (§4/§5): the lane's standing config now.
 
-## 4. Live system state (verified Nov 9 morning)
+## 4. Live system state (verified Nov 9 post-reboot 06:19)
 
-- Engine **PID 4624**: `--ctx 524288 --dspark --mtp-model gguf/DeepSeek-V4.1-Flash-DSpark.gguf
+- Engine **PID 1763** (rebooted 06:15 after §5a incident; prior boot 4624 was the
+  zombie): `--ctx 524288 --dspark --mtp-model gguf/DeepSeek-V4.1-Flash-DSpark.gguf
   --dspark-confidence 0.45`, env `DSPARK_EXACT=0 DS4_DSPARK_STATS=1
   DS4_DSPARK_TOOLLESS_NOEXACT=1 DS4_DSPARK_SCHEDULER_WINDOW=12`, launched via
   `V41_CTX=524288 DSPARK_EXACT=0 DS4_DSPARK_STATS=1 DS4_DSPARK_TOOLLESS_NOEXACT=1 ./ds4-server.sh restart-v41-dspark`
@@ -64,7 +65,10 @@ Verified effect: deterministic 24-turn soak worst turn 597→137 s, transient li
   natively to 1M (rope_orig_ctx=1048576, no extrapolation). 1M = +31.7 GiB
   buffers — unattempted (would re-trim expert cache further).
 - KV disk: `/Volumes/FireCuda520/ds4-kv-v41` (483 GiB free; ~8.2 KiB/tok stored).
-- auth_proxy **PID 57930** :8100 (alive). Logs rotate-on-boot keep-10.
+  Post-reboot: drive was physically reconnected by operator; boot line binds the
+  path AND a live store (15.09 MiB, 30.8 ms) landed on the external volume —
+  external-KV proven, no internal fallback (only ds4_kvstore.{c,h,o} matched).
+- auth_proxy **PID 1897** :8100 via `start-proxy` (pid-file auth_proxy.pid).
 - Provider topology (opencode.json): `"ds41"` = ds4.c on THIS MBP :8003 — the
   lane all changes touch (context set to 524288); "DeepSeek V4.1 Flash (strata)"
   on nazryzen = different machine, still 262144, NEVER adjust for local state.
@@ -92,14 +96,16 @@ then relaunch with the four envs (BOOT TRAP) + re-arm monitor. Evidence:
 streaming pool has no pread timeout/watchdog (candidate hardening + issue).
 Monitor since gained a stall tripwire (--stall 180s: inflight>0 + log silence +
 cpu<1% => snapshot !! STALL line with leaf frame + desktop notification).
+**RECOVERED 06:15-06:19**: operator rebooted + reconnected blade (device node
+disk4->disk5, mount point stable); engine 1763 booted with all four envs,
+external-KV live-store proven, smoke request speculated 68.75% immediately.
+Monitor re-armed: /tmp/ds41_leg_doom2.snap (anchor 06:19:55, cap 5h).
 
 ## 6. Open threads (priority order)
 
-1. **REBOOT + re-lane (now)** — engine is an unreapable zombie since 05:40
-   (incident above): operator reboots, then BOOT TRAP command (four envs)
-   FIRST, then `./ds4-server.sh start-proxy` (engine must precede proxy; a
-   live proxy follows engine restarts on its own), re-arm monitor, re-run
-   make-doom.
+1. **Re-run make-doom-for-mips** — recovery from the §5a incident COMPLETE
+   (reboot 06:15, engine 1763, proxy 1897, monitor doom2 armed); the benchmark
+   itself still needs restarting from the client side.
 
 
 2. **Depth stress 200k-512k** — one long session actually filling toward the
@@ -136,8 +142,9 @@ cpu<1% => snapshot !! STALL line with leaf frame + desktop notification).
 
 ## 8. Cold-session primer
 
-`./ds4-server.sh status` should show the all-spec 512k lane (PID 4624 unless
-rebooted; check `--ctx 524288` + the four envs — see BOOT TRAP §4). Invariants:
+`./ds4-server.sh status` should show the all-spec 512k lane (PID 1763 at
+06:19, or newer; check `--ctx 524288` + the four envs — see BOOT TRAP §4).
+Invariants:
 decode 19-23 t/s flat at ANY session age is the fixed behavior — if decay
 returns, `DS4_METAL_CB_TIMES=1` list-growth check FIRST (everything else is
 exonerated on record). Cross-leg comparison: use decode `avg=` medians banded
