@@ -31,20 +31,27 @@ full soak 87→46 min, transient list 129,440/2min → max 4, decode 15.7→2.3 
 curve → flat ~19-23 t/s. ds4-bench pair: 64k gen_tps 6.58→23.76, first-token
 326→201 ms, bug curve decays within one bench run (late/early 0.34).
 
-## 3. The dspark revelation (second headline)
+## 3. The dspark revelation — CORRECTED 19:5x (read this version)
 
-`ds4-server` with full `--dspark` flags **does not speculate at all on V4.1** —
-proven positively by the new telemetry (`dspark req: cycles=0 proposed=0` per
-request; PID 1796 lane). Gate analysis: server single-slot decode loop never
-enters the spec impl (non-batched branch requires `dsml_token_id < 0`, impossible
-on V4.x DSML; batched mode documented "other models do not use MTP/DSpark").
-The +10% "noexact wins" three-way A/B (commit `01f3bdd`) is **retracted** in
-spirit — all legs ran identical non-speculating decode; tails = content/cache.
-Engine-side speculation is healthy: REPL proof `cycles=120 accept_rate=66.1%
-avg_accept=0.667` (temp-0). The old "dspark helps real traffic" observation is
-fully explained by the transient leak's drain-amortization + `chunk=` interval
-artifacts (the 9,174 t/s "burst" line was a prefill-boundary straddle; artifact
-rules now encoded in harness README).
+The "server never speculates" claim (commits 65c35c4/01f3bdd-era analysis) was
+**WRONG — probe-traffic artifact**. `dsml_token_id` (ds4_server.c:16249) is
+assigned only for toolLESS chat (DSML-suppression sampler, >=0 -> spec branch
+gate `dsml_token_id < 0` fails). Requests WITH `tools` keep it -1 -> spec branch
+RUNS. Every probe/smoke so far was tool-less -> cycles=0 truthfully but
+unrepresentatively. Positive proof of live server speculation in the bench legs
+themselves: `generation rewind` lines (sole call site = multi-token
+spec-boundary path 16869) — 33 in noexact leg, 20 in exact leg, 0 in plain
+(no drafter -> mtp_draft_tokens=0 -> gate correctly closed), 0 current boot
+(only tool-less smokes yet). ds41_session_speculate increments cycles at ENTRY
+(90269), so telemetry cannot miss entered speculation.
+=> The noexact tail advantage (p90 25.5 / max 33.9 vs plain 23.7 / 25.2) is
+likely REAL draft acceptance; median-neutral + tail-positive = moderate accept
+rate on tool traffic (cf. REPL: avg_accept 0.667/cycle, proposed ~1.006/cycle —
+drafter barely extends on short prompts). Exact leg slower (median 21.8):
+--mtp-exact-sampling resample overhead (resample=1 rewind+replay at temp>0).
+DSPARK_EXACT config itself verified: script line 638 drops --mtp-exact-sampling
+when EXACT=0; running PID 1796 has no exact flag, has --dspark --dspark-confidence 0.45.
+Batched-mode exclusion (docs SERVER.md:92-96) stands — irrelevant to single slot.
 
 ## 4. Live system state (verified 19:27)
 
@@ -68,10 +75,12 @@ rules now encoded in harness README).
 
 ## 5. Open threads (priority order)
 
-1. **Server-lane dspark wiring** (the real opportunity now): route single-slot
-   server decode into `ds4_session_eval_speculative_argmax_impl` →
-   `ds41_session_speculate` (exists, dispatch ~ds4.c:90405). Telemetry + A/B
-   baselines already built to score it. Operator interest explicit. ~small patch.
+1. **Score live server speculation** (it ALREADY runs on has_tools traffic —
+   no wiring needed for that): read `dspark req:` cycles>0 lines + accept_rate
+   distribution from operator's running termbench on PID 1796; compare tails vs
+   banked plain baseline. Optional extension: make tool-less chat spec too
+   (DSML-suppression sampler has no speculative variant — real patch, gates
+   spec out of most ordinary turns). Wire NOT needed: 90405 dispatch is live.
 2. **Upstream response on #1330/#1331** — watch; retest legs if changes requested
    (worktree + branch + patch all staged).
 3. **`make cpu` pre-existing link breakage** (`ds4_gpu_set_decode_phase` no stub
