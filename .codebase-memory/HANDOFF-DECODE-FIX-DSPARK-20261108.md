@@ -96,7 +96,13 @@ Batched-mode exclusion (docs SERVER.md:92-96) stands — irrelevant to single sl
    noexact lanes by operator request; lane PID 3536 booted with it FOR
    TERMBENCH (DSPARK_EXACT=0 + DS4_DSPARK_STATS=1 + TOOLLESS_NOEXACT=1).
    Collect: every class should now show cycles>0; leg decode median vs the
-   24.86 tool-spec-only bank = the tool-less delta. Follow-ups from review: hook test for mask
+   24.86 tool-spec-only bank = the tool-less delta. RESULT 21:0x (BENCH WON):
+   all-classes-spec leg 20:30->20:52: 30/30 speculating, 33,331 tok / 22.8 min
+   = 24.35 t/s wall-overall, decode avg= median 25.48 / p90 27.86 / max 34.03
+   (n=679), weighted accept 69.1%, 2.49 acc/cycle. vs tool-spec-only leg
+   24.86/26.95 (+2.5% med, deeper ctx, 38% more tokens) and vs plain
+   23.3/21.10 (+9.4% med, +15% wall/token). No zero-cycles rows survived.
+   Operator lane now carries the knob as standing config. Follow-ups from review: hook test for mask
    primitives (finding 4); ignore_eos tool-less unsuppressed first-token
    quirk predates patch (finding 6, documented).
 1c. Optional: same-boot A/B (restart-v41 plain, rerun bench) to tighten the
