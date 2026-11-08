@@ -16535,7 +16535,6 @@ decode_again:
             toks[0] = token;
             ntok = 1;
         } else if (!s->batched_mode &&
-            dsml_token_id < 0 &&
             ds4_engine_mtp_draft_tokens(s->engine) > 1 &&
             !mtp_spec_disabled)
         {
@@ -16546,10 +16545,19 @@ decode_again:
                     toks, (int)(sizeof(toks) / sizeof(toks[0])),
                     err, sizeof(err));
             } else {
-                ntok = ds4_session_eval_speculative(
+                /* dsml_token_id carries the tool-less DSML suppression marker
+                 * (>=0 for tool-less chat on DSML vocabularies, -1 otherwise:
+                 * has_tools requests legitimately stream DSML syntax, and
+                 * non-DSML models never set the id). Passing it through makes
+                 * every draft and target distribution inside the block match
+                 * the per-step sample_excluding above; tool-less chat on V4.x
+                 * used to be gated OUT of speculation entirely because no
+                 * speculative sampler honoured the exclusion. */
+                ntok = ds4_session_eval_speculative_ex(
                     slot->session, token, step_cap,
                     eos_token, temperature, top_k, top_p, min_p, &rng,
                     toks, (int)(sizeof(toks) / sizeof(toks[0])),
+                    dsml_token_id,
                     err, sizeof(err));
             }
             if (ntok < 0) {

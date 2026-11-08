@@ -90252,9 +90252,32 @@ int ds4_test_ds41_verify_tokens(ds4_session *s, const int *tokens, int count,
     return 0;
 }
 #endif
+/* DSML suppression inside speculative decode: mask one vocab entry of a host
+ * logits row to -inf for the duration of a single sampling call, then restore.
+ * Mirrors ds4_session_sample_excluding exactly (raw logits masked before
+ * top-k/top-p/min-p; renormalisation happens inside the samplers), so the
+ * greedy and the rejection-sampling paths reproduce the non-speculative
+ * tool-less distribution token for token. exclude<0 or a full-block accept
+ * (whose next token is re-sampled server-side through sample_excluding
+ * anyway) are both no-ops by construction. */
+static float ds4_logits_mask_exclude(const float *row, int exclude) {
+    if (exclude < 0) return DS4_NEG_INF;
+    float *m = (float *)row;
+    const float old = m[exclude];
+    m[exclude] = DS4_NEG_INF;
+    return old;
+}
+
+static void ds4_logits_mask_restore(const float *row, int exclude, float old) {
+    if (exclude < 0) return;
+    ((float *)row)[exclude] = old;
+}
+
 static int ds41_session_speculate(ds4_session *s, int first_token, int cap, int eos,
         bool ignore_eos, ds4_think_mode think_mode, float temperature, int top_k,
-        float top_p, float min_p, uint64_t *rng, int *accepted, char *err, size_t errlen) {
+        float top_p, float min_p, uint64_t *rng, int *accepted, int exclude,
+        char *err, size_t errlen) {
+    if (exclude < 0 || (uint32_t)exclude >= DS4_N_VOCAB) exclude = -1;
     ds4_engine *e = s->engine;
     ds41_gpu_graph *g = &s->ds41_graph;
     ds41_dspark *d = g->dspark;
@@ -90299,12 +90322,17 @@ static int ds41_session_speculate(ds4_session *s, int first_token, int cap, int 
         if (e->dspark_confidence_threshold > 0 &&
             sigmoid_stable(confidence) < e->dspark_confidence_threshold) break;
         const float *qlogits = d->host_logits + (uint64_t)row * DS4_N_VOCAB;
+        const float q_saved = ds4_logits_mask_exclude(qlogits, exclude);
         if (exact) {
             float *q = d->draft_probs + (uint64_t)row * DS4_N_VOCAB;
             if (!rng || !sample_build_probabilities(qlogits, DS4_N_VOCAB,
-                temperature, top_k, top_p, min_p, q)) goto fail;
+                temperature, top_k, top_p, min_p, q)) {
+                ds4_logits_mask_restore(qlogits, exclude, q_saved);
+                goto fail;
+            }
             tokens[count] = sample_probabilities(q, DS4_N_VOCAB, rng);
         } else tokens[count] = sample_argmax(qlogits, DS4_N_VOCAB);
+        ds4_logits_mask_restore(qlogits, exclude, q_saved);
         if (ignore_eos && ds4_token_is_stop_for_think_mode(e, tokens[count], think_mode)) break;
         if (tokens[count] == eos) { count++; break; }
     }
@@ -90333,18 +90361,27 @@ static int ds41_session_speculate(ds4_session *s, int first_token, int cap, int 
     int correction = -1;
     for (; keep < count; keep++) {
         const float *p_logits = d->host_verified + (uint64_t)(keep - 1u) * DS4_N_VOCAB;
+        const float p_saved = ds4_logits_mask_exclude(p_logits, exclude);
         if (!exact) {
-            if (sample_argmax(p_logits, DS4_N_VOCAB) != tokens[keep]) break;
+            if (sample_argmax(p_logits, DS4_N_VOCAB) != tokens[keep]) {
+                ds4_logits_mask_restore(p_logits, exclude, p_saved);
+                break;
+            }
         } else {
             float *q = d->draft_probs + (uint64_t)(keep - 1u) * DS4_N_VOCAB;
             if (!sample_build_probabilities(p_logits, DS4_N_VOCAB,
-                temperature, top_k, top_p, min_p, s->sample_probs)) goto fail;
+                temperature, top_k, top_p, min_p, s->sample_probs)) {
+                ds4_logits_mask_restore(p_logits, exclude, p_saved);
+                goto fail;
+            }
             const int token = tokens[keep];
             if (sample_rng_f32(rng) * q[token] > s->sample_probs[token]) {
                 correction = sample_residual_probabilities(s->sample_probs, q, DS4_N_VOCAB, rng);
+                ds4_logits_mask_restore(p_logits, exclude, p_saved);
                 break;
             }
         }
+        ds4_logits_mask_restore(p_logits, exclude, p_saved);
     }
     if (!ds41_session_commit(s, tokens, count, keep)) goto fail;
     for (uint32_t i = 0; i < keep; i++) {
@@ -90389,7 +90426,7 @@ fail:
 static int ds4_session_eval_speculative_argmax_impl(
         ds4_session *s, int first_token, int max_tokens, int eos_token,
         bool ignore_eos, ds4_think_mode think_mode,
-        int *accepted, int accepted_cap,
+        int *accepted, int accepted_cap, int exclude,
         char *err, size_t errlen) {
     if (!s || max_tokens <= 0 || accepted_cap <= 0) return 0;
     if (!s->checkpoint_valid) {
@@ -90400,8 +90437,19 @@ static int ds4_session_eval_speculative_argmax_impl(
 #ifdef DS4_HAS_DEEPSEEK41_GPU
     if (ds4_session_is_ds41(s))
         return ds41_session_speculate(s, first_token, accepted_cap, eos_token, ignore_eos,
-            think_mode, 0, 0, 1, 0, NULL, accepted, err, errlen);
+            think_mode, 0, 0, 1, 0, NULL, accepted, exclude, err, errlen);
 #endif
+    if (exclude >= 0) {
+        /* Suppression-aware speculation exists only on the V4.1 path. The
+         * legacy samplers below ignore exclude_token and could emit a
+         * suppressed marker mid-block, so fall back to single-token
+         * evaluation: the caller re-samples every step under
+         * ds4_session_sample_excluding with identical semantics to before. */
+        if (!accepted) return 0;
+        if (ds4_session_eval(s, first_token, err, errlen) != 0) return -1;
+        accepted[0] = first_token;
+        return 1;
+    }
     if (s->distributed) {
         if (!accepted) return 0;
         if (ds4_session_eval(s, first_token, err, errlen) != 0) return -1;
@@ -91248,7 +91296,7 @@ int ds4_session_eval_speculative_argmax(ds4_session *s, int first_token,
                                         char *err, size_t errlen) {
     return ds4_session_eval_speculative_argmax_impl(
         s, first_token, max_tokens, eos_token, false, DS4_THINK_HIGH,
-        accepted, accepted_cap, err, errlen);
+        accepted, accepted_cap, -1, err, errlen);
 }
 
 int ds4_session_eval_speculative_argmax_ignoring_eos(
@@ -91257,7 +91305,7 @@ int ds4_session_eval_speculative_argmax_ignoring_eos(
         int *accepted, int accepted_cap, char *err, size_t errlen) {
     return ds4_session_eval_speculative_argmax_impl(
         s, first_token, max_tokens, eos_token, true, think_mode,
-        accepted, accepted_cap, err, errlen);
+        accepted, accepted_cap, -1, err, errlen);
 }
 
 int ds4_session_eval_speculative(ds4_session *s, int first_token,
@@ -91266,10 +91314,26 @@ int ds4_session_eval_speculative(ds4_session *s, int first_token,
                                  float top_p, float min_p, uint64_t *rng,
                                  int *accepted, int accepted_cap,
                                  char *err, size_t errlen) {
+    return ds4_session_eval_speculative_ex(s, first_token, max_tokens, eos_token,
+        temperature, top_k, top_p, min_p, rng, accepted, accepted_cap, -1,
+        err, errlen);
+}
+
+/* exclude_token: mask one vocab id out of every draft AND every target
+ * sampling distribution for the whole speculation block (see
+ * ds4_logits_mask_exclude). The server passes its DSML suppression token here
+ * so tool-less chat keeps byte-identical per-step distributions while still
+ * speculating; -1 = no exclusion (previous behaviour). */
+int ds4_session_eval_speculative_ex(ds4_session *s, int first_token,
+                                    int max_tokens, int eos_token,
+                                    float temperature, int top_k,
+                                    float top_p, float min_p, uint64_t *rng,
+                                    int *accepted, int accepted_cap,
+                                    int exclude_token, char *err, size_t errlen) {
     if (temperature <= 0.0f) {
-        return ds4_session_eval_speculative_argmax(
-            s, first_token, max_tokens, eos_token,
-            accepted, accepted_cap, err, errlen);
+        return ds4_session_eval_speculative_argmax_impl(
+            s, first_token, max_tokens, eos_token, false, DS4_THINK_HIGH,
+            accepted, accepted_cap, exclude_token, err, errlen);
     }
     if (!s || !accepted || !rng || max_tokens <= 0 || accepted_cap <= 0) {
         return 0;
@@ -91282,8 +91346,16 @@ int ds4_session_eval_speculative(ds4_session *s, int first_token,
 #ifdef DS4_HAS_DEEPSEEK41_GPU
     if (ds4_session_is_ds41(s))
         return ds41_session_speculate(s, first_token, accepted_cap, eos_token, false,
-            DS4_THINK_HIGH, temperature, top_k, top_p, min_p, rng, accepted, err, errlen);
+            DS4_THINK_HIGH, temperature, top_k, top_p, min_p, rng, accepted,
+            exclude_token, err, errlen);
 #endif
+    if (exclude_token >= 0) {
+        /* Legacy samplers ignore the exclusion; keep suppression exact on
+         * non-V4.1 paths via single-token eval (see argmax impl note). */
+        if (ds4_session_eval(s, first_token, err, errlen) != 0) return -1;
+        accepted[0] = first_token;
+        return 1;
+    }
     if (s->distributed || ds4_session_is_cpu(s)) {
         if (ds4_session_eval(s, first_token, err, errlen) != 0) return -1;
         accepted[0] = first_token;

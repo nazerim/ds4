@@ -671,6 +671,16 @@ int ds4_session_eval_speculative(ds4_session *s, int first_token,
                                  float top_p, float min_p, uint64_t *rng,
                                  int *accepted, int accepted_cap,
                                  char *err, size_t errlen);
+/* Same as ds4_session_eval_speculative but masks exclude_token (a vocabulary
+ * id, -1 = none) out of every draft and target sampling distribution in the
+ * block: DSML-suppressed tool-less chat can speculate without ever emitting
+ * the marker token, distribution-identical to per-step sample_excluding. */
+int ds4_session_eval_speculative_ex(ds4_session *s, int first_token,
+                                    int max_tokens, int eos_token,
+                                    float temperature, int top_k,
+                                    float top_p, float min_p, uint64_t *rng,
+                                    int *accepted, int accepted_cap,
+                                    int exclude_token, char *err, size_t errlen);
 /* TP worker side of a mirrored speculative-verify block: run its half of the
  * batch verify for KV side effects, then obey the leader's commit frame
  * (keep, or roll back and replay). flags are the VERIFY frame's
