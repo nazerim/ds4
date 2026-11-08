@@ -55,6 +55,13 @@ Batched-mode exclusion (docs SERVER.md:92-96) stands — irrelevant to single sl
 
 ## 4. Live system state (verified 19:27)
 
+- **CTX 512k EXPERIMENT LIVE (22:2x)**: lane rebooted V41_CTX=524288 (engine
+  ceiling is exactly 1048576; ds41 native trained 1M, rope_orig 1M). Static ctx
+  buffers 10786->13862 MiB (+3.0); expert cache auto-trimmed 73.96->70.96 GiB;
+  engine RSS flat 83.7->83.0 GiB; tool probe clean (finish=tool_calls, cycles>0).
+  Provider ds41/deepseek-v4.1-flash context set 524288 (strata entry untouched).
+  BOOT REQUIREMENT: v41 lanes now need V41_CTX=524288 env until script default
+  changes (script default still 262144; plain restart would silently shrink!).
 - Engine PID **1796**, `restart-v41-dspark` lane: `--dspark --mtp-model
   gguf/DeepSeek-V4.1-Flash-DSpark.gguf` (8.0 GiB, 81/81 verify), env
   `DSPARK_EXACT=0 DS4_DSPARK_STATS=1 DS4_DSPARK_SCHEDULER_WINDOW=12`
