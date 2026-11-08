@@ -91,7 +91,12 @@ Batched-mode exclusion (docs SERVER.md:92-96) stands — irrelevant to single sl
    (noexact would silently argmax-bias sampling traffic; review found it).
    Trade-off: noexact lane (bench winner) gets NO tool-less win; exact lane
    gets tool-less spec + tool resample overhead. Operator lane choice now =
-   traffic-profile choice. Follow-ups from review: hook test for mask
+   traffic-profile choice. FOLLOW-UP 20:2x (ecccb55): knob
+   DS4_DSPARK_TOOLLESS_NOEXACT (env, default off) opens tool-less spec on
+   noexact lanes by operator request; lane PID 3536 booted with it FOR
+   TERMBENCH (DSPARK_EXACT=0 + DS4_DSPARK_STATS=1 + TOOLLESS_NOEXACT=1).
+   Collect: every class should now show cycles>0; leg decode median vs the
+   24.86 tool-spec-only bank = the tool-less delta. Follow-ups from review: hook test for mask
    primitives (finding 4); ignore_eos tool-less unsuppressed first-token
    quirk predates patch (finding 6, documented).
 1c. Optional: same-boot A/B (restart-v41 plain, rerun bench) to tighten the
