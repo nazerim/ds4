@@ -47,6 +47,7 @@ def main():
     ap.add_argument('--interval', type=int, default=60)
     ap.add_argument('--quiet', type=int, default=1200)
     ap.add_argument('--max-hours', type=float, default=4.5)
+    ap.add_argument('--stall', type=int, default=180)
     a = ap.parse_args()
     deadline = time.time() + a.max_hours * 3600
     pos = 0
@@ -57,6 +58,9 @@ def main():
     dec_recent = []
     t_last_fin = time.time()
     boots = 0
+    nstall = 0
+    inflight = 0
+    t_last_log = time.time()
     ctx_line = 'n/a'
     f = open(a.log, errors='ignore')
     f.seek(0, 2)
@@ -67,6 +71,8 @@ def main():
         while time.time() < deadline:
             time.sleep(a.interval)
             new = f.readlines()
+            if new:
+                t_last_log = time.time()
             for line in new:
                 m = SPEC.search(line)
                 if m:
@@ -77,6 +83,9 @@ def main():
                     if m.group(2) == 'error':
                         errs += 1
                     t_last_fin = time.time()
+                    inflight = max(0, inflight - 1)
+                if 'prompt start' in line:
+                    inflight += 1
                 m = CTX.search(line)
                 if m:
                     maxctx = max(maxctx, int(m.group(1)))
@@ -101,10 +110,31 @@ def main():
             dall = f'{st.median(dec_all):.1f}' if dec_all else '-'
             drec = f'{st.median([v for _, v in dec_recent]):.1f}' if dec_recent else '-'
             wacc = f'{100.0 * acc / prop:.1f}%' if prop else '-'
+            # stall tripwire: request in flight + log silent + engine burning no
+            # CPU = wedged kernel wait (2026-11-09 pread-hang signature: stuck
+            # pread in expert-stream pool froze the whole lane at 0.0% cpu).
+            silence = time.time() - t_last_log
+            alert = ''
+            if pid and inflight > 0 and silence > a.stall:
+                cpu = float(sh(f'ps -o %cpu= -p {pid}').strip() or 99)
+                if cpu < 1.0:
+                    nstall += 1
+                    leaf = sh(f'sample {pid} 1 2>/dev/null | grep -m1 -E '
+                              '"pread|waitUntilCompleted|psynch" | cut -c1-72')
+                    alert = f' !! STALL sil={int(silence)}s inflight={inflight} ' \
+                            f'cpu={cpu:.1f} leaf=[{leaf.strip()}]'
+                    try:
+                        subprocess.run(['osascript', '-e',
+                                        f'display notification "engine silent '
+                                        f'{int(silence)}s, {inflight} inflight" '
+                                        f'with title "ds4 leg STALL"'], timeout=10)
+                    except Exception:
+                        pass
+                    t_last_log = time.time()  # re-arm; alert once per window
             snap.write(f'{time.strftime("%H:%M:%S")} req={reqs} err={errs} gen={gen} '
                        f'accept={wacc} cyc={cyc} maxctx={maxctx} '
                        f'dec_med all={dall} 15m={drec} rss={rss} swap={swap} '
-                       f'boots={boots} ctx={ctx_line}\n')
+                       f'boots={boots} ctx={ctx_line}{alert}\n')
             snap.flush()
             if reqs >= 20 and time.time() - t_last_fin > a.quiet:
                 snap.write(f'# QUIET {a.quiet}s after {reqs} reqs -> leg done '
@@ -115,7 +145,7 @@ def main():
                    f'weighted_accept={100.0 * acc / prop if prop else 0:.1f}% '
                    f'acc/cycle={acc / cyc if cyc else 0:.2f} '
                    f'tok/verify={1 + (acc / cyc if cyc else 0):.2f} '
-                   f'maxctx={maxctx} boots={boots} '
+                   f'maxctx={maxctx} boots={boots} stalls={nstall} '
                    f'dec_median_all={dall} end={time.strftime("%H:%M:%S")}\n')
     print('watcher complete; see', a.out)
 

@@ -77,22 +77,42 @@ acc/cycle, 3.16 tok/verify, 37,028 cycles. Decode medians per 30-min age bucket:
 (65.2→67.2→68.6% through 70-110k); decode at 110k+ still ~19.5 vs mid-band 22.1.
 Peak depth reached 124k — **the 200k-512k band is still unexercised**. Verdict:
 lane approved as standing config; monitor artifacts: /tmp/ds41_leg.snap.
+### INCIDENT 2026-11-09 05:40:10 — pread-hang lane wedge (make-doom-for-mips aborted)
+
+Request stuck mid-decode at gen=200 (ctx 37.9k, inside spec verify:
+ds41_session_verify -> ds41_moe_batch -> stream_expert_pread_tasks): one worker
+hard-blocked in pread() at ds4_metal.m:14355 on the MAIN GGUF (internal SSD),
+coordinator waits task-completion forever; single-slot lane => total stall at
+0.0% cpu, log frozen. Exonerated: sleep/TM/memory pressure/blade (volume ls OK,
+DSpark gguf reads OK, kernel log clean). SIGKILL -> UNREAPABLE zombie (?Es,
+thread wedged in-kernel); fresh-fd dd of main gguf still hangs AFTER the kill
+=> vnode/driver-level wedge, userspace-unrecoverable. RECOVERY = system reboot,
+then relaunch with the four envs (BOOT TRAP) + re-arm monitor. Evidence:
+/tmp/ds41_stall.sample. First occurrence ever of this signature; upstream
+streaming pool has no pread timeout/watchdog (candidate hardening + issue).
+Monitor since gained a stall tripwire (--stall 180s: inflight>0 + log silence +
+cpu<1% => snapshot !! STALL line with leaf frame + desktop notification).
 
 ## 6. Open threads (priority order)
 
-1. **Depth stress 200k-512k** — one long session actually filling toward the
+1. **REBOOT + re-lane (now)** — engine is an unreapable zombie since 05:40
+   (incident above): operator reboots, then BOOT TRAP command (four envs),
+   re-auth proxy, re-arm monitor, re-run make-doom.
+
+
+2. **Depth stress 200k-512k** — one long session actually filling toward the
    new ceiling; watch accept-vs-depth beyond 124k and any prefill cliff.
-2. **V41_CTX script default decision** (trap above) — operator's call.
-3. **Upstream #1330/#1331 watch** — rework via `/tmp/pr-upstream-eventdrain` if
+3. **V41_CTX script default decision** (trap above) — operator's call.
+4. **Upstream #1330/#1331 watch** — rework via `/tmp/pr-upstream-eventdrain` if
    antirez comments. Branch `fix/upstream-event-drain-reap` = `f8a454a`.
-4. Hook test for mask primitives (review finding 4): `sample_build_probabilities`
+5. Hook test for mask primitives (review finding 4): `sample_build_probabilities`
    masked-row == probs[X]=0 + dspark block run never emits X (both exact/noexact).
    Engine-stop window required (`make test` lock rule).
-5. `make cpu` pre-existing link breakage (`ds4_gpu_set_decode_phase` no stub
+6. `make cpu` pre-existing link breakage (`ds4_gpu_set_decode_phase` no stub
    under DS4_NO_GPU; identical on HEAD — recorded, unfixed).
-6. Chunk-rate telemetry artifact (shared progress state across prefill boundary)
+7. Chunk-rate telemetry artifact (shared progress state across prefill boundary)
    — filed in #1330 comment; one-field fix, unfixed.
-7. HF token rotation (Nov 6 `--token` exposure) — operator-side.
+8. HF token rotation (Nov 6 `--token` exposure) — operator-side.
 
 ## 7. Files to remember
 
