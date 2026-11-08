@@ -102,7 +102,16 @@ Batched-mode exclusion (docs SERVER.md:92-96) stands — irrelevant to single sl
    (n=679), weighted accept 69.1%, 2.49 acc/cycle. vs tool-spec-only leg
    24.86/26.95 (+2.5% med, deeper ctx, 38% more tokens) and vs plain
    23.3/21.10 (+9.4% med, +15% wall/token). No zero-cycles rows survived.
-   Operator lane now carries the knob as standing config. Follow-ups from review: hook test for mask
+   Operator lane now carries the knob as standing config. SHAPE-3 PAIRED A/B
+   (22:1x): long-context bench, legs diverged in content (27req/18.3k tok spec
+   vs 23req/9.5k plain - stochastic agent loop) so WALL is not comparable;
+   DECODE avg= BY CONTEXT BAND is: plain 22.22(0-10k)/20.88(10-20k)/20.84(>31k)
+   vs spec 23.78/23.66/22.42(20-31k) -> spec +7.0%/+13.3% band-matched, ALL
+   21.35->23.01 (+7.8%). Plain decays with depth, spec holds ~flat: accepted
+   blocks amortize the deeper-context verify cost. Spec aggregate 64.7%
+   weighted accept, 2.44 acc/cycle. Pattern across 3 shapes: long-turn/agentic
+   work wins (shape1 +6.7%, shape3 +7-13% band); short-burst washes (shape2
+   -3.1%, small n). Follow-ups from review: hook test for mask
    primitives (finding 4); ignore_eos tool-less unsuppressed first-token
    quirk predates patch (finding 6, documented).
 1c. Optional: same-boot A/B (restart-v41 plain, rerun bench) to tighten the
