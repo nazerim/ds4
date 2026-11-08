@@ -61,11 +61,18 @@ Batched-mode exclusion (docs SERVER.md:92-96) stands — irrelevant to single sl
   (operator-set window — no effect observed while cycles=0), confidence 0.45.
 - Drafter loaded ⇒ expert cache 73.96 GiB (vs 79.51 plain); server-side dspark is
   pure overhead until §5 lands. Smoke: 64 tok/6.2 s, positive `dspark req:` line.
-- **Operator termbench A/B in progress or imminent** on this lane — collect plan:
-  `grep -c 'dspark req' log/ds4-v41.log`, zero-cycles tally per turn, `avg=`
-  medians via harness scripts; compare against banked baselines: plain med
-  23.3/p90 23.7/max 25.2 (n=495), noexact med 23.2/p90 25.5/max 33.9 (n=677,
-  non-speculating), exact med 21.8 (n=370) — all `avg=`-field, artifact-proof.
+- **TERMBENCH FINAL (20:0x, verdict IN): server dspark noexact lane CONFIRMED
+  WORTH IT.** Bench boot 19:25 (PID 1796), leg 19:32:04->19:48:32: 24,138 tok /
+  16.5 min wall vs plain leg 23,992 tok / 18.9 min (**+13% wall throughput on
+  near-identical token volume**). 16/18 requests speculating: cycles=7208,
+  weighted accept **68.0%**, 2.34 accepted/cycle (~3.3 tokens/verify pass),
+  rejects=0, conf 0.45 + SCHED_WINDOW=12. Decode-isolated avg= medians:
+  **noexact-today 24.86/p90 26.95/max 31.25 (n=490)** vs plain-banked
+  23.3/23.7/25.2 (**+6.7% median, +14% p90**) vs exact 21.8. Biggest turn (4747
+  cycles) hit 70% accept; short turns 45-100%. Collector:
+  decode-ab-harness/ds41_collect_spec.py. Caveat: control is prior-boot plain
+  leg (not same-boot; all bench turns carry tools so no within-boot zero-cycles
+  control exists).)
 - Logs: rotate-on-boot (`log/ds4-v41.log.<YYYYMMDD-HHMMSS>`, keep 10; snapshots in
   /tmp: base/d1024/do/do_d1024/accept/dspark legs/probes). Lane ops: `start-v41`,
   `restart-v41`, `restart-v41-dspark` (plain default lane remains the honest one
@@ -75,12 +82,15 @@ Batched-mode exclusion (docs SERVER.md:92-96) stands — irrelevant to single sl
 
 ## 5. Open threads (priority order)
 
-1. **Score live server speculation** (it ALREADY runs on has_tools traffic —
-   no wiring needed for that): read `dspark req:` cycles>0 lines + accept_rate
-   distribution from operator's running termbench on PID 1796; compare tails vs
-   banked plain baseline. Optional extension: make tool-less chat spec too
-   (DSML-suppression sampler has no speculative variant — real patch, gates
-   spec out of most ordinary turns). Wire NOT needed: 90405 dispatch is live.
+1. DONE: server speculation scored live — has_tools traffic speculates and
+   wins (+13% wall / +6.7% decode-median). Default lane recommendation:
+   dspark noexact (DSPARK_EXACT=0) for agent/tool traffic; plain stays for
+   tool-less-heavy use.
+1b. Extension candidate (small win left on table): tool-less chat cannot
+   speculate (DSML-suppression sampler has no speculative variant) — patch
+   would cover ordinary turns too.
+1c. Optional: same-boot A/B (restart-v41 plain, rerun bench) to tighten the
+   control from prior-boot to interleaved.
 2. **Upstream response on #1330/#1331** — watch; retest legs if changes requested
    (worktree + branch + patch all staged).
 3. **`make cpu` pre-existing link breakage** (`ds4_gpu_set_decode_phase` no stub
