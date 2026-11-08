@@ -16267,6 +16267,12 @@ decode_again:
      * the per-token getenv scan showed up in the #3975-analog audit
      * (.codebase-memory/TOKENIZER-AUDIT-20261003.md fix #5). */
     const bool mtp_spec_disabled = getenv("DS4_MTP_SPEC_DISABLE") != NULL;
+    /* Opt-in bias-for-speed trade for tool-less chat on noexact lanes:
+     * without it tool-less traffic keeps per-step exact sampling (review of
+     * c759147 flagged the silent argmax bias). DS4_DSPARK_TOOLLESS_NOEXACT=1
+     * declares the trade knowingly; termbench measures it. */
+    const bool toolless_noexact_spec =
+        getenv("DS4_DSPARK_TOOLLESS_NOEXACT") != NULL;
     int room = ds4_session_ctx(slot->session) - ds4_session_pos(slot->session);
     int max_tokens = server_decode_budget(j->req.max_tokens,
                                           recovery_completion, room);
@@ -16535,20 +16541,21 @@ decode_again:
             toks[0] = token;
             ntok = 1;
         } else if (!s->batched_mode &&
-            (dsml_token_id < 0 || ds4_engine_mtp_exact_sampling(s->engine)) &&
+            (dsml_token_id < 0 || ds4_engine_mtp_exact_sampling(s->engine) ||
+             toolless_noexact_spec) &&
             ds4_engine_mtp_draft_tokens(s->engine) > 1 &&
             !mtp_spec_disabled)
         {
             /* dsml_token_id carries the tool-less DSML suppression marker
              * (>=0 for tool-less chat on DSML vocabularies, -1 otherwise).
-             * Tool-less speculation is gated to exact-sampling mode: the
-             * masked rejection/residual path is distribution-identical to
-             * per-step sample_excluding there, while noexact accepts only
-             * drafts matching the target argmax - a greedy bias that suits
-             * tool traffic by operator decision and must not silently
-             * reach ordinary sampling traffic.  ignore_eos tool-less
-             * requests keep the pre-existing unsuppressed token-selection
-             * quirk (branch order above) and speculating greedy-verify is
+             * Tool-less speculation is exact-sampling by default: the masked
+             * rejection/residual path is distribution-identical to per-step
+             * sample_excluding there, while noexact accepts only drafts
+             * matching the target argmax - a greedy bias the operator
+             * sanctioned for tool traffic and extends to tool-less only via
+             * DS4_DSPARK_TOOLLESS_NOEXACT.  ignore_eos tool-less requests
+             * keep the pre-existing unsuppressed token-selection quirk
+             * (branch order above); speculating greedy-verify is
              * token-identical to their old per-step greedy path. */
             if (j->req.ignore_eos) {
                 ntok = ds4_session_eval_speculative_argmax_ignoring_eos(
