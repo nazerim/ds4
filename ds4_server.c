@@ -16041,6 +16041,7 @@ static void generate_job_inner(server *s, server_slot *slot, job *j) {
                req_flags);
     ds4_session_set_progress(slot->session, server_progress_cb, &progress);
     ds4_session_set_display_progress(slot->session, server_progress_cb, &progress);
+    ds4_session_dspark_stats_begin(slot->session);
 
     int cold_store_len = 0;
     if (!multimodal && cached == 0 &&
@@ -17419,6 +17420,17 @@ decode_again:
                        flags,
                        final_finish,
                        now_sec() - t0);
+        }
+    }
+    {
+        char ds_stats_line[512];
+        if (ds4_session_dspark_stats_line(slot->session, ds_stats_line,
+                                          sizeof(ds_stats_line))) {
+            server_log(DS4_LOG_GENERATION,
+                       "ds4-server: %s ctx=%s %s",
+                       j->req.kind == REQ_CHAT ? "chat" : "completion",
+                       ctx_span,
+                       ds_stats_line);
         }
     }
     free(parsed_content);

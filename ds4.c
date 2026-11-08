@@ -63733,6 +63733,8 @@ struct ds4_session {
     bool dspark_sched_bypass;
     bool dspark_last_confidence0_valid;
     ds4_dspark_spec_stats dspark_stats;
+    /* Baseline for per-request deltas (ds4_session_dspark_stats_begin/line). */
+    ds4_dspark_spec_stats dspark_stats_req_base;
 #endif
     uint64_t mtp_probe_total;
     uint64_t mtp_probe_hit;
@@ -77328,6 +77330,60 @@ void ds4_engine_close(ds4_engine *e) {
     free(e->directional_steering_file);
     free(e->model_path);
     free(e);
+}
+
+/* Per-request DSpark stats surface for server lanes. The cumulative snapshot
+ * only prints at ds4_session_free, which a server slot never reaches while it
+ * serves, so DS4_DSPARK_STATS=1 was silent exactly where speculation runs.
+ * begin() captures the request baseline; line() renders the per-request delta
+ * and reports false when stats are off, no speculation ran, or nothing was
+ * proposed. Pure counter accounting. Unconditional symbols: CPU builds get
+ * no-op bodies, matching the file's inline-guard convention. */
+static bool ds4_dspark_stats_env_enabled(void) {
+    const char *env = getenv("DS4_DSPARK_STATS");
+    return env && env[0] && strcmp(env, "0") != 0;
+}
+
+void ds4_session_dspark_stats_begin(ds4_session *s) {
+#ifdef DS4_NO_GPU
+    (void)s;
+#else
+    if (!s || !ds4_dspark_stats_env_enabled()) return;
+    s->dspark_stats_req_base = s->dspark_stats;
+#endif
+}
+
+bool ds4_session_dspark_stats_line(ds4_session *s, char *out, size_t outlen) {
+#ifdef DS4_NO_GPU
+    (void)s; (void)out; (void)outlen;
+    return false;
+#else
+    if (!s || !out || outlen == 0 || !ds4_dspark_stats_env_enabled()) return false;
+    const ds4_dspark_spec_stats *st = &s->dspark_stats;
+    const ds4_dspark_spec_stats *b = &s->dspark_stats_req_base;
+    const uint64_t cycles   = st->cycles - b->cycles;
+    const uint64_t proposed = st->proposed_tokens - b->proposed_tokens;
+    const uint64_t accepted = st->accepted_draft_tokens - b->accepted_draft_tokens;
+    if (cycles == 0 && proposed == 0) return false;
+    const double accept_rate = proposed ?
+        100.0 * (double)accepted / (double)proposed : 0.0;
+    const double avg_accept = cycles ?
+        (double)accepted / (double)cycles : 0.0;
+    snprintf(out, outlen,
+             "dspark req: cycles=%llu proposed=%llu accepted_draft=%llu "
+             "accept_rate=%.2f%% avg_accept=%.3f full=%llu partial=%llu "
+             "rejects=%llu seed_batches=%llu spec_ms=%.1f",
+             (unsigned long long)cycles,
+             (unsigned long long)proposed,
+             (unsigned long long)accepted,
+             accept_rate, avg_accept,
+             (unsigned long long)(st->full_accepts - b->full_accepts),
+             (unsigned long long)(st->partial_accepts - b->partial_accepts),
+             (unsigned long long)(st->sample_rejects - b->sample_rejects),
+             (unsigned long long)(st->seed_batches - b->seed_batches),
+             (st->propose_ms - b->propose_ms) + (st->total_ms - b->total_ms));
+    return true;
+#endif
 }
 
 #ifndef DS4_NO_GPU

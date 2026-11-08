@@ -412,6 +412,11 @@ void ds4_engine_tp_unbind(ds4_engine *e);
 
 int ds4_session_create(ds4_session **out, ds4_engine *e, int ctx_size);
 void ds4_session_free(ds4_session *s);
+/* Per-request DSpark speculation stats (DS4_DSPARK_STATS=1): snapshot at
+ * request start, render the per-request delta at request end. line() returns
+ * false when disabled or speculation did not run. */
+void ds4_session_dspark_stats_begin(ds4_session *s);
+bool ds4_session_dspark_stats_line(ds4_session *s, char *out, size_t outlen);
 int ds4_session_power(ds4_session *s);
 int ds4_session_set_power(ds4_session *s, int power_percent);
 float ds4_session_directional_steering_ffn(ds4_session *s);
