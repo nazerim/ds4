@@ -66,7 +66,15 @@ Batched-mode exclusion (docs SERVER.md:92-96) stands — irrelevant to single sl
   different machine; NEVER adjust for local lane state, still 262144).
   BOOT REQUIREMENT: v41 lanes now need V41_CTX=524288 env until script default
   changes (script default still 262144; plain restart would silently shrink!).
-- Engine PID **1796**, `restart-v41-dspark` lane: `--dspark --mtp-model
+- **COREWARS OVERNIGHT VERDICT (148 reqs / 116,988 tok / 2h15m wall, 0 errors,
+  no reboots, RSS 80.9G flat, swap 0.8G flat): 512k+all-spec lane PASSES.**
+  Age-flat decode (20-min medians 20.4-23.7, no drift = leak fix holds over a
+  2h15m agentic run at depth). Accept rises with depth (65->68.6%), decode
+  holds ~mid-band to 110k+ (19.5 vs 22.1 - shallowest band 0-30k is
+  token-major-append territory, not degradation). Peak depth 124k; the
+  512k ceiling stays unproven. Weighted accept 67.2%, 2.16 acc/cycle,
+  3.16 tok/verify across 37,028 cycles. 123 boundary-rewind lines = normal
+  spec-block truncation on tool-call turns., `restart-v41-dspark` lane: `--dspark --mtp-model
   gguf/DeepSeek-V4.1-Flash-DSpark.gguf` (8.0 GiB, 81/81 verify), env
   `DSPARK_EXACT=0 DS4_DSPARK_STATS=1 DS4_DSPARK_SCHEDULER_WINDOW=12`
   (operator-set window — no effect observed while cycles=0), confidence 0.45.
