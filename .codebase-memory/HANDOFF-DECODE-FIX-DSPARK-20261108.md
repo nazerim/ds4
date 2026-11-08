@@ -101,24 +101,38 @@ disk4->disk5, mount point stable); engine 1763 booted with all four envs,
 external-KV live-store proven, smoke request speculated 68.75% immediately.
 Monitor re-armed: /tmp/ds41_leg_doom2.snap (anchor 06:19:55, cap 5h).
 
+### DOOM2 RUN 2026-11-09 06:25:50-07:25:14 (59.4 min, anchor = operator's KV-hit resume line)
+
+32 reqs / 96,295 tok / **0 errors 0 stalls 0 reboots** / wall-overall 27.0 t/s
+(prefill-inclusive). Weighted accept 85.1% = 31 normal tool-loop turns at 65.0%
+(3.18 tok/verify, same profile as corewars) + ONE megaturn that rewrote the
+records: gen=65,536 (=client 64k cap, finish=length), 1,607 s, depth 125k->
+**190,638** (new lane peak), **96.78% accept / rejects=0 / 4.654 acc-cyc /
+5.65 tok-verify / 40.8 t/s cumulative FLAT across 65k tokens of depth growth**
+(machine-generated doom code = speculation's best case; prose-like turns stay
+~65%). Within-turn avg= is artifact-free depth evidence: depth beyond 124k has
+NO decode decay and NO accept collapse. Prefill at depth fine (3,116 tok @122k
+= 17.5 s, ~178 t/s). KV anchors tracked to 190,638 (1.0 GiB stores ~0.3 s).
+RSS 81.6G flat. Monitor learned: false-QUIET on >20-min single turns (fixed
+`0ec30f2`: quiet now requires inflight==0); band-accept attribution is by
+request-END ctx pos on the dspark line, so the 96.78% lands in the 110-150k
+band — don't read bands as position-resolved for megaturns.
+
 ## 6. Open threads (priority order)
 
-1. **Re-run make-doom-for-mips** — recovery from the §5a incident COMPLETE
-   (reboot 06:15, engine 1763, proxy 1897, monitor doom2 armed); the benchmark
-   itself still needs restarting from the client side.
-
-
-2. **Depth stress 200k-512k** — one long session actually filling toward the
-   new ceiling; watch accept-vs-depth beyond 124k and any prefill cliff.
-3. **V41_CTX script default decision** (trap above) — operator's call.
-4. **Upstream #1330/#1331 watch** — rework via `/tmp/pr-upstream-eventdrain` if
+1. **Depth stress 200k-512k** — doom2 pushed the needle hard (190.6k peak,
+   everything green: depth-flat decode, accepts, anchors, prefill) but the
+   200k+ band still needs a session that lives there long-term; the doom
+   session resumes at ~190k so it happens naturally if kept running.
+2. **V41_CTX script default decision** (trap above) — operator's call.
+3. **Upstream #1330/#1331 watch** — rework via `/tmp/pr-upstream-eventdrain` if
    antirez comments. Branch `fix/upstream-event-drain-reap` = `f8a454a`.
-5. Hook test for mask primitives (review finding 4): `sample_build_probabilities`
+4. Hook test for mask primitives (review finding 4): `sample_build_probabilities`
    masked-row == probs[X]=0 + dspark block run never emits X (both exact/noexact).
    Engine-stop window required (`make test` lock rule).
-6. `make cpu` pre-existing link breakage (`ds4_gpu_set_decode_phase` no stub
+5. `make cpu` pre-existing link breakage (`ds4_gpu_set_decode_phase` no stub
    under DS4_NO_GPU; identical on HEAD — recorded, unfixed).
-7. Chunk-rate telemetry artifact (shared progress state across prefill boundary)
+6. Chunk-rate telemetry artifact (shared progress state across prefill boundary)
    — filed in #1330 comment; one-field fix, unfixed.
 8. HF token rotation (Nov 6 `--token` exposure) — operator-side.
 
