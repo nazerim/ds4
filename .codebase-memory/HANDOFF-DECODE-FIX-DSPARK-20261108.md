@@ -96,8 +96,10 @@ cpu<1% => snapshot !! STALL line with leaf frame + desktop notification).
 ## 6. Open threads (priority order)
 
 1. **REBOOT + re-lane (now)** — engine is an unreapable zombie since 05:40
-   (incident above): operator reboots, then BOOT TRAP command (four envs),
-   re-auth proxy, re-arm monitor, re-run make-doom.
+   (incident above): operator reboots, then BOOT TRAP command (four envs)
+   FIRST, then `./ds4-server.sh start-proxy` (engine must precede proxy; a
+   live proxy follows engine restarts on its own), re-arm monitor, re-run
+   make-doom.
 
 
 2. **Depth stress 200k-512k** — one long session actually filling toward the
