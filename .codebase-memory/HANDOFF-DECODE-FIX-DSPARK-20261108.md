@@ -187,8 +187,10 @@ hit cd9e2bf3/5497 => that chain is the SHARED termbench task preamble (free
 4. Hook test for mask primitives (review finding 4): `sample_build_probabilities`
    masked-row == probs[X]=0 + dspark block run never emits X (both exact/noexact).
    Engine-stop window required (`make test` lock rule).
-5. `make cpu` pre-existing link breakage (`ds4_gpu_set_decode_phase` no stub
-   under DS4_NO_GPU; identical on HEAD — recorded, unfixed).
+5. `make cpu` link breakage — FIXED 2026-11-09 (fork-only symbol, no upstream
+   issue warranted): `ds4_gpu_set_decode_phase` no-op stub for DS4_NO_GPU
+   builds in ds4.c; worktree-verified make cpu green (pre-fix: undefined
+   symbol x8 from generate_job_inner).
 6. Chunk-rate telemetry artifact (shared progress state across prefill boundary)
    — filed in #1330 comment; one-field fix, unfixed.
 7. HF token rotation (Nov 6 `--token` exposure) — operator-side.

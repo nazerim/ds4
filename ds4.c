@@ -142,6 +142,14 @@ static uint32_t metal_graph_cuda_tp_output_tiers_for_head(
 #include "ds4_gpu.h"
 #endif
 
+#ifdef DS4_NO_GPU
+/* The decode-phase hint declared in ds4_gpu.h is implemented by the Metal
+ * backend (ds4_metal.m) and no-oped in ds4_cuda.cu; ds4_server.c's request
+ * loop calls it unconditionally, so CPU-only (DS4_NO_GPU) builds fail to
+ * link without a matching no-op here. */
+void ds4_gpu_set_decode_phase(int decode) { (void)decode; }
+#endif
+
 /* Non-CUDA builds (Mac/Metal, CPU-only) never link ds4_cuda.cu. Provide
  * stubs for the multi-GPU plumbing multi-GPU functions and globals declared in
  * ds4_gpu_mgpu.h. These keep the linker happy on Mac/Metal and on CPU
