@@ -130,7 +130,17 @@ weighted accept **73.9%** / 3.94 tok-verify / NO megaturns (med 382, max
 >262k band (n=982) EQUALS mid-band: decode does not decay, accept does not
 collapse. Peak 319,646 (61% of ceiling). Age-flat 30m: 19.6->29.8 no decay.
 RSS ~85.5G peak then back to 80.5. MIPS-sim client-side gaps = harness idle,
-not stall (see §6 note). Watcher: /tmp/ds41_leg_doom3b.snap FINAL.
+not stall (see §6 note). Watcher: /tmp/ds41_leg_tb2/doom3b snaps.
+### EXTRACT-MOVES-FROM-VIDEO 2026-11-09 12:17:33-13:51:26 (93.9 min of 11h attempt; clean stop end)
+
+97 reqs / 62,615 tok / **0 errors** / 67.3% accept / 3.43 tok-verify / depth
+131,560 / wall 11.1 t/s (LOW by design: 11 frame-appends >1500 tok, max
+14,850 = biggest single append on the lane, prefill-heavy). FIRST VISION
+WORKLOAD on the spec lane: all stats land inside the text-only envelope —
+vision adds prefill load, no instability. CHAIN CORRECTION: this AND merge
+hit cd9e2bf3/5497 => that chain is the SHARED termbench task preamble (free
+5,497-tok disk-KV head start for every task), NOT doom-specific — earlier
+"merge = doom phase" inference downgraded.
 
 ## 6. Open threads (priority order)
 
