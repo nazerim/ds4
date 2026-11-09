@@ -123,20 +123,26 @@ QWEN_KV_DIR="${QWEN_KV_DIR:-/Volumes/FireCuda520/ds4-kv-qwen}"
 # profile, mirroring the qwen split. See docs/MODELS.md#deepseek-v41-flash.
 V41_MODEL="${V41_MODEL:-gguf/DeepSeek-V4.1-Flash-1017-IQ2_XXS-Q2_K-imatrix.gguf}"
 V41_VISION="${V41_VISION:-gguf/DeepSeek-V4.1-Flash-Vision.gguf}"
-# 256k native ctx. V4.1's compressed KV geometry is ~8.3 KiB/token
-# (ds41_graph_bytes) => ~2.2 GiB static buffer at 262144 - the real budget on
-# this box is the SSD-streaming expert cache + Metal wired ceiling, not KV.
+# 512k DEFAULT since 2026-11-09 finalization (was 262144; the env-override era
+# is over - doom R3 validated 319,646 depth on this box: >262k band decode
+# 23.5 t/s, accept 74.3%, age-flat). Static ctx buffers 13.5 GiB at 512k
+# (ds41_graph_bytes); the real budget is the SSD-streaming expert cache
+# (auto-trims 73.96->70.96 GiB) under the Metal wired ceiling, not KV.
+# Engine hard ceiling: ctx > 1048576 rejected (model trained natively 1M).
 # Each concurrent slot needs its own context memory AND contends expert-cache
 # loads on one SSD feed - single slot is the DECIDED mode for streaming on
 # this box (operator 2026-11-06), not a pending experiment. No --batched-session.
-V41_CTX="${V41_CTX:-262144}"
+V41_CTX="${V41_CTX:-524288}"
 V41_TOKENS="${V41_TOKENS:-65536}"
 V41_PORT="${V41_PORT:-8003}"
 V41_PID_FILE="./ds4-server-v41.pid"
 V41_KV_DIR="${V41_KV_DIR:-/Volumes/FireCuda520/ds4-kv-v41}"
-# 256k anchors run ladder-scale checkpoints (DeepSeek-era measure: ~100-140 GiB
-# per 328k conversation at 1M ctx; a quarter at 256k) - 128 GiB fits two.
-V41_KV_SIZE="${V41_KV_SIZE:-131072}"
+# 256 GiB (262144 MiB) - ALIGNED with ds4 (KV_SIZE) and qwen (QWEN_KV_SIZE)
+# per operator finalization 2026-11-09: all three lane KV stores budget 256 GiB
+# each on the blade. Ceilings, not reservations; ~4.2 GiB per full-512k session
+# plus 1-4 GiB anchor ladders. CAUTION: 3x256 GiB of ceilings vs ~483 GiB blade
+# free - never let all three lanes run hot simultaneously.
+V41_KV_SIZE="${V41_KV_SIZE:-262144}"
 # 1 = --ssd-streaming (the 128 GB mode); 0 = fully resident (needs 256 GB+).
 V41_SSD_STREAM="${V41_SSD_STREAM:-1}"
 # Cache-miss trace: set TRACE_PATH to a file path (e.g. ./log/ds4.trace) to make
@@ -386,11 +392,20 @@ DSPARK_SCHED_WINDOW="${DS4_DSPARK_SCHEDULER_WINDOW:-12}"
 # DSPARK_EXACT=1 adds --mtp-exact-sampling: at non-zero temperature the drafts
 # follow the ordinary target distribution instead of opportunistic greedy-suffix
 # matching (default confidence 0.8 when unset explicitly).
-# Default 1 since 2026-11-06: exact is the production standard for this family
-# (every collect era day-13..16 + the field-proven rewind fix runs on it);
-# DSPARK_EXACT=0 is the deliberate rollback lever to the seed-batch era
-# (mirror-invalid data - see arm_collect_env banner).
-DSPARK_EXACT="${DSPARK_EXACT:-1}"
+# DEFAULT 0 since 2026-11-09 finalization (was 1): noexact is the validated
+# production lane - tool-spec +6.7% med / all-spec 30/30 speculating / corewars
+# overnight 67.2% / doom R3 73.9% over 42k cycles at 319k depth. Set
+# DSPARK_EXACT=1 for exact-sampling lanes (collect-era parity, mirror-valid
+# data - see arm_collect_env banner).
+DSPARK_EXACT="${DSPARK_EXACT:-0}"
+# Lane-standard dspark envs (2026-11-09 finalization):
+#  TOOLLESS_NOEXACT=1 - tool-less chat speculation on noexact lanes (DSML
+#    suppression mask/restore at the 4 sampling sites); code default stays off,
+#    the lane opts in. STATS=1 prints per-request `dspark req:` lines - all
+#    lane analysis (collect/watch scripts, band tables) depends on them.
+DS4_DSPARK_TOOLLESS_NOEXACT="${DS4_DSPARK_TOOLLESS_NOEXACT:-1}"
+DS4_DSPARK_STATS="${DS4_DSPARK_STATS:-1}"
+export DS4_DSPARK_TOOLLESS_NOEXACT DS4_DSPARK_STATS
 MAX_LOG_ROTATIONS=10
 
 # Debug mode: set DEBUG=1 to enable verbose output
@@ -1122,8 +1137,9 @@ case "${1:-}" in
     echo "  KV_DIR / KV_SIZE    - DeepSeek KV store dir + disk budget MiB (defaults:"
     echo "                        /Volumes/FireCuda520/ds4-kv-deepseek, 262144 = 256 GiB;"
     echo "                        QWEN_KV_DIR/QWEN_KV_SIZE mirror it per profile)"
-    echo "  V41_*               - V4.1 profile: V41_MODEL/V41_VISION/V41_CTX (262144)/"
-    echo "                        V41_TOKENS (65536)/V41_PORT (8003)/V41_KV_DIR/V41_KV_SIZE;"
+    echo "  V41_*               - V4.1 profile: V41_MODEL/V41_VISION/V41_CTX (524288)/"
+    echo "                        V41_TOKENS (65536)/V41_PORT (8003)/V41_KV_DIR/"
+    echo "                        V41_KV_SIZE (262144 = 256 GiB);"
     echo "                        V41_SSD_STREAM=0 for full residency (256 GB+ hosts only)."
     echo "  DS4_THINK_TRIPWIRE  - '1' enables the thinking-loop tripwire server-wide"
     echo "                        (default: 1). DS4_TRIPWIRE_MIN_TOKENS sets the"

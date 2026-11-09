@@ -50,15 +50,22 @@ Verified effect: deterministic 24-turn soak worst turn 597→137 s, transient li
    - short-burst shape-2 was a wash (−3.1% med, small n; cold-draft opener cost).
 4. **512k ctx raised + corewars overnight** (§4/§5): the lane's standing config now.
 
-## 4. Live system state (verified Nov 9 post-reboot 06:19)
+## 4. Live system state (verified Nov 9 post-reboot 06:19; defaults finalized ~14:45)
 
 - Engine **PID 1763** (rebooted 06:15 after §5a incident; prior boot 4624 was the
   zombie): `--ctx 524288 --dspark --mtp-model gguf/DeepSeek-V4.1-Flash-DSpark.gguf
   --dspark-confidence 0.45`, env `DSPARK_EXACT=0 DS4_DSPARK_STATS=1
-  DS4_DSPARK_TOOLLESS_NOEXACT=1 DS4_DSPARK_SCHEDULER_WINDOW=12`, launched via
-  `V41_CTX=524288 DSPARK_EXACT=0 DS4_DSPARK_STATS=1 DS4_DSPARK_TOOLLESS_NOEXACT=1 ./ds4-server.sh restart-v41-dspark`
-- **BOOT TRAP**: script default `V41_CTX=262144` — any restart WITHOUT the env
-  silently drops the lane back to 262k. Flip the script default or always pass it.
+  DS4_DSPARK_TOOLLESS_NOEXACT=1 DS4_DSPARK_SCHEDULER_WINDOW=12`
+- **CONFIG FINALIZED 2026-11-09 (operator):** these four values are now the
+  SCRIPT DEFAULTS (`V41_CTX=524288`, `V41_KV_SIZE=262144`=256 GiB,
+  `DSPARK_EXACT=0` default, `DS4_DSPARK_TOOLLESS_NOEXACT` + `DS4_DSPARK_STATS`
+  exported =1). Plain `./ds4-server.sh start-v41-dspark` boots the validated
+  lane; BOOT TRAP retired (the old default was 262k — any restart without the
+  env silently shrank the lane). Supersedes the morning "env override stays
+  authoritative" decision. Live engine unaffected (already ran these values);
+  defaults take effect on next boot. KV budgets now 256 GiB for ALL THREE
+  lanes (ds4 KV_SIZE / qwen QWEN_KV_SIZE / ds41 V41_KV_SIZE = 262144 MiB
+  each) — ceilings on a blade with ~483 GiB free: never run all three hot.
 - 512k memory accounting: static ctx buffers 10.5→13.5 GiB (+3.0), expert cache
   auto-trimmed 73.96→70.96 GiB, engine RSS flat ~81-83 GiB, swap flat 0.8 GiB.
   Engine hard ceiling: `ds41_graph_alloc` rejects ctx > 1048576; model trained
@@ -91,7 +98,8 @@ coordinator waits task-completion forever; single-slot lane => total stall at
 DSpark gguf reads OK, kernel log clean). SIGKILL -> UNREAPABLE zombie (?Es,
 thread wedged in-kernel); fresh-fd dd of main gguf still hangs AFTER the kill
 => vnode/driver-level wedge, userspace-unrecoverable. RECOVERY = system reboot,
-then relaunch with the four envs (BOOT TRAP) + re-arm monitor. Evidence:
+then relaunch (lane config is script default since finalization; pre-that era:
+four envs, BOOT TRAP) + re-arm monitor. Evidence:
 /tmp/ds41_stall.sample. First occurrence ever of this signature; upstream
 streaming pool has no pread timeout/watchdog (candidate hardening + issue).
 Monitor since gained a stall tripwire (--stall 180s: inflight>0 + log silence +
@@ -168,10 +176,8 @@ hit cd9e2bf3/5497 => that chain is the SHARED termbench task preamble (free
    with inflight==0. That is harness idle, NOT stall: STALL requires silence
    with inflight>0 (unchanged). Monitor quiet-exit raised to 2400s (doom3b)
    so sim gaps don't fake a round end.
-2. **V41_CTX script default decision** — DECIDED 09:3x (operator): **env
-   override is the standing mechanism**; script default stays 262k on purpose.
-   The boot command (four envs, §4) is the single source of truth for lane
-   config — BOOT TRAP mitigated by discipline, not by changing the default.
+2. **V41_CTX default** — CLOSED by finalization: script defaults now ARE the
+   validated lane (§4); no env prefix needed at boot.
 3. **Upstream #1330/#1331 watch** — rework via `/tmp/pr-upstream-eventdrain` if
    antirez comments. Branch `fix/upstream-event-drain-reap` = `f8a454a`.
 4. Hook test for mask primitives (review finding 4): `sample_build_probabilities`
@@ -204,8 +210,8 @@ hit cd9e2bf3/5497 => that chain is the SHARED termbench task preamble (free
 ## 8. Cold-session primer
 
 `./ds4-server.sh status` should show the all-spec 512k lane (PID 1763 at
-06:19, or newer; check `--ctx 524288` + the four envs — see BOOT TRAP §4).
-Invariants:
+06:19, or newer). Post-finalization `./ds4-server.sh start-v41-dspark` alone
+boots the validated lane (§4). Invariants:
 decode 19-23 t/s flat at ANY session age is the fixed behavior — if decay
 returns, `DS4_METAL_CB_TIMES=1` list-growth check FIRST (everything else is
 exonerated on record). Cross-leg comparison: use decode `avg=` medians banded
