@@ -108,7 +108,10 @@ then relaunch (lane config is script default since finalization; pre-that era:
 four envs, BOOT TRAP) + re-arm monitor. Evidence was /tmp/ds41_stall.sample —
 cleared by the reboot's tmp sweep, so the description here is canonical. First
 occurrence ever of this signature; upstream
-streaming pool has no pread timeout/watchdog (candidate hardening + issue).
+streaming pool has no pread timeout/watchdog — FILED upstream as antirez #1335
+(2026-11-09; pool functions verified byte-identical to origin/main b3f5018; no
+duplicate found: closest #238 GPU-level killable wedge closed unmerged, #1125
+open PR covers pread-ERROR paths only).
 Monitor since gained a stall tripwire (--stall 180s: inflight>0 + log silence +
 cpu<1% => snapshot !! STALL line with leaf frame + desktop notification).
 **RECOVERED 06:15-06:19**: operator rebooted + reconnected blade (device node
@@ -182,8 +185,10 @@ hit cd9e2bf3/5497 => that chain is the SHARED termbench task preamble (free
    requests by ctx-chain continuity, not time (§8 primer).
 2. **V41_CTX default** — CLOSED by finalization: script defaults now ARE the
    validated lane (§4); no env prefix needed at boot.
-3. **Upstream #1330/#1331 watch** — rework via `/tmp/pr-upstream-eventdrain` if
+3. **Upstream watch #1330/#1331 + #1335** — rework via `/tmp/pr-upstream-eventdrain` if
    antirez comments. Branch `fix/upstream-event-drain-reap` = `f8a454a`.
+   #1335 (pread wedge): offered a deadline+error-path PR — file only if the
+   maintainer bites.
 4. Hook test for mask primitives (review finding 4): `sample_build_probabilities`
    masked-row == probs[X]=0 + dspark block run never emits X (both exact/noexact).
    Engine-stop window required (`make test` lock rule).
