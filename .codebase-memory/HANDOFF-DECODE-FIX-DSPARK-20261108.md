@@ -143,7 +143,15 @@ band — don't read bands as position-resolved for megaturns.
    drafter behavior. Megaturn class reproduced twice, same task, both ~96.5%+.
    A second opencode session (corewars) may rejoin the single-slot lane anytime
    — when analyzing, attribute requests by ctx-chain continuity, not time.
-2. **V41_CTX script default decision** (trap above) — operator's call.
+   NOTE (operator): the make-doom harness runs MIPS builds/simulation CLIENT-
+   SIDE — engine legitimately goes quiet (no log lines) for long stretches
+   with inflight==0. That is harness idle, NOT stall: STALL requires silence
+   with inflight>0 (unchanged). Monitor quiet-exit raised to 2400s (doom3b)
+   so sim gaps don't fake a round end.
+2. **V41_CTX script default decision** — DECIDED 09:3x (operator): **env
+   override is the standing mechanism**; script default stays 262k on purpose.
+   The boot command (four envs, §4) is the single source of truth for lane
+   config — BOOT TRAP mitigated by discipline, not by changing the default.
 3. **Upstream #1330/#1331 watch** — rework via `/tmp/pr-upstream-eventdrain` if
    antirez comments. Branch `fix/upstream-event-drain-reap` = `f8a454a`.
 4. Hook test for mask primitives (review finding 4): `sample_build_probabilities`
