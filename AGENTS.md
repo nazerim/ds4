@@ -37,8 +37,8 @@ inference engine in C with Metal, CUDA, and ROCm backends. See `AGENT.md`
   by default (`./ds4-server.sh start`; TRACE_PATH=./log/ds4.trace cache-forensics setup in those ADRs)
 - DSpark: `PLAN-DSPARK-PERF.md`, `PLAN-DSPARK-TEMP-SPEC.md`
 - V4.1 decode degeneration — SOLVED 2026-11-08 (transient-reap leak; PR #1331;
-  `PLAN-DECODE-DEGRADE-20261108.md` + `decode-ab-harness/`); lane since: 512k
-  all-spec dspark approved overnight — `HANDOFF-DECODE-FIX-DSPARK-20261108.md`.
+  `PLAN-DECODE-DEGRADE-20261108.md` + `HANDOFF-DECODE-FIX-DSPARK-20261108.md`);
+  lane FINALIZED 11-09: 512k all-spec dspark = script default, validated 319k.
 - Qwen3.8 PLE n-gram preload/cache: `PLAN-PLE-PRELOAD.md`
 - Qwen3.8 prefill/decode optimization: `PLAN-PREFILL-M5.md`, `PLAN-INT8-MOE.md` (closed),
   `PLAN-GATED-SCAN.md` (closed), `.codebase-memory/QSA-ATTRIBUTION-20261004.md`

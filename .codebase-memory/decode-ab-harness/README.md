@@ -25,3 +25,21 @@ Spec-era tools (DS4_DSPARK_STATS=1 required):
   wall or total tokens. Age-bucket medians are the leak tripwire (flat = fixed).
 - Midnight-span windows: log date prefix flips 1108->1109; window arithmetic
   must wrap (subtract start mod 86400) or half the run silently drops.
+
+Run segmentation & attribution (multi-soak era, 2026-11-09; full rules in
+HANDOFF-DECODE-FIX-DSPARK-20261108.md §8):
+- Attribute by CONTEXT-CHAIN continuity (`kv cache hit ... file=<sha>` /
+  ctx-ladder position), never by wall-clock: harnesses fork, sessions rejoin
+  the single-slot lane, and a `kv cache hit` on chain cd9e2bf3 (5,497 tok) is
+  the SHARED termbench task preamble every task opens on — chain reuse is NOT
+  a session resume.
+- Silence with inflight==0 (last event `finish=`) = client-side harness idle
+  (e.g. make-doom runs MIPS builds/sim locally) — expected data, not a stall.
+  STALL = silence WITH inflight>0 + cpu<1% (`ds41_watch_leg.py --stall 180`);
+  QUIET-exit needs 2400s to absorb sim and inter-run gaps.
+- Band attribution: `dspark req:` accept attaches at request-END ctx position,
+  so 64k megaturns (machine-text dumps: ~96.5% accept, ~40 t/s) skew the band
+  they END in, not the ones they grow through; within-turn `avg=` series is the
+  position-true depth evidence. Two consecutive 64k finish=length messages kill
+  the harbor/termbench harness while the engine stays clean — engine verdict
+  and harness verdict are separate calls.
