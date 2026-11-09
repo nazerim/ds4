@@ -121,15 +121,25 @@ RSS 81.6G flat. Monitor learned: false-QUIET on >20-min single turns (fixed
 request-END ctx pos on the dspark line, so the 96.78% lands in the 110-150k
 band — don't read bands as position-resolved for megaturns.
 
+### DOOM ROUND 3 2026-11-09 07:55:12-10:30:28 (155.3 min; CLEAN end, finish=stop at 319k)
+
+169 reqs / 165,842 tok / 0 errors / wall 17.8 t/s / cycles 42,144 /
+weighted accept **73.9%** / 3.94 tok-verify / NO megaturns (med 382, max
+14,058) = best bench-quality dataset on the lane. Depth bands: dec
+17.8/21.0/24.3/23.2/**23.5** & accept 66.6/72.7/77.1/72.6/**74.3**% —
+>262k band (n=982) EQUALS mid-band: decode does not decay, accept does not
+collapse. Peak 319,646 (61% of ceiling). Age-flat 30m: 19.6->29.8 no decay.
+RSS ~85.5G peak then back to 80.5. MIPS-sim client-side gaps = harness idle,
+not stall (see §6 note). Watcher: /tmp/ds41_leg_doom3b.snap FINAL.
+
 ## 6. Open threads (priority order)
 
-1. **Depth stress 200k-512k** — doom2 pushed the needle hard (190.6k peak,
-   everything green: depth-flat decode, accepts, anchors, prefill) but the
-   200k+ band still needs a session that lives there long-term; the doom
-   session resumes at ~190k so it happens naturally if kept running.
-   STATUS 09:07: **doom3** (anchor 07:55:12, operator-confirmed, cd9e2bf3 KV
-   resume) is climbing with full history ~2k tok/min, 187.6k and about to cross
-   the 190,673 peak into true unexplored depth. Watcher /tmp/ds41_leg_doom3.snap.
+1. **Depth stress 320k-512k** — round 3 (07:55:12->10:30:28, 169 reqs / 165,842
+   tok / 155 min / 0 errors, clean finish=stop end at 319,646 peak) validated
+   EVERYTHING to 320k: >262k band dec 23.5 & accept 74.3% (n=982, normal
+   turns), age-flat, stalls=0. Remaining: last 39% of ceiling + footprint
+   (~93G est @512k-full vs ~95-100 jetsam zone) unproven at full depth.
+   [was: 200k-512k; 200k-320k CLOSED by doom3 2026-11-09]
    SEGMENTATION (corrected per operator): the 07:25:19-07:55:10 session was NOT
    a corewars resume — it was **doom round 2's harness-side FORK** after
    megaturn A hit the 64k cap: new chain file (58a9db63, 5,713 disk anchor),
