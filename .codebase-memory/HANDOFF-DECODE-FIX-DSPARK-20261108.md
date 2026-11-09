@@ -101,10 +101,13 @@ disk4->disk5, mount point stable); engine 1763 booted with all four envs,
 external-KV live-store proven, smoke request speculated 68.75% immediately.
 Monitor re-armed: /tmp/ds41_leg_doom2.snap (anchor 06:19:55, cap 5h).
 
-### DOOM2 RUN 2026-11-09 06:25:50-07:25:14 (59.4 min, anchor = operator's KV-hit resume line)
+### DOOM ROUND 2 2026-11-09 06:25:50-07:55:10 (89.3 min, anchor = operator's KV-hit resume line; harness-error end)
 
-32 reqs / 96,295 tok / **0 errors 0 stalls 0 reboots** / wall-overall 27.0 t/s
-(prefill-inclusive). Weighted accept 85.1% = 31 normal tool-loop turns at 65.0%
+Mainline to 07:25:14: 32 reqs / 96,295 tok / 0 errors / wall 27.0 t/s
+(prefill-inclusive). Then the fork leg (§6 note): +1 req / +65,536 tok.
+**Round-2 true totals: 33 reqs / 161,831 tok / 0 engine errors; ended by
+harbor/termbench harness error** after two consecutive 64k finish=length
+megaturns. Weighted accept 85.1% (mainline) = 31 normal tool-loop turns at 65.0%
 (3.18 tok/verify, same profile as corewars) + ONE megaturn that rewrote the
 records: gen=65,536 (=client 64k cap, finish=length), 1,607 s, depth 125k->
 **190,638** (new lane peak), **96.78% accept / rejects=0 / 4.654 acc-cyc /
@@ -127,12 +130,17 @@ band — don't read bands as position-resolved for megaturns.
    STATUS 09:07: **doom3** (anchor 07:55:12, operator-confirmed, cd9e2bf3 KV
    resume) is climbing with full history ~2k tok/min, 187.6k and about to cross
    the 190,673 peak into true unexplored depth. Watcher /tmp/ds41_leg_doom3.snap.
-   Segmentation note: between doom2 (ended 07:25:14) and doom3, the Nov-8
-   COREWARS session was RESUMED (07:25:19): 119,424-tok re-prefill in ~2.9 min
-   (divergence anchor 124,535 -> stored 125,137), then its OWN megaturn:
-   gen=65,536 finish=length 1,791 s, **96.50% accept / 4.654 acc-cyc / ~40 t/s**
-   to depth 190,673 — independent reproduction of the doom megaturn's 96.78%:
-   machine-text-at-depth speculates at ~96.5% on ANY session, twice on record.
+   SEGMENTATION (corrected per operator): the 07:25:19-07:55:10 session was NOT
+   a corewars resume — it was **doom round 2's harness-side FORK** after
+   megaturn A hit the 64k cap: new chain file (58a9db63, 5,713 disk anchor),
+   119,424-tok re-append to common=124,535, then its OWN 65,536-tok megaturn B
+   (96.50% accept, ~40 t/s, depth 190,673, finish=length 07:55:10) — at which
+   point harbor/termbench ERRORED OUT (two consecutive 64k finish=length
+   messages; engine-side: zero errors, behaved to spec). Round-2 true totals:
+   33 reqs / 161,831 tok / 89.3 min, harness-error end. The two megaturns'
+   IDENTICAL stats (cycles=11,591, accepted=53,945 both) are explained: same
+   conversation forked -> regenerated ~identical doom-code continuation -> same
+   drafter behavior. Megaturn class reproduced twice, same task, both ~96.5%+.
    A second opencode session (corewars) may rejoin the single-slot lane anytime
    — when analyzing, attribute requests by ctx-chain continuity, not time.
 2. **V41_CTX script default decision** (trap above) — operator's call.
