@@ -124,6 +124,17 @@ band — don't read bands as position-resolved for megaturns.
    everything green: depth-flat decode, accepts, anchors, prefill) but the
    200k+ band still needs a session that lives there long-term; the doom
    session resumes at ~190k so it happens naturally if kept running.
+   STATUS 09:07: **doom3** (anchor 07:55:12, operator-confirmed, cd9e2bf3 KV
+   resume) is climbing with full history ~2k tok/min, 187.6k and about to cross
+   the 190,673 peak into true unexplored depth. Watcher /tmp/ds41_leg_doom3.snap.
+   Segmentation note: between doom2 (ended 07:25:14) and doom3, the Nov-8
+   COREWARS session was RESUMED (07:25:19): 119,424-tok re-prefill in ~2.9 min
+   (divergence anchor 124,535 -> stored 125,137), then its OWN megaturn:
+   gen=65,536 finish=length 1,791 s, **96.50% accept / 4.654 acc-cyc / ~40 t/s**
+   to depth 190,673 — independent reproduction of the doom megaturn's 96.78%:
+   machine-text-at-depth speculates at ~96.5% on ANY session, twice on record.
+   A second opencode session (corewars) may rejoin the single-slot lane anytime
+   — when analyzing, attribute requests by ctx-chain continuity, not time.
 2. **V41_CTX script default decision** (trap above) — operator's call.
 3. **Upstream #1330/#1331 watch** — rework via `/tmp/pr-upstream-eventdrain` if
    antirez comments. Branch `fix/upstream-event-drain-reap` = `f8a454a`.
