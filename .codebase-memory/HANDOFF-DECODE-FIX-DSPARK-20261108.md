@@ -53,10 +53,10 @@ flat-in-age on corewars 2¼ h; flat-in-DEPTH too — doom R3 held 23.5 t/s and
    - short-burst shape-2 was a wash (−3.1% med, small n; cold-draft opener cost).
 4. **512k ctx raised + corewars overnight** (§4/§5): the lane's standing config now.
 
-## 4. Live system state (verified Nov 9 post-reboot 06:19; defaults finalized ~14:45)
+## 4. Live system state (verified Nov 10 10:20; defaults finalized Nov 9 ~14:45)
 
-- Engine **PID 1763** (rebooted 06:15 after the §5 pread incident; prior boot 4624 was the
-  zombie): `--ctx 524288 --dspark --mtp-model gguf/DeepSeek-V4.1-Flash-DSpark.gguf
+- Engine **PID 26079** (relaunch 1110 10:16:33 — first plain-default boot, §5
+  circuit; formerly 1763 post-reboot): `--ctx 524288 --dspark --mtp-model gguf/DeepSeek-V4.1-Flash-DSpark.gguf
   --dspark-confidence 0.45`, env `DSPARK_EXACT=0 DS4_DSPARK_STATS=1
   DS4_DSPARK_TOOLLESS_NOEXACT=1 DS4_DSPARK_SCHEDULER_WINDOW=12`
 - **CONFIG FINALIZED 2026-11-09 (operator):** these four values are now the
@@ -78,7 +78,7 @@ flat-in-age on corewars 2¼ h; flat-in-DEPTH too — doom R3 held 23.5 t/s and
   Post-reboot: drive was physically reconnected by operator; boot line binds the
   path AND a live store (15.09 MiB, 30.8 ms) landed on the external volume —
   external-KV proven, no internal fallback (only ds4_kvstore.{c,h,o} matched).
-- auth_proxy **PID 1897** :8100 via `start-proxy` (pid-file auth_proxy.pid).
+- auth_proxy **PID 26097** :8100 via `start-proxy` (pid-file auth_proxy.pid).
 - Provider topology (opencode.json): `"ds41"` = ds4.c on THIS MBP :8003 — the
   lane all changes touch (context set to 524288); "DeepSeek V4.1 Flash (strata)"
   on nazryzen = different machine, still 262144, NEVER adjust for local state.
@@ -173,6 +173,19 @@ hit cd9e2bf3/5497 => that chain is the SHARED termbench task preamble (free
 5,497-tok disk-KV head start for every task), NOT doom-specific — earlier
 "merge = doom phase" inference downgraded.
 
+### TERMBENCH CIRCUIT 2026-11-10 10:23:21-11:20:05 (temp=0.3 test; single chain, clean stop end)
+
+26 reqs / 80,199 tok / **0 errors** / wall 23.4 t/s / depth 91,686 / accept
+72.4% / 3.60 tok-verify. TEMP-0.3 VERDICT: normal-turn (<=5k gen) weighted
+accept **68.6%** = the standing 65-70% agent-traffic band => noexact accept is
+TEMPERATURE-INSENSITIVE 0.3 vs 1.0-era (greedy-suffix drafts vs target argmax).
+Band rise 64.2->73.4->85.0% CONFOUNDED by three ~16.5k turns, one 91.8%
+machine-text ending in 64-96k band (§8 invariant (c) again). Decode
+23.1/24.7/28.9 flat-up, age-flat, RSS 80.9G swap 0. First boot on finalized
+defaults (PID 26079, plain `start-v41-dspark` — boot trap dead in practice).
+NO disk-KV hit: new tasks = new chains; cd9e2bf3 preamble belongs to the old
+task set only (invariant (b) scope note).
+
 ## 6. Open threads (priority order)
 
 1. **Depth stress 320k-512k** — round 3 (07:55:12->10:30:28, 169 reqs / 165,842
@@ -220,8 +233,8 @@ hit cd9e2bf3/5497 => that chain is the SHARED termbench task preamble (free
 
 ## 8. Cold-session primer
 
-`./ds4-server.sh status` should show the all-spec 512k lane (PID 1763 at
-06:19, or newer). Post-finalization `./ds4-server.sh start-v41-dspark` alone
+`./ds4-server.sh status` should show the all-spec 512k lane (PID 26079 at
+1110 10:16, or newer). Post-finalization `./ds4-server.sh start-v41-dspark` alone
 boots the validated lane (§4). Invariants:
 decode 19-23 t/s flat at ANY session age is the fixed behavior — if decay
 returns, `DS4_METAL_CB_TIMES=1` list-growth check FIRST (everything else is
@@ -237,7 +250,9 @@ builds/sim locally); STALL = silence WITH inflight>0 + cpu<1% (watch `--stall
 180`); quiet-exit 2400s absorbs sim gaps and inter-run gaps. (b) A `kv cache
 hit` on chain cd9e2bf3 (5,497 tok) is the SHARED termbench task preamble —
 every task gets that disk-KV head start, so chain reuse is NOT a session
-resume; segment runs by ctx-chain continuity. (c) MEGATURN class: machine-text
+resume; segment runs by ctx-chain continuity. (Scope note 1110: a genuinely
+NEW termbench task does NOT hit it — circuit ran fully cold, so cd9e2bf3 is
+the doom/merge/video family preamble, not universal.) (c) MEGATURN class: machine-text
 turns (dumps) run ~96.5% accept / ~40 t/s and skew band-accept (it attaches at
 request-END pos — within-turn avg= is the position-true evidence); two
 consecutive 64k finish=length messages kill the harbor/termbench harness while
