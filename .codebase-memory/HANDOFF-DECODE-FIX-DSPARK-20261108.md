@@ -371,7 +371,19 @@ post-warm: ~160 embed-cache hits / 0 re-encodes, 30-image history turns.
    session has no valid checkpoint to stage` + boundary `token-mismatch` forced
    full cold re-prefill (76,204 tok / 125.7 s). Frontier-store gap; separate
    future ticket candidate (post #1335/#1022, not F1/F2 scope).
-10. **NEXT ROUND: flip to EXACT sampling at depth** (operator plan, 1110 17:47;
+10. **EXACT ROUND LIVE 2026-11-10 20:15:23** (opened at operator kill of loop-#2
+    session @ ~260k; prior extract-r2 closed — all evidence banked, exclusions
+    as ruled). PID **40559**: boot banner `exact: 1`, `--mtp-exact-sampling` in
+    argv, KEEP=256 via script default, conf 0.45, blade 336 GiB free (NOTE:
+    extract-r2 consumed ~123 GiB of store space in 8 h — deep-ladder stores at
+    this pace warrant a disk-growth line in future marathon watches). Watch =
+    ex1 (quiet 3600, cap ~06:15). Harbor MUST be at temp 1.0 for the certified
+    A/B vs 1109@1.0 — pending operator confirmation. First-request sanity
+    gate: exact mid-band accept should sit 60-75%, NOT ride repetition (90%+
+    would mean the flip didn't take effect traffic-wise). Inherited test from
+    the noexact round: honest deep row at 288-320k+ under exact regime —
+    overlap-bound, expect flat 20-24 t/s.
+    ---- original plan (superseded by go-live) ----
     DEFERRED 18:10 to the NEXT termbench run — extract-r2 continues its natural
     close on noexact first). REVISED 18:1x: **EXACT + TEMP 1.0** — harbor set to
     1.0 (or unset => engine default is exactly 1.0f; unset is cleaner, matches
