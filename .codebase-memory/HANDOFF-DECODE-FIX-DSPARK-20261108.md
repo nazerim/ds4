@@ -303,7 +303,11 @@ post-warm: ~160 embed-cache hits / 0 re-encodes, 30-image history turns.
    compaction cycle, ladder/anchor fallback absorbs every variant (edit-above-
    anchor, contradiction cascade, full fold). Follow-in: RSS 80.6G post-fold —
    retire of the 462k live frontier (grace 3600s) should hand back ~a few GiB;
-   watch for the dip. (VISION RESUMED post-compact after all: images=18 attested
+   watch for the dip. ANSWER 23:27: NO DIP — RSS 80.4G two full hours past
+   grace expiry (engine idle at 379k session state; pages held by allocator,
+   not returned). Footprint read: lane holds ~80-81G at deep-session steady
+   state regardless of retire timing — comfortable vs jetsam, but budget the
+   resident plateau, not the token math, when sizing depth headroom. (VISION RESUMED post-compact after all: images=18 attested
    at 18:58 — the agent re-read frames into the compacted session.)
    RESET #3 19:01 — THE 100% MISS: harness edited the SAME compaction seam
    (common=118,763) twice in 3 min. First absorbed ladder-cheap (resume
@@ -403,6 +407,19 @@ post-warm: ~160 embed-cache hits / 0 re-encodes, 30-image history turns.
     for 0.3 (sharp target lifts exact overlap legitimately); loop-vs-honest
     must be judged by traffic SHAPE (repeated content), not accept level.
     Loop-break test UNANSWERED: client dropped at 21:24 (reconnect = harbor-side).
+    ANSWERED NEGATIVE 23:30 post-mortem (no harbor reconnect; round closed at
+    the 21:24 client drop, 69 min total): the EXACT leg ended in the most
+    textbook loop yet — FOUR consecutive completions of EXACTLY gen=17,123
+    tokens (20:52/21:02/21:12/21:21, ~10 min cadence, +20k ctx each to 356k).
+    Distribution-identical sampling did NOT break repetition => sampler-side
+    hypothesis FALSIFIED on its own falsification branch: looping is agent/
+    task/harness pathology; noexact exonerated as cause; FINALIZED LANE
+    DEFAULT (noexact) stands. Ten pre-loop turns were normal-agent (gen 214-
+    3099). Secondary reads: exact@0.3 accept 88.9-90.7% incl. normal turns =
+    sharp-target overlap high as corrected-prediction said; exact dec 30-31
+    at 260-356k depth, mechanics clean (0 errors, ladder resumes, no stalls
+    beyond the bookkeeping ghost). Loop onset ~288k mirrors noexact onset
+    ~256k — depth-linked, not sampler-linked.
     ---- FUTURE: the deferred EXACT@1.0 A/B (still to run) ----
     Launch recipe: `DSPARK_EXACT=1 ./ds4-server.sh restart-v41-dspark` (one-off
     env; script default stays 0), harbor 1.0 (or unset = engine default 1.0f —
