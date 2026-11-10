@@ -371,48 +371,40 @@ post-warm: ~160 embed-cache hits / 0 re-encodes, 30-image history turns.
    session has no valid checkpoint to stage` + boundary `token-mismatch` forced
    full cold re-prefill (76,204 tok / 125.7 s). Frontier-store gap; separate
    future ticket candidate (post #1335/#1022, not F1/F2 scope).
-10. **EXACT ROUND LIVE 2026-11-10 20:15:23** (opened at operator kill of loop-#2
-    session @ ~260k; prior extract-r2 closed — all evidence banked, exclusions
-    as ruled). PID **40559**: boot banner `exact: 1`, `--mtp-exact-sampling` in
-    argv, KEEP=256 via script default, conf 0.45, blade 336 GiB free (NOTE:
-    extract-r2 consumed ~123 GiB of store space in 8 h — deep-ladder stores at
-    this pace warrant a disk-growth line in future marathon watches). Watch =
-    ex1 (quiet 3600, cap ~06:15). Harbor MUST be at temp 1.0 for the certified
-    A/B vs 1109@1.0 — pending operator confirmation. First-request sanity
-    gate: exact mid-band accept should sit 60-75%, NOT ride repetition (90%+
-    would mean the flip didn't take effect traffic-wise). Inherited test from
-    the noexact round: honest deep row at 288-320k+ under exact regime —
-    overlap-bound, expect flat 20-24 t/s.
-    ---- original plan (superseded by go-live) ----
-    DEFERRED 18:10 to the NEXT termbench run — extract-r2 continues its natural
-    close on noexact first). REVISED 18:1x: **EXACT + TEMP 1.0** — harbor set to
-    1.0 (or unset => engine default is exactly 1.0f; unset is cleaner, matches
-    whatever 1109 ran). Launch at that round's start: `DSPARK_EXACT=1 ./ds4-server.sh restart-v41-dspark` (one-off env —
-    script default stays 0; plain restart reverts). TOOLLESS_NOEXACT is a
-    noexact-lane knob — exact lanes have tool-less spec natively (c759147);
-    keep STATS=1, SCHEDULER_WINDOW=12, KEEP now default 256, harbor temp 0.3.
-    Rationale to verify: ALL 512k-depth evidence so far is noexact; exact was
-    last measured pre-fix-era and at 262k. EXACT semantics verified in code:
-    tool-less spec ENABLED NATIVELY on exact (gate 16552: exact || knob; the
-    TOOLLESS_NOEXACT export becomes a no-op), masked rejection/residual path =
-    distribution-identical to plain masked sampling (no greedy bias exists on
-    the lane), confidence stays explicit 0.45. Paired-baseline frame: the true
-    A/B is exact@1.0 vs noexact@1.0 — BASELINE CERTIFIED (operator 18:57):
-    ALL 1109 runs were temp 1.0 (harbor unset = engine default 1.0f), so the
-    whole 1109 dataset (R3 bands 66-77%, shorts 67-70%, corewars 67.2%,
-    doom2/3 full range) is the same-temp single-variable pair, flip = EXACT
-    only. At 1.0 the draft-vs-target overlap drops => expect the exact
-    penalty to be REAL this time: mid-band accept below noexact@1.0 by several
-    points, tok/verify lower, dump-class megaturn acceptance collapsing from
-    the 96.5% greedy-match ceiling to distribution-overlap bounds (~70-80%);
-    tonight's noexact@0.3 numbers are the secondary pair only. Record vs tonight (EXCLUDING the
-    17:27+ loop window): weighted accept + tok/verify by depth band, decode
-    medians, machine-text/megaturn accept under exact-sampled drafts (the
-    96.5% dump class should NOT appear — exact acceptance is distribution-
-    bound, not greedy-match), F1 encode economics (drafter-independent, must
-    be identical), compaction-rebuild rates (prefill path, also drafter-free),
-    stall/anchor behavior. Hypothesis: accept & tok/verify drop mid-band,
-    depth-flatness and all prefill/vision/rebuild numbers unchanged.
+10. **EXACT ROUND LIVE 2026-11-10 20:15:23 — exact@0.3, THERAPEUTIC flip**
+    (operator: harbor remains 0.3; restart-on-exact was to BREAK the looping
+    behavior, NOT the planned 1.0 A/B — that pairing is deferred to a future
+    round). Mechanism under test: noexact argmax-match acceptance sharpens the
+    effective output distribution beyond the client temperature; if loop
+    feedback was sampler-side, exact (distribution-identical masked-rejection)
+    should end it — evidence bar: TWO loop episodes at noexact@0.3 (16:20-18:05
+    gradual, 19:5x-20:15 explicit) vs zero under exact@0.3 for the same task.
+    If loops RECUR on exact, hypothesis falsified = pure agent/task pathology,
+    lane exonerated either way. PAIRING: tonight's noexact@0.3 honest dataset
+    (post-compact 78.4% mean, 0-256k bands 22-26.7) — NOT 1109@1.0. First-
+    traffic gate: expect accept 60-75% (sharp 0.3 target lifts overlap);
+    discriminator = NO 90%+ repetition-fueled plateaus. PID **40559**: boot
+    banner `exact: 1`, `--mtp-exact-sampling` verified, KEEP=256 default ride,
+    conf 0.45, watch = ex1 (quiet 3600, cap ~06:15). extract-r2 closed at
+    operator kill of loop#2 @~260k, all evidence banked. Blade note: r2
+    consumed ~123 GiB of ladder stores in 8 h — track disk growth in marathon
+    watches. Honest-deep-row test (288-320k+ with accept <85%) transfers to
+    this round: overlap-bound exact CANNOT ride repetition, so any deep row
+    earned here is automatically clean.
+    ---- FUTURE: the deferred EXACT@1.0 A/B (still to run) ----
+    Launch recipe: `DSPARK_EXACT=1 ./ds4-server.sh restart-v41-dspark` (one-off
+    env; script default stays 0), harbor 1.0 (or unset = engine default 1.0f —
+    cleaner, certifiably matches 1109). Semantics verified in code: tool-less
+    spec native on exact (gate 16552), masked-rejection path distribution-
+    identical, TOOLLESS_NOEXACT no-ops, conf stays explicit 0.45. BASELINE
+    CERTIFIED (operator 18:57): ALL 1109 runs were temp 1.0 (R3 bands 66-77%,
+    shorts 67-70%, corewars 67.2%, doom2/3 full range) => same-temp single-
+    variable pair, flip = EXACT only. At 1.0 draft-vs-target overlap drops =>
+    expect the real exact penalty: mid-band accept below noexact@1.0 by
+    several points, tok/verify lower, megaturn/dump class collapsing from the
+    96.5% greedy-match ceiling to overlap bounds (~70-80%); drafter-independent
+    controls (encode economics, prefill/rebuild/restore rates) MUST match the
+    noexact record — any drift = something besides the flip changed.
 
 ## 7. Files to remember
 
