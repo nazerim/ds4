@@ -196,6 +196,20 @@ Steady-state cost, not new-frame cost — refines the video verdict's "prefill
 load" mechanism. TODO (vision-cache workstream): check encoder cache keying/
 sizing vs harness re-posting full image history.
 
+### F1 DEPLOYED 2026-11-10 14:27-14:28 + LIVE PROOF (operator ran gap block step 1)
+
+Vision embed-cache 32/128MiB -> 128/2GiB built into PID **31549** (boot 14:28:01,
+plain `stop` -> `make ds4-server` -> `start-v41-dspark`). The "cut" of extract-r2
+cost NOTHING: stop landed on a turn boundary (last finish 14:25:13) and the
+shutdown persisted the frontier — client resumed **14:33:13 with `kv cache hit
+tokens=125465 load=171.5 ms`** (disk restore, ADR survival path proven in anger,
+no cold re-prefill). F1 acceptance: same-15-image R1/R2 probe = 187.3 s/15
+encodes vs 47.3 s/**0 encodes** + ~56 cache-hit lines. Attribution window:
+smokes = ctx=0..38 (14:29:17) + ctx=0..8708 x2 (14:30:52, 14:33:35) — exclude
+from run verdict. Real traffic now runs deep-vision turns on the FIXED binary =
+live before/after (expect encodes/turn -> ~new-images-only vs pre-restart 3.6).
+F1 source commit (step 3) still pending. Watch extract12 continues, cap ~23:40.
+
 ## 6. Open threads (priority order)
 
 1. **Depth stress 320k-512k** — round 3 (07:55:12->10:30:28, 169 reqs / 165,842
