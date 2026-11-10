@@ -330,7 +330,9 @@ post-warm: ~160 embed-cache hits / 0 re-encodes, 30-image history turns.
    future ticket candidate (post #1335/#1022, not F1/F2 scope).
 10. **NEXT ROUND: flip to EXACT sampling at depth** (operator plan, 1110 17:47;
     DEFERRED 18:10 to the NEXT termbench run — extract-r2 continues its natural
-    close on noexact first). Launch at that round's start: `DSPARK_EXACT=1 ./ds4-server.sh restart-v41-dspark` (one-off env —
+    close on noexact first). REVISED 18:1x: **EXACT + TEMP 1.0** — harbor set to
+    1.0 (or unset => engine default is exactly 1.0f; unset is cleaner, matches
+    whatever 1109 ran). Launch at that round's start: `DSPARK_EXACT=1 ./ds4-server.sh restart-v41-dspark` (one-off env —
     script default stays 0; plain restart reverts). TOOLLESS_NOEXACT is a
     noexact-lane knob — exact lanes have tool-less spec natively (c759147);
     keep STATS=1, SCHEDULER_WINDOW=12, KEEP now default 256, harbor temp 0.3.
@@ -339,10 +341,15 @@ post-warm: ~160 embed-cache hits / 0 re-encodes, 30-image history turns.
     tool-less spec ENABLED NATIVELY on exact (gate 16552: exact || knob; the
     TOOLLESS_NOEXACT export becomes a no-op), masked rejection/residual path =
     distribution-identical to plain masked sampling (no greedy bias exists on
-    the lane), confidence stays explicit 0.45. Prediction refined: at harbor
-    temp 0.3 the sharp target RAISES exact rejection-acceptance — expect the
-    exact-vs-noexact gap to be much smaller than collect-era high-temp
-    comparisons; the real exact cost shows near temp 1.0. Record vs tonight (EXCLUDING the
+    the lane), confidence stays explicit 0.45. Paired-baseline frame: the true
+    A/B is exact@1.0 vs noexact@1.0 — 1109's whole dataset (R3 bands 66-77%,
+    shorts 67-70%, corewars 67.2%) presumably ran harbor-unset = engine default
+    1.0f, making this round a same-temp single-variable flip if 1109 is ever
+    confirmed. At 1.0 the draft-vs-target overlap drops => expect the exact
+    penalty to be REAL this time: mid-band accept below noexact@1.0 by several
+    points, tok/verify lower, dump-class megaturn acceptance collapsing from
+    the 96.5% greedy-match ceiling to distribution-overlap bounds (~70-80%);
+    tonight's noexact@0.3 numbers are the secondary pair only. Record vs tonight (EXCLUDING the
     17:27+ loop window): weighted accept + tok/verify by depth band, decode
     medians, machine-text/megaturn accept under exact-sampled drafts (the
     96.5% dump class should NOT appear — exact acceptance is distribution-
