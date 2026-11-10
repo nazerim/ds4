@@ -25,6 +25,14 @@ Spec-era tools (DS4_DSPARK_STATS=1 required):
   wall or total tokens. Age-bucket medians are the leak tripwire (flat = fixed).
 - Midnight-span windows: log date prefix flips 1108->1109; window arithmetic
   must wrap (subtract start mod 86400) or half the run silently drops.
+- ROTATION BLIND SPOT (learned 2026-11-10, extract-r2): an engine restart
+  renames the log and creates a new file at the same path; a watcher holding
+  the old fd stops seeing traffic and QUIETs out exactly quiet-seconds after
+  the PREVIOUS file's last event (false end-of-run: quiet fired at 15:25 while
+  the session was live at 199k depth). Fix candidates: reopen by path when the
+  held inode != st_ino(path), or fire QUIET only when engine cpu% also idles.
+  Until fixed: after any boot inside a watch window, re-arm the watcher — run
+  verdicts come from log-file analysis regardless, which spans both files.
 
 Run segmentation & attribution (multi-soak era, 2026-11-09; full rules in
 HANDOFF-DECODE-FIX-DSPARK-20261108.md §8):

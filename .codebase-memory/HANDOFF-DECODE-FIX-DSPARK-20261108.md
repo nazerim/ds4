@@ -209,6 +209,10 @@ encodes vs 47.3 s/**0 encodes** + ~56 cache-hit lines. Attribution window:
 smokes = ctx=0..38 (14:29:17) + ctx=0..8708 x2 (14:30:52, 14:33:35) — exclude
 from run verdict. Real traffic now runs deep-vision turns on the FIXED binary =
 live before/after (expect encodes/turn -> ~new-images-only vs pre-restart 3.6).
+CONFIRMED: post-warm turns = 1 encode each (the new frame), kept-set hits ~92:1.
+STATUS 15:26: run alive at 199k depth (~74k/hour climb); extract12 watch fired a
+FALSE QUIET (log-rotation fd blind spot — README note, verdicts from log files);
+re-armed extract12b. ETAs: 320k ~17:15, 512k wall ~20:00 (or compaction first).
 F1 COMMITTED fork `e6b4c3c`. UPSTREAM: added as 3rd commit to PR **#1022**
 (`8da90ed`, comment-verified hunk: upstream-tied wording, (size_t) cast) with
 evidence comment posted — PR mergeable clean vs b3f5018. Watch state
