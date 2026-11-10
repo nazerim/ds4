@@ -267,9 +267,10 @@ post-warm: ~160 embed-cache hits / 0 re-encodes, 30-image history turns.
    trims ahead of it; ceiling behavior w/ compaction partner = graceful
    ladder-bounded descent, indefinitely. Second deep-vision disk restore
    proven (485.8 ms / 354,751 tok / 91 image spans).
-   LOOP CAVEAT (operator 17:5x): agent locked in a repetition loop since ~17:27
-   => post-17:27 accept (94.1%) and decode samples (~30-33 t/s) are drafter-fed
-   artifacts of near-identical regeneration — EXCLUDE from band tables and lane
+   LOOP CAVEAT (operator 17:5x, window widened by time-split analysis): dump/
+   loop-class content runs from ~16:20 (accept 88-94% at the 256-352k crossing,
+   gradual onset before the 17:27 declaration) to the 18:05 compaction fold =>
+   post-16:20 accept and decode samples ABOVE 256k are drafter-fed artifacts of near-identical regeneration — EXCLUDE from band tables and lane
    performance citations (same class as megaturn exclusion, invariant (c)).
    Immune & still valid: prefill rates (no speculation in prefill), restore
    timings, error tally, depth record, F1 encode economics.
@@ -286,6 +287,17 @@ post-warm: ~160 embed-cache hits / 0 re-encodes, 30-image history turns.
    vision=mismatch) -> fell to the TASK-PREAMBLE store (5,497 tok, 38.8 ms
    load — invariant (b) bedrock proven at scale) -> cold-append 22,430 tok in
    62.9 s -> first turn normal -> session climbing from 28k, now TEXT-ONLY
+   (Operator Q "tok/s accelerates past 100k?": apparent YES, real NO — time-
+   split proves every 31-32 t/s row (256k+) is dump/loop-class (accept
+   90.9-94.7% from ~16:20 onward, gradual loop onset before declaration) =>
+   INVALID as lane performance per operator ruling. VALID tonight rows only
+   0-256k: 23.0/22.0/25.0/24.6/25.6/25.3/26.8/26.7 with honest accept 72-84%,
+   matching post-compact re-measure (78.4% mean). Depth-no-decay claim thus
+   stands on R3's honest >262k rows + tonight's mechanics (compaction/rebuild
+   costs depthless); first genuinely honest deep row comes when post-compact
+   session re-crosses ~300k with accept <85%. EXACT@1.0 corollary stands:
+   overlap-bound acceptance can't ride repetition => expect flat ~20-24,
+   accept 60-75; rising dec-med on exact = real finding.)
    (compact dropped all images: 0 encodes/0 multimodal hits since). Total
    reset cost ~63 s, zero errors. Wall test FULLY RESOLVED: ceiling behavior =
    compaction cycle, ladder/anchor fallback absorbs every variant (edit-above-
