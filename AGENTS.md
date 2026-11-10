@@ -32,9 +32,9 @@ inference engine in C with Metal, CUDA, and ROCm backends. See `AGENT.md`
 - Checkpoint self-healing + session handoff: `.codebase-memory/adr.md`
   (ADR 2026-09-06) and `.codebase-memory/TODO-20260906.md` (PR states,
   pending #984 port, open questions, proven diagnostics).
-- Vision cache (thinking bridge, encoder cache, multimodal disk KV):
-  `.codebase-memory/adr.md` (Sep 3 ADRs); server script serves Vision-Exp
-  by default (`./ds4-server.sh start`; TRACE_PATH=./log/ds4.trace cache-forensics setup in those ADRs)
+- Vision cache (thinking bridge, multimodal disk KV; embed cache=KEEP budget
+  since F1 11-10: `.codebase-memory/adr.md` Sep-3 ADRs + amendment, HANDOFF-
+  DECODE-FIX §5; script serves Vision-Exp default, TRACE_PATH=./log/ds4.trace)
 - DSpark: `PLAN-DSPARK-PERF.md`, `PLAN-DSPARK-TEMP-SPEC.md`
 - V4.1 decode degeneration — SOLVED 2026-11-08 (transient-reap leak; PR #1331;
   `PLAN-DECODE-DEGRADE-20261108.md` + `HANDOFF-DECODE-FIX-DSPARK-20261108.md`);

@@ -32,6 +32,7 @@ flat-in-age on corewars 2¼ h; flat-in-DEPTH too — doom R3 held 23.5 t/s and
 | `c759147` + `cbef637` | **tool-less chat speculation**: DSML suppression threaded through `ds41_session_speculate` (mask/restore at the 4 sampling sites, `ds4_session_eval_speculative_ex`); review caught silent argmax-bias extension → gated tool-less spec to exact-sampling lanes |
 | `ecccb55` | **`DS4_DSPARK_TOOLLESS_NOEXACT`** env knob (default off): opt-in tool-less spec on noexact lanes |
 | `89e60af` | **lane finalization** (operator): the four boot envs + `V41_CTX=524288` + `V41_KV_SIZE=262144` became SCRIPT DEFAULTS, and all three lane KV budgets (ds4/qwen/ds41) aligned at 256 GiB — plain `start-v41-dspark` boots the validated lane (§4) |
+| `e6b4c3c` + upstream **PR #1022 `8da90ed`** | **F1 vision embed-cache sizing** `SERVER_IMAGE_CACHE` 32/128MiB → 128/2GiB matched to KEEP=128 (extract-r2 thrash: 3.6 encodes/turn, encoder duty ~2/3 of span at 30 images, KV reuse 99.4% throughout). Live-proven: repeat-15-image 15-encode/187.3 s → 0-encode/47.3 s; post-warm 159 hits / 0 re-encodes. Independent review caught the upstream-comment adaptation (no fork-script refs) + `size_t` cast (§5 F1 block) |
 
 ## 3. The dspark saga, final chronology (each step instrumented, not inferred)
 
@@ -240,6 +241,18 @@ post-warm: ~160 embed-cache hits / 0 re-encodes, 30-image history turns.
 6. Chunk-rate telemetry artifact (shared progress state across prefill boundary)
    — filed in #1330 comment; one-field fix, unfixed.
 7. HF token rotation (Nov 6 `--token` exposure) — operator-side.
+8. **F2 vision skip-encode (KV-attested spans)** — principled follow-up to F1
+   (named in the #1022 code comment + adr.md amendment): image whose span is
+   fingerprint-attested + fully below live frontier -> placeholder from
+   recorded token_count, NO encode call. Reuse the ADR's verification helpers/
+   tests; needs 40-image growing-history soak (assert encoded-lines ≈ new/turn,
+   cached covers image spans). Removes the F1 residual (O(n) memcmp + per-hit
+   11.6 MB copy) and the post-restart re-warm cost. MAINAGENT-FIXBRIEF has the
+   full design (§Q1/Q2 + order-of-ops).
+9. **Vision staging checkpoint gap** — 1110 13:06: `KV payload staging failed:
+   session has no valid checkpoint to stage` + boundary `token-mismatch` forced
+   full cold re-prefill (76,204 tok / 125.7 s). Frontier-store gap; separate
+   future ticket candidate (post #1335/#1022, not F1/F2 scope).
 
 ## 7. Files to remember
 
@@ -250,6 +263,11 @@ post-warm: ~160 embed-cache hits / 0 re-encodes, 30-image history turns.
   analyzer `ds41_ab3.py`, **spec collector `ds41_collect_spec.py`** (per-request
   deltas + leg wall + depth-band medians + `--since HH:MM:SS` window),
   **leg monitor `ds41_watch_leg.py`** (long-run liveness/spec/band snapshots).
+- Harvest/analysis (outside repo): `~/Projects/termbench/harvest/extract-r2/` —
+  mid-run container-workdir snapshot (179 MB, read-only), frame-read-manifest
+  (57 image-visibility entries), HANDOVER.md, REPORT-EXTRACT-R2.md +
+  MAINAGENT-FIXBRIEF.md (F1/F2 design + rejected knobs) + parse_extract_r2.py /
+  reqs_extract_r2.json — the full F1 evidence chain (investigation-agent product).
 - Code seams: `ds4_metal.m` transient fix + stats neighbors; `ds4.c`
   `ds41_session_speculate` (~90270, exclude param + mask sites),
   `ds4_session_dspark_stats_*` (~77360), `ds4_session_eval_speculative_ex`

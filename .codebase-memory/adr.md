@@ -163,6 +163,16 @@ restored without persisting embeddings if the request can attest them.
   encode work; matches trailer capacity and the embed-cache slot count).
   Sessions beyond it serve but skip disk caching; compaction and the 384k
   context window are the practical bounds.
+- AMENDMENT 2026-11-10: the "matches the embed-cache slot count" claim was
+  FALSE as written — cache was 32 entries/128 MiB ≈ 11 images, so KEEP>=13
+  re-encoded the full image history every turn (termbench extract-r2: encoder
+  duty ~2/3 of request span at 30 images; text-KV reuse unaffected, 99.4%).
+  F1 raised it to 128 entries / 2 GiB (fork `e6b4c3c`, upstream as PR #1022
+  commit `8da90ed`), making the claim true. Note the cache is RAM-only: a
+  restarted process re-warms once from its first turn per image (disk KV
+  restore does NOT carry embeddings — 125k-token resume loaded text KV in
+  171 ms but paid ~14 encodes). F2 (skip-encode for KV-attested spans) is
+  the principled follow-up, named in the code comment.
 - Deliberately NOT done: shutdown persist of vision sessions (slot ctx
   dies with the request), multimodal partial anchors, and general
   mid-stream live rewind - the Metal DS4 compressor frontier cannot be
