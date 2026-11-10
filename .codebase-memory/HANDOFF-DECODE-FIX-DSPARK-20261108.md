@@ -266,6 +266,12 @@ post-warm: ~160 embed-cache hits / 0 re-encodes, 30-image history turns.
    trims ahead of it; ceiling behavior w/ compaction partner = graceful
    ladder-bounded descent, indefinitely. Second deep-vision disk restore
    proven (485.8 ms / 354,751 tok / 91 image spans).
+   LOOP CAVEAT (operator 17:5x): agent locked in a repetition loop since ~17:27
+   => post-17:27 accept (94.1%) and decode samples (~30-33 t/s) are drafter-fed
+   artifacts of near-identical regeneration — EXCLUDE from band tables and lane
+   performance citations (same class as megaturn exclusion, invariant (c)).
+   Immune & still valid: prefill rates (no speculation in prefill), restore
+   timings, error tally, depth record, F1 encode economics.
    Prior R3 evidence to 320k: no decay (23.5 @ >262k band); tonight's deep
    turns run 31-32 t/s — the lane so far STRENGTHENS with depth (88.1% accept).
    Remaining: last 39% of ceiling + footprint
