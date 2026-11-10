@@ -273,6 +273,14 @@ post-warm: ~160 embed-cache hits / 0 re-encodes, 30-image history turns.
    performance citations (same class as megaturn exclusion, invariant (c)).
    Immune & still valid: prefill rates (no speculation in prefill), restore
    timings, error tally, depth record, F1 encode economics.
+   REBUILD #2 18:00: same cascade, 106,358-tok cold re-append from the 354,751
+   anchor (442,119 store reloaded 642.9 ms -> contradicted -> discarded; anchor
+   495.7 ms). KEY: ZERO encodes across the whole rebuild (91 images served from
+   warm embed cache) — F1 absorbs what would pre-fix be +4.6 min/cycle. 354,751
+   = shutdown-frontier store from the 16:56 forced restart = bedrock anchor all
+   client edits stay above. Thrash trend: divergence pinned ~442k, ceiling
+   creeping => rebuilds grow (70.8k -> 106.4k), 3-6 lane-min/cycle; run
+   self-healing but loop-vs-compaction is the de facto end condition.
    Prior R3 evidence to 320k: no decay (23.5 @ >262k band); tonight's deep
    turns run 31-32 t/s — the lane so far STRENGTHENS with depth (88.1% accept).
    Remaining: last 39% of ceiling + footprint
