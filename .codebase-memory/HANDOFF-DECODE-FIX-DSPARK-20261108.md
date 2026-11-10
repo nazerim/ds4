@@ -208,7 +208,10 @@ encodes vs 47.3 s/**0 encodes** + ~56 cache-hit lines. Attribution window:
 smokes = ctx=0..38 (14:29:17) + ctx=0..8708 x2 (14:30:52, 14:33:35) — exclude
 from run verdict. Real traffic now runs deep-vision turns on the FIXED binary =
 live before/after (expect encodes/turn -> ~new-images-only vs pre-restart 3.6).
-F1 source commit (step 3) still pending. Watch extract12 continues, cap ~23:40.
+F1 COMMITTED fork `e6b4c3c`. UPSTREAM: added as 3rd commit to PR **#1022**
+(`8da90ed`, comment-verified hunk: upstream-tied wording, (size_t) cast) with
+evidence comment posted — PR mergeable clean vs b3f5018. Watch state
+post-warm: ~160 embed-cache hits / 0 re-encodes, 30-image history turns.
 
 ## 6. Open threads (priority order)
 
@@ -222,10 +225,11 @@ F1 source commit (step 3) still pending. Watch extract12 continues, cap ~23:40.
    requests by ctx-chain continuity, not time (§8 primer).
 2. **V41_CTX default** — CLOSED by finalization: script defaults now ARE the
    validated lane (§4); no env prefix needed at boot.
-3. **Upstream watch #1330/#1331 + #1335** — rework via `/tmp/pr-upstream-eventdrain` if
+3. **Upstream watch #1330/#1331 + #1335 + #1022** — rework via `/tmp/pr-upstream-eventdrain` if
    antirez comments. Branch `fix/upstream-event-drain-reap` = `f8a454a`.
    #1335 (pread wedge): offered a deadline+error-path PR — file only if the
-   maintainer bites.
+   maintainer bites. #1022 (KEEP knob): F1 embed-cache sizing landed on it as
+   `8da90ed` 2026-11-10 (+evidence comment) — watch for review on the caps.
 4. Hook test for mask primitives (review finding 4): `sample_build_probabilities`
    masked-row == probs[X]=0 + dspark block run never emits X (both exact/noexact).
    Engine-stop window required (`make test` lock rule).
