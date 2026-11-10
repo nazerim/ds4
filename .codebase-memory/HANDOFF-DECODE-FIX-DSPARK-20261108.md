@@ -281,6 +281,17 @@ post-warm: ~160 embed-cache hits / 0 re-encodes, 30-image history turns.
    client edits stay above. Thrash trend: divergence pinned ~442k, ceiling
    creeping => rebuilds grow (70.8k -> 106.4k), 3-6 lane-min/cycle; run
    self-healing but loop-vs-compaction is the de facto end condition.
+   COMPACTION FIRED 18:05:16 — outcome (a) complete: opencode folded
+   462,799 -> 27,927 in one shot; engine cascade live-miss(common=5,498,
+   vision=mismatch) -> fell to the TASK-PREAMBLE store (5,497 tok, 38.8 ms
+   load — invariant (b) bedrock proven at scale) -> cold-append 22,430 tok in
+   62.9 s -> first turn normal -> session climbing from 28k, now TEXT-ONLY
+   (compact dropped all images: 0 encodes/0 multimodal hits since). Total
+   reset cost ~63 s, zero errors. Wall test FULLY RESOLVED: ceiling behavior =
+   compaction cycle, ladder/anchor fallback absorbs every variant (edit-above-
+   anchor, contradiction cascade, full fold). Follow-in: RSS 80.6G post-fold —
+   retire of the 462k live frontier (grace 3600s) should hand back ~a few GiB;
+   watch for the dip.
    Prior R3 evidence to 320k: no decay (23.5 @ >262k band); tonight's deep
    turns run 31-32 t/s — the lane so far STRENGTHENS with depth (88.1% accept).
    Remaining: last 39% of ceiling + footprint
