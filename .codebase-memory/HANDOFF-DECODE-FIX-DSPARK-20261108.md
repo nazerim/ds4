@@ -185,6 +185,16 @@ machine-text ending in 64-96k band (§8 invariant (c) again). Decode
 defaults (PID 26079, plain `start-v41-dspark` — boot trap dead in practice).
 NO disk-KV hit: new tasks = new chains; cd9e2bf3 preamble belongs to the old
 task set only (invariant (b) scope note).
+### EXTRACT LONG-RUN 2026-11-10 ~12:17-> in flight (12h watch extract12, temp 0.3)
+
+NOTE (operator, verified in log): extract-class sessions RE-ENCODE images every
+turn — 401 `vision embedding encoded` lines / 110 reqs (~3.6/turn) while
+`multimodal live kv hit images=30 cached=104269 prompt=104862` shows 99.4% KV
+token reuse. `cache=` bytes oscillate ~127.5 MB => fixed-size vision embedding
+cache + eviction churn: each turn re-encodes frames the previous turn evicted.
+Steady-state cost, not new-frame cost — refines the video verdict's "prefill
+load" mechanism. TODO (vision-cache workstream): check encoder cache keying/
+sizing vs harness re-posting full image history.
 
 ## 6. Open threads (priority order)
 
