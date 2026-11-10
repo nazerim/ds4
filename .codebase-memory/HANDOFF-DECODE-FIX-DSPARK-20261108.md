@@ -291,7 +291,25 @@ post-warm: ~160 embed-cache hits / 0 re-encodes, 30-image history turns.
    compaction cycle, ladder/anchor fallback absorbs every variant (edit-above-
    anchor, contradiction cascade, full fold). Follow-in: RSS 80.6G post-fold —
    retire of the 462k live frontier (grace 3600s) should hand back ~a few GiB;
-   watch for the dip.
+   watch for the dip. (VISION RESUMED post-compact after all: images=18 attested
+   at 18:58 — the agent re-read frames into the compacted session.)
+   RESET #3 19:01 — THE 100% MISS: harness edited the SAME compaction seam
+   (common=118,763) twice in 3 min. First absorbed ladder-cheap (resume
+   119,566, +3.3k re-append, 19.7 s). Second: live had moved past the seam
+   (126,564), 119,566 store also contradicted, and NO valid store remained
+   below the seam (contrast-cleanup had eaten the chain's lower rungs) =>
+   cold rebuild from 0: 128,334 tok, ~3 min at ~516 t/s, zero errors, back
+   at speed 19:04+. SEMANTICS LEARNED: repeat edits at one seam escalate
+   ladder -> full-rebuild; the ladder can be consumed from below by
+   contradiction cascades.
+   SECONDARY FINDING (thread 9 REVIVED, no longer historical): during the cold
+   continuation disk checkpointing FAILED EVERY rung: `kv cache skipped
+   tokens=65536/98304 reason=continued because KV payload staging failed:
+   session has no valid checkpoint to stage` — a cold-rebuilt session cannot
+   re-populate its ladder mid-stream; the window has ZERO restart resilience
+   until a turn-end store lands. TEST IN FLIGHT: does `kv cache stored
+   reason=turn` succeed after the current turn (~19:06)? yes = gap is
+   mid-stream-only; persistent skips = structural, ticket-worthy (thread 9).
    HONEST-REGIME CONFIRMED 18:57 (operator + live check): post-compact 35 reqs,
    per-request mean accept 78.4% (no sub-50% outliers), dec 15m median fell to
    24.5 from the loop-inflated ~31 — loop window (17:27-18:05) closed, all
