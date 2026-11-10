@@ -295,10 +295,11 @@ post-warm: ~160 embed-cache hits / 0 re-encodes, 30-image history turns.
    HONEST-REGIME CONFIRMED 18:57 (operator + live check): post-compact 35 reqs,
    per-request mean accept 78.4% (no sub-50% outliers), dec 15m median fell to
    24.5 from the loop-inflated ~31 — loop window (17:27-18:05) closed, all
-   post-18:06 traffic is usable noexact evidence at whatever harbor sits at
-   (0.3 unless operator already moved it for next round — temperature is
-   client-side, invisible in engine log; band-pair vs tonight's pre-loop 0.3
-   leg settles it: ~78 mean suggests 0.3 still).
+   post-18:06 traffic is usable noexact@0.3 evidence (operator confirmed: the
+   run continued at 0.3 through compaction — same session, same temp). The
+   78.4% mean is the clean noexact@0.3 text-phase number, directly comparable
+   to tonight's pre-loop 0.3 legs; the 1109 noexact@1.0 dataset remains the
+   pair for NEXT round's exact@1.0 flip.
    Prior R3 evidence to 320k: no decay (23.5 @ >262k band); tonight's deep
    turns run 31-32 t/s — the lane so far STRENGTHENS with depth (88.1% accept).
    Remaining: last 39% of ceiling + footprint
