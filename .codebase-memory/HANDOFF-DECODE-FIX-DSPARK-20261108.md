@@ -324,7 +324,14 @@ post-warm: ~160 embed-cache hits / 0 re-encodes, 30-image history turns.
     noexact-lane knob — exact lanes have tool-less spec natively (c759147);
     keep STATS=1, SCHEDULER_WINDOW=12, KEEP now default 256, harbor temp 0.3.
     Rationale to verify: ALL 512k-depth evidence so far is noexact; exact was
-    last measured pre-fix-era and at 262k. Record vs tonight (EXCLUDING the
+    last measured pre-fix-era and at 262k. EXACT semantics verified in code:
+    tool-less spec ENABLED NATIVELY on exact (gate 16552: exact || knob; the
+    TOOLLESS_NOEXACT export becomes a no-op), masked rejection/residual path =
+    distribution-identical to plain masked sampling (no greedy bias exists on
+    the lane), confidence stays explicit 0.45. Prediction refined: at harbor
+    temp 0.3 the sharp target RAISES exact rejection-acceptance — expect the
+    exact-vs-noexact gap to be much smaller than collect-era high-temp
+    comparisons; the real exact cost shows near temp 1.0. Record vs tonight (EXCLUDING the
     17:27+ loop window): weighted accept + tok/verify by depth band, decode
     medians, machine-text/megaturn accept under exact-sampled drafts (the
     96.5% dump class should NOT appear — exact acceptance is distribution-
