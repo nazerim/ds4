@@ -213,6 +213,15 @@ CONFIRMED: post-warm turns = 1 encode each (the new frame), kept-set hits ~92:1.
 STATUS 15:26: run alive at 199k depth (~74k/hour climb); extract12 watch fired a
 FALSE QUIET (log-rotation fd blind spot — README note, verdicts from log files);
 re-armed extract12b. ETAs: 320k ~17:15, 512k wall ~20:00 (or compaction first).
+STATUS 15:30 + KEEP decision: images=66 @205.9k, climbing 64/h => 129th image
+~16:45 at ~270k depth — compaction does NOT arrive first; the reduce cliff is
+REAL tonight. INTERIM (this gap): restart with DS4_VISION_KEEP_IMAGES=256
+env-only — reduce never fires (drop=count-256=0), resilience holds (attestation
+cap is actually SERVER_MAX_IMAGES=256, dynamic; adr.md AMENDMENT 2), cost =
+encoder creep (count-128)x3 s/turn from 129 (~+2 min at 170 imgs, survivable;
+byte-cap binds ~170). TONIGHT NO cache-256 rebuild: test_server_image_embedding
+_cache needs 2-byte-key rework + ds4_test run = not in a live-run window.
+TOMORROW: batched-quantized drop + cache 256 entries (test rework) properly.
 F1 COMMITTED fork `e6b4c3c`. UPSTREAM: added as 3rd commit to PR **#1022**
 (`8da90ed`, comment-verified hunk: upstream-tied wording, (size_t) cast) with
 evidence comment posted — PR mergeable clean vs b3f5018. Watch state

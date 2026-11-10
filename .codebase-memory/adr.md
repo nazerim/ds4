@@ -173,6 +173,21 @@ restored without persisting embeddings if the request can attest them.
   restore does NOT carry embeddings — 125k-token resume loaded text KV in
   171 ms but paid ~14 encodes). F2 (skip-encode for KV-attested spans) is
   the principled follow-up, named in the code comment.
+- AMENDMENT 2 (2026-11-10, image-limits audit): "sessions beyond 128 skip
+  disk caching" is STALE. All image state is dynamically sized
+  (ds4_session_store_vision_identities callocs sync_image_count; server
+  guards key off SERVER_MAX_IMAGES, which is now 256 — "session and TP image
+  state is sized dynamically" at ds4_server.c:3804). Attestation/trailer
+  capacity = 256 images; only the embed cache caps at 128 (entries, and
+  byte-cap binds ~170). Consequence: KEEP=256 = reduce-never-fires (drop =
+  count-256 = 0 for every serveable request) AND keeps restart resilience
+  — the residual cost is encoder creep beyond the cache (count-128)*3 s/turn,
+  linear, starting at image 129. Transcript DROP-1-PER-TURN (KEEP< count)
+  remains the catastrophic mode: prefix break at oldest note => full-tail
+  re-prefill EVERY turn (~25 min at 270k depth). Batched drop (quantized
+  64-grain) is the principled reduce fix; raising cache to 256 entries
+  requires reworking test_server_image_embedding_cache to 2-byte keys
+  (1-byte key space can't produce ENTRIES+1=257 distinct values).
 - Deliberately NOT done: shutdown persist of vision sessions (slot ctx
   dies with the request), multimodal partial anchors, and general
   mid-stream live rewind - the Metal DS4 compressor frontier cannot be
