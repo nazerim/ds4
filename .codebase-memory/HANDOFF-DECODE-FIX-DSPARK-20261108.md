@@ -391,6 +391,18 @@ post-warm: ~160 embed-cache hits / 0 re-encodes, 30-image history turns.
     watches. Honest-deep-row test (288-320k+ with accept <85%) transfers to
     this round: overlap-bound exact CANNOT ride repetition, so any deep row
     earned here is automatically clean.
+    FIRST ALERT OF THE TRIPWIRE'S LIFE 21:27:41 = FALSE POSITIVE, engine clean:
+    `!! STALL sil=180s inflight=1 cpu=0.0` — real cause was `client disconnected`
+    at 21:24:07 ending the request WITHOUT a finish= line; sample taken at the
+    alert (log/ex1_stall_2128.sample) shows main thread parked in accept()
+    (ds4_server.c:18866), CPU 0.0 = healthy idle, keepalive thread only. Book-
+    keeping fixed: disconnects now decrement inflight + feed quiet clock (py_
+    compiled, watcher re-armed ex1b @21:29:43). PROVISIONAL exact@0.3 read to
+    disconnect point: 15 reqs / 86.5k tok / 0 err / accept 90.7% @ 379k depth,
+    dec 30-32 — NOTE: my "no 90%+ plateaus" discriminator was mis-calibrated
+    for 0.3 (sharp target lifts exact overlap legitimately); loop-vs-honest
+    must be judged by traffic SHAPE (repeated content), not accept level.
+    Loop-break test UNANSWERED: client dropped at 21:24 (reconnect = harbor-side).
     ---- FUTURE: the deferred EXACT@1.0 A/B (still to run) ----
     Launch recipe: `DSPARK_EXACT=1 ./ds4-server.sh restart-v41-dspark` (one-off
     env; script default stays 0), harbor 1.0 (or unset = engine default 1.0f —

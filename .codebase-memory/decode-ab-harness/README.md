@@ -36,6 +36,10 @@ Spec-era tools (DS4_DSPARK_STATS=1 required):
 
 Run segmentation & attribution (multi-soak era, 2026-11-09; full rules in
 HANDOFF-DECODE-FIX-DSPARK-20261108.md §8):
+- `client disconnected` ends a request WITHOUT a finish= line: monitors must
+  count it in inflight/quiet bookkeeping or STALL fires ghosts at an idle
+  engine (false-positive 2026-11-10 21:27; alert-time thread sample preserved
+  at ds4 `log/ex1_stall_2128.sample` showing accept()-park, cpu 0.0).
 - Attribute by CONTEXT-CHAIN continuity (`kv cache hit ... file=<sha>` /
   ctx-ladder position), never by wall-clock: harnesses fork, sessions rejoin
   the single-slot lane, and a `kv cache hit` on chain cd9e2bf3 (5,497 tok) is

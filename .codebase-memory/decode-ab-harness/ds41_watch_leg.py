@@ -84,6 +84,13 @@ def main():
                         errs += 1
                     t_last_fin = time.time()
                     inflight = max(0, inflight - 1)
+                if 'client disconnected' in line:
+                    # disconnects end a request WITHOUT a finish= line; count
+                    # them in inflight/quiet bookkeeping or the STALL tripwire
+                    # fires ghosts at a healthy idle engine (2026-11-10 21:27,
+                    # exact round: alert while main thread parked in accept()).
+                    inflight = max(0, inflight - 1)
+                    t_last_fin = time.time()
                 if 'prompt start' in line:
                     inflight += 1
                 m = CTX.search(line)
