@@ -229,10 +229,22 @@ post-warm: ~160 embed-cache hits / 0 re-encodes, 30-image history turns.
 
 ## 6. Open threads (priority order)
 
-1. **Depth stress 320k-512k** — round 3 (07:55:12->10:30:28, 169 reqs / 165,842
-   tok / 155 min / 0 errors, clean finish=stop end at 319,646 peak) validated
-   EVERYTHING to 320k: >262k band dec 23.5 & accept 74.3% (n=982, normal
-   turns), age-flat, stalls=0. Remaining: last 39% of ceiling + footprint
+1. **Depth stress 320k-512k — WALL TEST IN FLIGHT 2026-11-10** (extract-r2,
+   353,286 @16:52, climbing ~90k/h => ETA ~18:45). Engine boundary behavior is
+   designed-graceful: prompt >= ctx -> protocol-standard context_length_exceeded
+   (ds4_server.c:7606); so the test resolves to WHICH outcome fires first:
+   (a) CLIENT COMPACTION pre-empting the wall (opencode auto-compact near limit
+   => rebuilt prompt, ctx resets low, image count resets with it => KEEP cliff
+   also evaporates — the clean ending); (b) HARBOR ERROR END (error response
+   treated as task failure; engine stays clean, same class as R2's megaturn
+   death); (c) MEMORY FIRST — jetsam/pressure before context math (RSS @353k
+   watch: slope flattening vs the 1G/25k doom-era estimate, swap must stay 0);
+   (d) 128-image cliff racing the wall (gap-restart script pre-empts with
+   KEEP=256; success = `image budget` line never fires).
+   Decided outcome + depth + exact lines to be banked when it resolves.
+   Prior R3 evidence to 320k: no decay (23.5 @ >262k band); tonight's deep
+   turns run 31-32 t/s — the lane so far STRENGTHENS with depth (88.1% accept).
+   Remaining: last 39% of ceiling + footprint
    (~93G est @512k-full vs ~95-100 jetsam zone) unproven at full depth.
    [was: 200k-512k; 200k-320k CLOSED by doom3 2026-11-09] A second opencode
    session (corewars) may rejoin the single-slot lane anytime — attribute
