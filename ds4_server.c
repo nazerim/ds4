@@ -10813,8 +10813,17 @@ struct server_slot {
     char decode_err[160];
 };
 
-#define SERVER_IMAGE_CACHE_ENTRIES 32
-#define SERVER_IMAGE_CACHE_BYTES (128u * 1024u * 1024u)
+/* Vision embedding cache (server-global LRU), sized to the DS4_VISION_KEEP_IMAGES
+ * history budget (ds4-server.sh exports 128). The old 32/128 MiB absorbed only
+ * ~11 images (~11.63 MB embedding + encoded copy per image), so any vision
+ * session past 13 images thrashed the scan at ~100% miss every turn while KV
+ * reuse stayed 99.4% (termbench extract-r2, 2026-11-10: 3 s/encode, encoder duty
+ * 67% of span at 30 images). 128 entries * ~11.8 MB ~ 1.6 GiB; 2 GiB headroom
+ * (retention = min(128 entries, budget/per-image) — bigger images bind bytes first).
+ * Keep the two in sync with KEEP; F2 (skip-encode for KV-attested spans) will
+ * make this the fallback, not the work path. */
+#define SERVER_IMAGE_CACHE_ENTRIES 128
+#define SERVER_IMAGE_CACHE_BYTES ((size_t)2u * 1024u * 1024u * 1024u)
 
 typedef struct {
     uint8_t *encoded;
