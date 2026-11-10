@@ -243,7 +243,8 @@ post-warm: ~160 embed-cache hits / 0 re-encodes, 30-image history turns.
 ## 6. Open threads (priority order)
 
 1. **Depth stress 320k-512k — WALL TEST IN FLIGHT 2026-11-10** (extract-r2,
-   353,286 @16:52, climbing ~90k/h => ETA ~18:45). Engine boundary behavior is
+   353,286 @16:52, climbing ~90k/h => ETA ~18:45; next phase = EXACT flip,
+   thread 10). Engine boundary behavior is
    designed-graceful: prompt >= ctx -> protocol-standard context_length_exceeded
    (ds4_server.c:7606); so the test resolves to WHICH outcome fires first:
    (a) CLIENT COMPACTION pre-empting the wall (opencode auto-compact near limit
@@ -308,6 +309,21 @@ post-warm: ~160 embed-cache hits / 0 re-encodes, 30-image history turns.
    session has no valid checkpoint to stage` + boundary `token-mismatch` forced
    full cold re-prefill (76,204 tok / 125.7 s). Frontier-store gap; separate
    future ticket candidate (post #1335/#1022, not F1/F2 scope).
+10. **NEXT ROUND: flip to EXACT sampling at depth** (operator plan, 1110 ~17:47;
+    tonight = depth frontier on noexact, next = same frontier on exact).
+    Launch: `DSPARK_EXACT=1 ./ds4-server.sh restart-v41-dspark` (one-off env —
+    script default stays 0; plain restart reverts). TOOLLESS_NOEXACT is a
+    noexact-lane knob — exact lanes have tool-less spec natively (c759147);
+    keep STATS=1, SCHEDULER_WINDOW=12, KEEP now default 256, harbor temp 0.3.
+    Rationale to verify: ALL 512k-depth evidence so far is noexact; exact was
+    last measured pre-fix-era and at 262k. Record vs tonight (EXCLUDING the
+    17:27+ loop window): weighted accept + tok/verify by depth band, decode
+    medians, machine-text/megaturn accept under exact-sampled drafts (the
+    96.5% dump class should NOT appear — exact acceptance is distribution-
+    bound, not greedy-match), F1 encode economics (drafter-independent, must
+    be identical), compaction-rebuild rates (prefill path, also drafter-free),
+    stall/anchor behavior. Hypothesis: accept & tok/verify drop mid-band,
+    depth-flatness and all prefill/vision/rebuild numbers unchanged.
 
 ## 7. Files to remember
 
