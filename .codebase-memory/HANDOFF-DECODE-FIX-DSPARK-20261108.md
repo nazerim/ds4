@@ -222,6 +222,14 @@ encoder creep (count-128)x3 s/turn from 129 (~+2 min at 170 imgs, survivable;
 byte-cap binds ~170). TONIGHT NO cache-256 rebuild: test_server_image_embedding
 _cache needs 2-byte-key rework + ds4_test run = not in a live-run window.
 TOMORROW: batched-quantized drop + cache 256 entries (test rework) properly.
+FORCED RESTART 16:56:12 (operator decision — agent stuck in loop; wall test was
+NOT resolving on its own). Killed mid-decode at ~360k (new lane high-water;
+images=91 last seen). KEEP=256 live on PID **36389** (env verified), proxy
+26097 survived, gap script retired (never fired — the loop had no sustained
+gap). Watch = extract12c. PENDING: does harbor resume the session? First-ever
+deep-vision disk restore at the ~360k frontier would be the prize datapoint;
+if it starts fresh, the wall test restarts on a new chain already immune to
+the 128 cliff.
 F1 COMMITTED fork `e6b4c3c`. UPSTREAM: added as 3rd commit to PR **#1022**
 (`8da90ed`, comment-verified hunk: upstream-tied wording, (size_t) cast) with
 evidence comment posted — PR mergeable clean vs b3f5018. Watch state
