@@ -308,8 +308,13 @@ post-warm: ~160 embed-cache hits / 0 re-encodes, 30-image history turns.
    session has no valid checkpoint to stage` — a cold-rebuilt session cannot
    re-populate its ladder mid-stream; the window has ZERO restart resilience
    until a turn-end store lands. TEST IN FLIGHT: does `kv cache stored
-   reason=turn` succeed after the current turn (~19:06)? yes = gap is
-   mid-stream-only; persistent skips = structural, ticket-worthy (thread 9).
+   reason=turn` succeed after the current turn (~19:06)? ANSWERED 19:05:56:
+   YES — `kv cache stored tokens=129836 reason=turn` landed the moment the
+   cold-rebuild turn finished. GAP IS TURN-BOUNDED, NOT STRUCTURAL: a
+   cold-continuation session can't checkpoint mid-turn (268 s unprotected
+   window this time), but disk resilience re-arms every turn-end. Thread 9
+   downgraded to documentation-grade: worth a note upstream someday, not a
+   ticket — the design recovers exactly as fast as it's obligated to.
    HONEST-REGIME CONFIRMED 18:57 (operator + live check): post-compact 35 reqs,
    per-request mean accept 78.4% (no sub-50% outliers), dec 15m median fell to
    24.5 from the loop-inflated ~31 — loop window (17:27-18:05) closed, all
