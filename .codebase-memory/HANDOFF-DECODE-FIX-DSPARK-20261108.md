@@ -1,6 +1,6 @@
 # HANDOFF — decode fix + dspark saga (canonical ledger)
 
-**Date:** 2026-11-09 (lane finalized; soak day closed) | **State:** pushed, engine idle-warm
+**Date:** 2026-11-11 morning (1110 closed: F1 + wall test + loop study) | **State:** pushed, engine idle
 **Predecessor for pre-fix numbers:** DS41-SMOKE-20261106.md
 
 ## 1. The solved problem
@@ -56,8 +56,8 @@ flat-in-age on corewars 2¼ h; flat-in-DEPTH too — doom R3 held 23.5 t/s and
 
 ## 4. Live system state (verified Nov 10 10:20; defaults finalized Nov 9 ~14:45)
 
-- Engine **PID 26079** (relaunch 1110 10:16:33 — first plain-default boot, §5
-  circuit; formerly 1763 post-reboot): `--ctx 524288 --dspark --mtp-model gguf/DeepSeek-V4.1-Flash-DSpark.gguf
+- Engine **PID 40559** (relaunch 1110 20:15:23 — EXACT therapeutic boot; formerly 36389,
+  and 26079 before the two 1110 restarts; 1763 pre-that): `--ctx 524288 --dspark --mtp-exact-sampling --mtp-model gguf/DeepSeek-V4.1-Flash-DSpark.gguf
   --dspark-confidence 0.45`, env `DSPARK_EXACT=0 DS4_DSPARK_STATS=1
   DS4_DSPARK_TOOLLESS_NOEXACT=1 DS4_DSPARK_SCHEDULER_WINDOW=12`
 - **CONFIG FINALIZED 2026-11-09 (operator):** these four values are now the
