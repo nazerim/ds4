@@ -429,7 +429,22 @@ post-warm: ~160 embed-cache hits / 0 re-encodes, 30-image history turns.
     repetition shapes (varying lengths, accept 60-75%) — carry into the
     deferred EXACT@1.0 study and future loop triage: characterize loops by
     content repetition, never by token-count equality across temps.
-    ---- FUTURE: the deferred EXACT@1.0 A/B (still to run) ----
+    ---- FUTURE -> LIVE 2026-11-11 07:45: EXACT@1.0 VALIDATION RUN OPENED ----
+    Task: termbench OCAML (fresh task = fresh chain = cold preamble prefill;
+    text-only expected). Engine 40559 already exact-booted (no restart needed;
+    F1 binary 14:27 verified in argv). Operator sets harbor temp 1.0. Watch oc1
+    (cap ~19:45, quiet 3600, disconnect-ghost fix active). Validation gates,
+    in order: (1) ACCEPT-LEVEL discriminator — at 1.0 expect 60-75% mid-band
+    (vs 88-91% observed exact@0.3 last night); >85% on early turns = harbor NOT
+    actually at 1.0. (2) Pair vs certified 1109 noexact@1.0 (bands 66-77%,
+    shorts 67-70%, corewars 67.2%): prediction = exact lands a few points BELOW
+    same-shape noexact; tok/verify lower; any dump-class turn ~70-80% NOT 96.5%.
+    (3) Drafter-independent controls MUST match prior record: prefill rates,
+    restore timings, zero-encode new-image economics — drift = confound, stop
+    reading accept numbers. (4) Loop triage at 1.0 uses CONTENT-repetition
+    detection (semantic cycles, varying lengths) — identical-length signature
+    is a 0.3 artifact, don't wait for it.
+    ---- original plan body ----
     Launch recipe: `DSPARK_EXACT=1 ./ds4-server.sh restart-v41-dspark` (one-off
     env; script default stays 0), harbor 1.0 (or unset = engine default 1.0f —
     cleaner, certifiably matches 1109). Semantics verified in code: tool-less
