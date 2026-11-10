@@ -292,6 +292,13 @@ post-warm: ~160 embed-cache hits / 0 re-encodes, 30-image history turns.
    anchor, contradiction cascade, full fold). Follow-in: RSS 80.6G post-fold —
    retire of the 462k live frontier (grace 3600s) should hand back ~a few GiB;
    watch for the dip.
+   HONEST-REGIME CONFIRMED 18:57 (operator + live check): post-compact 35 reqs,
+   per-request mean accept 78.4% (no sub-50% outliers), dec 15m median fell to
+   24.5 from the loop-inflated ~31 — loop window (17:27-18:05) closed, all
+   post-18:06 traffic is usable noexact evidence at whatever harbor sits at
+   (0.3 unless operator already moved it for next round — temperature is
+   client-side, invisible in engine log; band-pair vs tonight's pre-loop 0.3
+   leg settles it: ~78 mean suggests 0.3 still).
    Prior R3 evidence to 320k: no decay (23.5 @ >262k band); tonight's deep
    turns run 31-32 t/s — the lane so far STRENGTHENS with depth (88.1% accept).
    Remaining: last 39% of ceiling + footprint
@@ -342,10 +349,11 @@ post-warm: ~160 embed-cache hits / 0 re-encodes, 30-image history turns.
     TOOLLESS_NOEXACT export becomes a no-op), masked rejection/residual path =
     distribution-identical to plain masked sampling (no greedy bias exists on
     the lane), confidence stays explicit 0.45. Paired-baseline frame: the true
-    A/B is exact@1.0 vs noexact@1.0 — 1109's whole dataset (R3 bands 66-77%,
-    shorts 67-70%, corewars 67.2%) presumably ran harbor-unset = engine default
-    1.0f, making this round a same-temp single-variable flip if 1109 is ever
-    confirmed. At 1.0 the draft-vs-target overlap drops => expect the exact
+    A/B is exact@1.0 vs noexact@1.0 — BASELINE CERTIFIED (operator 18:57):
+    ALL 1109 runs were temp 1.0 (harbor unset = engine default 1.0f), so the
+    whole 1109 dataset (R3 bands 66-77%, shorts 67-70%, corewars 67.2%,
+    doom2/3 full range) is the same-temp single-variable pair, flip = EXACT
+    only. At 1.0 the draft-vs-target overlap drops => expect the exact
     penalty to be REAL this time: mid-band accept below noexact@1.0 by several
     points, tok/verify lower, dump-class megaturn acceptance collapsing from
     the 96.5% greedy-match ceiling to distribution-overlap bounds (~70-80%);
