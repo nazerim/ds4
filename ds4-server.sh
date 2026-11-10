@@ -152,10 +152,15 @@ V41_SSD_STREAM="${V41_SSD_STREAM:-1}"
 TRACE_PATH="${TRACE_PATH:-}"
 
 # Vision image budget (see README, ds4_server.c): N > 0 opts into auto-reduce
-# of over-budget multimodal histories (keep last N, drop oldest). The fork
-# default is 128; the upstream default (unset in the server binary) rejects
-# requests over 16 images. 0 = disable auto-reduce in the server too.
-DS4_VISION_KEEP_IMAGES="${DS4_VISION_KEEP_IMAGES:-128}"
+# of over-budget multimodal histories (keep last N, drop oldest). The upstream
+# default (unset in the server binary) rejects requests over 16 images.
+# DEFAULT 256 since 2026-11-10 (operator; was 128): transcript drop-1-per-turn
+# past KEEP is catastrophic at depth (prefix break => ~30 min/turn re-prefill
+# at 360k), while reduce never fires below SERVER_MAX_IMAGES=256 - attestation/
+# trailer capacity is 256 (dynamic), so KEEP=256 = serve whole image histories
+# unmodified and keep disk-resilience, and client compaction rewrites history
+# long before the count matters. 0 = disable auto-reduce in the server too.
+DS4_VISION_KEEP_IMAGES="${DS4_VISION_KEEP_IMAGES:-256}"
 export DS4_VISION_KEEP_IMAGES
 
 # Hard thinking-token budget (server default; enforced in ds4_server.c): caps
@@ -1132,7 +1137,7 @@ case "${1:-}" in
     echo "  TRACE_PATH          - Write cache-decision trace to this file (e.g."
     echo "                        TRACE_PATH=./log/ds4.trace). Empty = off."
     echo "  DS4_VISION_KEEP_IMAGES - Auto-reduce over-budget image histories to"
-    echo "                        the last N images (default: 128; 0 = reject"
+    echo "                        the last N images (default: 256; 0 = reject"
     echo "                        requests over 16 images instead)."
     echo "  KV_DIR / KV_SIZE    - DeepSeek KV store dir + disk budget MiB (defaults:"
     echo "                        /Volumes/FireCuda520/ds4-kv-deepseek, 262144 = 256 GiB;"

@@ -224,12 +224,17 @@ _cache needs 2-byte-key rework + ds4_test run = not in a live-run window.
 TOMORROW: batched-quantized drop + cache 256 entries (test rework) properly.
 FORCED RESTART 16:56:12 (operator decision — agent stuck in loop; wall test was
 NOT resolving on its own). Killed mid-decode at ~360k (new lane high-water;
-images=91 last seen). KEEP=256 live on PID **36389** (env verified), proxy
-26097 survived, gap script retired (never fired — the loop had no sustained
-gap). Watch = extract12c. PENDING: does harbor resume the session? First-ever
-deep-vision disk restore at the ~360k frontier would be the prize datapoint;
-if it starts fresh, the wall test restarts on a new chain already immune to
-the 128 cliff.
+images=91 last seen). KEEP=256 live on PID **36389**, gap script retired
+(never fired — the loop had no sustained gap). Watch = extract12c.
+RESUME PROVEN 17:01:58: harbor re-attached; **`kv cache hit text tokens=354751
+load=489.0 ms`** — first deep-vision disk restore ever (no re-prefill), one-time
+re-warm ~88 encodes to cache=1.05 GB (all images retained, entries=128 cap not
+even binding), session live at 358.7k @ 32 t/s, RSS 80.5G swap 0.
+DECISION (operator): **KEEP=256 is now the SCRIPT DEFAULT** (128 -> 256; help
+text synced; rationale in the comment: reduce never fires < SERVER_MAX_IMAGES
+256 = whole histories served unmodified + disk-resilient; compaction rewrites
+history long before counts matter). Wall test continues with the 128-cliff
+outcome (d) structurally retired; gap script deleted (temp, purpose served).
 F1 COMMITTED fork `e6b4c3c`. UPSTREAM: added as 3rd commit to PR **#1022**
 (`8da90ed`, comment-verified hunk: upstream-tied wording, (size_t) cast) with
 evidence comment posted — PR mergeable clean vs b3f5018. Watch state
