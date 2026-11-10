@@ -420,6 +420,15 @@ post-warm: ~160 embed-cache hits / 0 re-encodes, 30-image history turns.
     at 260-356k depth, mechanics clean (0 errors, ladder resumes, no stalls
     beyond the bookkeeping ghost). Loop onset ~288k mirrors noexact onset
     ~256k — depth-linked, not sampler-linked.
+    TEMPERATURE-OF-EVIDENCE NOTE (operator, 23:5x): BOTH of tonight's loops ran
+    at temp 0.3 — and their DIFFERENT SHAPES are temp properties, not mode
+    signatures: noexact@0.3 rode 94-96% accept plateaus with variable dumps;
+    exact@0.3 produced FOUR byte-deterministic 17,123-tok turns (sharp
+    distribution => near-identical regeneration). Implication: identical-length
+    detection is valid ONLY at low temp; at 1.0 expect looser semantic-
+    repetition shapes (varying lengths, accept 60-75%) — carry into the
+    deferred EXACT@1.0 study and future loop triage: characterize loops by
+    content repetition, never by token-count equality across temps.
     ---- FUTURE: the deferred EXACT@1.0 A/B (still to run) ----
     Launch recipe: `DSPARK_EXACT=1 ./ds4-server.sh restart-v41-dspark` (one-off
     env; script default stays 0), harbor 1.0 (or unset = engine default 1.0f —
