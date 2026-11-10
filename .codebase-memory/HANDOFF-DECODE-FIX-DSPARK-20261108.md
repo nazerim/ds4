@@ -328,9 +328,9 @@ post-warm: ~160 embed-cache hits / 0 re-encodes, 30-image history turns.
    session has no valid checkpoint to stage` + boundary `token-mismatch` forced
    full cold re-prefill (76,204 tok / 125.7 s). Frontier-store gap; separate
    future ticket candidate (post #1335/#1022, not F1/F2 scope).
-10. **NEXT ROUND: flip to EXACT sampling at depth** (operator plan, 1110 ~17:47;
-    tonight = depth frontier on noexact, next = same frontier on exact).
-    Launch: `DSPARK_EXACT=1 ./ds4-server.sh restart-v41-dspark` (one-off env —
+10. **NEXT ROUND: flip to EXACT sampling at depth** (operator plan, 1110 17:47;
+    DEFERRED 18:10 to the NEXT termbench run — extract-r2 continues its natural
+    close on noexact first). Launch at that round's start: `DSPARK_EXACT=1 ./ds4-server.sh restart-v41-dspark` (one-off env —
     script default stays 0; plain restart reverts). TOOLLESS_NOEXACT is a
     noexact-lane knob — exact lanes have tool-less spec natively (c759147);
     keep STATS=1, SCHEDULER_WINDOW=12, KEEP now default 256, harbor temp 0.3.
