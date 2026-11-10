@@ -254,7 +254,18 @@ post-warm: ~160 embed-cache hits / 0 re-encodes, 30-image history turns.
    watch: slope flattening vs the 1G/25k doom-era estimate, swap must stay 0);
    (d) 128-image cliff racing the wall (gap-restart script pre-empts with
    KEEP=256; success = `image budget` line never fires).
-   Decided outcome + depth + exact lines to be banked when it resolves.
+   RESOLVED-TOWARD (a) 17:39-17:44: compaction arrives as IN-PLACE mid-history
+   edits (not restart-small): token-mismatch @407,047 w/ vision=match (91
+   images re-attested) -> live 424,650 contradiction -> disk 407,179 reload
+   (583 ms) -> ALSO contradicted -> discarded frontier-contradicted -> fell to
+   354,751 anchor -> 70,853-tok cold re-append in 144.3 s (avg 491 t/s across
+   354-425k depth; tail chunk 197 t/s = honest full-history attention rate) ->
+   decoding 29.8-33.2 t/s @428,604 NEW DEPTH RECORD, zero errors. Deep prefill
+   holds because compressed KV (~8.3 KiB/tok) makes attention bandwidth-bound
+   and experts are depth-independent. Wall may NEVER be hit directly - client
+   trims ahead of it; ceiling behavior w/ compaction partner = graceful
+   ladder-bounded descent, indefinitely. Second deep-vision disk restore
+   proven (485.8 ms / 354,751 tok / 91 image spans).
    Prior R3 evidence to 320k: no decay (23.5 @ >262k band); tonight's deep
    turns run 31-32 t/s — the lane so far STRENGTHENS with depth (88.1% accept).
    Remaining: last 39% of ceiling + footprint
