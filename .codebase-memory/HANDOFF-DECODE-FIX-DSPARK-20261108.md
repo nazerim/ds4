@@ -499,6 +499,24 @@ post-warm: ~160 embed-cache hits / 0 re-encodes, 30-image history turns.
     `./ds4-server.sh restart-v41-dspark` = finalized noexact defaults (the
     exact boot 40559 has served its study purpose since 1110 20:15). Watcher
     oc1 writes FINAL ~12:37 (quiet 3600 after 11:37) — expected, no action.
+    ---- PHASE 2 (unplanned gift): EXACT@0.8 OPENED 12:24 ----
+    Operator relaunched termbench PATH at temp 0.8, server still exact (40559
+    verified in argv+env; zero traffic pre-anchor). oc1 retired early (1.0
+    series fully banked from raw logs); CLEAN capture pa8
+    (/tmp/ds41_leg_pa8.snap, quiet 3600, cap ~00:24). PAIRING VALUE: same
+    task PATH + same lane exact + only temp changed = clean temperature
+    contrast vs the banked PATH@1.0 leg (69.9/dec 20.4/198k). Still NO
+    noexact@0.8 twin — this measures the temp effect on exact, not the lane
+    difference (no-twin trap memo holds; the full paired study stays deferred).
+    GATE 1' (accept-level temp discriminator at 0.8): interpolated prediction
+    ~75-80% (exact rides 88-91 @0.3 -> ~66-67 @1.0). Reads: 65-72 => harbor
+    still at 1.0 (0.8 not applied); >85 => harbor at 0.3; 73-82 => confirmed
+    0.8. Decode corollary: accept rise should lift dec ~1-2 t/s over the 1.0
+    leg (more draft accepted per cycle at fixed verify cost... lower verify
+    count per token). Controls: PATH preamble should re-anchor its own chain
+    (cold ctx=0..~5.7k TOOLS); accept curve vs depth compared ONLY within
+    this phase (0.8 changes the distribution). Loop detector: content
+    repetition (0.8 is mid-temp — equal-length partially unreliable).
     OCAML CLOSED 09:18: 62 reqs / 0 err / clean stop end / 51.4 min / depth
     92,546 / weighted accept 67.2 / tok/verify 3.26 / dec 18.4-19.2 FLAT in
     depth (bands: 66.8/71.5/65.8 accept). KEY RESULT: no rise-with-depth —
