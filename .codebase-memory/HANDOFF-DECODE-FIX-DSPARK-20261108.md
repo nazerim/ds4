@@ -1,6 +1,6 @@
 # HANDOFF — decode fix + dspark saga (canonical ledger)
 
-**Date:** 2026-11-11 ~11:45 (exact@1.0 study CLOSED — verdict in §6 t10) | **State:** pushed, engine idle, revert to noexact pending
+**Date:** 2026-11-11 ~15:35 (EXACT study done — 1.0 series + 0.8 pair, verdict+revision in §6 t10) | **State:** pushed, engine idle on exact, revert pending
 **Predecessor for pre-fix numbers:** DS41-SMOKE-20261106.md
 
 ## 1. The solved problem
@@ -530,6 +530,35 @@ post-warm: ~160 embed-cache hits / 0 re-encodes, 30-image history turns.
     ping 632 full disk-hit 47.7 ms; preamble 5,493/5,688 hit @14.6 ms + 195
     tail prefill — re-run of same task on same engine forks at the harness
     variable section, cold-prefill cost avoided; 0 errors, ladder clean.
+    PATH@0.8 CLOSED 15:31 @ 15:27:26: 116 reqs / 0 err / clean stop / 180 min
+    / depth 231,707 (deeper than its own 1.0 twin's 198k — 0.8 trajectory ran
+    longer) / weighted accept 74.0 / tok/verify 3.69 / dec 20.9 / 1 disconnect
+    absorbed. BANDS: 68.0/68.8/75.9/72.0/76.2/77.6/78.6 (0-32..192-224k) —
+    *** ACCEPT RISES WITH DEPTH AT 0.8 ***.
+    VERDICT REVISION (the study's most important late correction): the
+    SERIES-VERDICT claim "exact never rides depth" was TOO BROAD — it held at
+    1.0 but exact@0.8 climbs 68->78.6 in depth. Correct model: the accept
+    depth-ride runs on CONTENT REPETITION x TARGET-SHARPNESS (temperature),
+    not on sampler mode alone. At 1.0 exact's flat profile = repetition exists
+    but the 1.0 target is too soft for drafts to match it; noexact@1.0 rose
+    because greedy-sharpened drafts chase the repetition anyway. At 0.8 the
+    real target distribution sharpens enough that exact matching captures the
+    same repetition — HONESTLY. Depth-ride attribution now: noexact@1.0 rise =
+    artifact (still valid); exact@0.8 rise = genuine fidelity-preserving ride.
+    SAME-TASK TEMP PAIR (the phase-2 prize): PATH 1.0 vs 0.8, same lane:
+    accept 69.9->74.0 (+4.1), tok/verify 3.19->3.69, dec 20.4->20.9 (faster),
+    errors 0 both. Shallow bands nearly flat (67.4 vs 68.0) — the gate-1
+    "no 0.8 resolution" finding stands ONLY for shallow reads; at depth the
+    discriminator resolves +4-8 pts. FIDELITY PRICE AT 0.8 ~ ZERO: vs 1.0
+    exact it's strictly better; vs noexact@1.0 shallow twins (66-70) exact@0.8
+    shallow (68.0) is PARITY; true noexact@0.8 twin still the missing piece.
+    Loop watch: max depth 231.7k = nearest approach to the ~256k onset zone at
+    exact@0.8 — no loop; only faint echo: two 1339-tok deep turns (n=2, not a
+    signature). 240k+ prize band untouched by a whisker.
+    ---- EXACT STUDY COMPLETE: revert lane when convenient ----
+    `./ds4-server.sh restart-v41-dspark` -> finalized noexact. pa8 watcher
+    writes FINAL ~16:27 (quiet 3600 after 15:27); tripwire waiter will report
+    it — expected, no action.
     OCAML CLOSED 09:18: 62 reqs / 0 err / clean stop end / 51.4 min / depth
     92,546 / weighted accept 67.2 / tok/verify 3.26 / dec 18.4-19.2 FLAT in
     depth (bands: 66.8/71.5/65.8 accept). KEY RESULT: no rise-with-depth —
