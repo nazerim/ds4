@@ -453,6 +453,17 @@ post-warm: ~160 embed-cache hits / 0 re-encodes, 30-image history turns.
     07:52:48 disconnect-retry absorbed cleanly (bookkeeping fix proven in
     anger). Depth 54k, oc1 req=21. REAL PRIZE OPEN: deep-band exact-vs-noexact
     compare at 250k+ (twin = R3 bands 66-77) if ocaml runs that far.
+    OCAML CLOSED 09:18: 62 reqs / 0 err / clean stop end / 51.4 min / depth
+    92,546 / weighted accept 67.2 / tok/verify 3.26 / dec 18.4-19.2 FLAT in
+    depth (bands: 66.8/71.5/65.8 accept). KEY RESULT: no rise-with-depth —
+    exact could not and did not ride repetition, confirming the noexact deep
+    rise (R3 72-77) was a greedy-match artifact (falsification target never
+    fired). Decode 2-3.5 t/s under noexact family twins at same bands, tok/
+    verify lower — direction+magnitude as predicted. GATE4: no loop on this
+    task at all. CONFOUND NOTED: ocaml is a NEW task -> no same-content
+    noexact@1.0 twin; family-level pairing only; true A/B needs same task on
+    both lanes. PRIZE PASSES TO PATH (next task, same watch oc1): the 250k+
+    deep-band exact number vs R3 twins.
     detection (semantic cycles, varying lengths) — identical-length signature
     is a 0.3 artifact, don't wait for it.
     ---- original plan body ----
