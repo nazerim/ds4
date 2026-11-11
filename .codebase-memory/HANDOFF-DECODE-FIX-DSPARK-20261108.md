@@ -442,6 +442,17 @@ post-warm: ~160 embed-cache hits / 0 re-encodes, 30-image history turns.
     (3) Drafter-independent controls MUST match prior record: prefill rates,
     restore timings, zero-encode new-image economics — drift = confound, stop
     reading accept numbers. (4) Loop triage at 1.0 uses CONTENT-repetition
+    GATE RESULTS 08:10 (~35 min in): GATE1 CLEARED — weighted accept 65.4%
+    (8 turns p>=200, range 62-80; all-req 68.1%) = inside 60-75% prediction =>
+    harbor confirmed 1.0 without asking; early 85-93% turns were tool-
+    scaffolding small-n as the n>=200 rule anticipated. GATE2 first read:
+    pairing vs 1109 noexact@1.0 shallow twins (shorts 69.9/67.2, corewars
+    ~66-67) => exact 2-4 pts BELOW, predicted direction+magnitude; decode
+    corroboration: med 19.4 = bottom of band, consistent with lower tok/verify.
+    GATE3 first read: cold preamble 5,598 @270 t/s on band; 0 errors; the
+    07:52:48 disconnect-retry absorbed cleanly (bookkeeping fix proven in
+    anger). Depth 54k, oc1 req=21. REAL PRIZE OPEN: deep-band exact-vs-noexact
+    compare at 250k+ (twin = R3 bands 66-77) if ocaml runs that far.
     detection (semantic cycles, varying lengths) — identical-length signature
     is a 0.3 artifact, don't wait for it.
     ---- original plan body ----
