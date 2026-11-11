@@ -1,6 +1,6 @@
 # HANDOFF — decode fix + dspark saga (canonical ledger)
 
-**Date:** 2026-11-11 ~09:20 (exact@1.0 study live) | **State:** pushed, engine idle-between-tasks, watch oc1 armed
+**Date:** 2026-11-11 ~11:45 (exact@1.0 study CLOSED — verdict in §6 t10) | **State:** pushed, engine idle, revert to noexact pending
 **Predecessor for pre-fix numbers:** DS41-SMOKE-20261106.md
 
 ## 1. The solved problem
@@ -480,6 +480,25 @@ post-warm: ~160 embed-cache hits / 0 re-encodes, 30-image history turns.
     t/s under noexact deep twins (23.2-23.5), LESS penalty than ocaml showed
     (18.4-19.2) — task-content dependent, fidelity price varies by output
     mix. req=134 err=0, no loop at 164k (onset zone ~256k still ahead).
+    PATH CLOSED 11:42 @ 11:37:15: 97 reqs / 0 err / clean stop / 130 min /
+    depth 198,389 (TRIPWIRE 240k NOT reached — 250k+ prize survives to a
+    marathon task) / weighted accept 69.9 / tok/verify 3.19 / bands 65.4-74.4
+    (128-160k: 65.4, 160-192k: 70.3 — deep bands run ~3-7 pts under R3's
+    noexact 72.6-74.3 twins, family-level pair, same-content caveat holds).
+    SERIES VERDICT (ocaml+PATH, exact@1.0): (1) CONFIRMED on two independent
+    tasks: exact accept is FLAT-or-hump, NEVER rises with depth — noexact's
+    66->77 rise is fully attributed to greedy-match. (2) Fidelity price is
+    REAL BUT MODEST: accept -2..-5 pts, decode -1..-3.5 t/s vs twins, varies
+    with output mix (PATH cheap, ocaml dearer) — the "quite punishing" first
+    read softened once a second task landed. (3) Mechanics flawless across
+    both legs: 159 reqs 0 errors total, prefill/restore controls on band,
+    disconnects absorbed, RSS 81 G flat. (4) No loop to 198k on either task;
+    onset zone (~256k) still formally untested at 1.0 — watch it on the next
+    deep run (tripwire pattern armed for reuse: snap maxctx threshold).
+    ---- STUDY SERIES DONE: revert lane when convenient ----
+    `./ds4-server.sh restart-v41-dspark` = finalized noexact defaults (the
+    exact boot 40559 has served its study purpose since 1110 20:15). Watcher
+    oc1 writes FINAL ~12:37 (quiet 3600 after 11:37) — expected, no action.
     OCAML CLOSED 09:18: 62 reqs / 0 err / clean stop end / 51.4 min / depth
     92,546 / weighted accept 67.2 / tok/verify 3.26 / dec 18.4-19.2 FLAT in
     depth (bands: 66.8/71.5/65.8 accept). KEY RESULT: no rise-with-depth —
