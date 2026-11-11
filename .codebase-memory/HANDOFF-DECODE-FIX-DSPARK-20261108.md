@@ -471,6 +471,15 @@ post-warm: ~160 embed-cache hits / 0 re-encodes, 30-image history turns.
     same tail-decay class, control holds. 1 disconnect absorbed, 0 errors.
     Prize watch: PATH at ~28k/09:38 and climbing — background tripwire armed
     at 240k (snap maxctx >92,552 requires PATH itself to clear it).
+    PATH MID-PROFILE 11:09 @ depth 164,836 (72 turns, n solid per band):
+    accept by band 67.4/72.0/74.4/71.3/66.0 (0-32/32-64/64-96/96-128/128k+),
+    dec med 17.8/22.1/20.3/21.7/21.2, total weighted 70.4 tok/verify 3.24.
+    READ: hump-then-return, NOT a depth-ride — 128k+ sits back at exact@1.0
+    baseline (~66); hump verified content-driven (zero turns >=82%, no dump
+    class, no finish=length in window). Decode 20-22 mid-bands = only ~1-3
+    t/s under noexact deep twins (23.2-23.5), LESS penalty than ocaml showed
+    (18.4-19.2) — task-content dependent, fidelity price varies by output
+    mix. req=134 err=0, no loop at 164k (onset zone ~256k still ahead).
     OCAML CLOSED 09:18: 62 reqs / 0 err / clean stop end / 51.4 min / depth
     92,546 / weighted accept 67.2 / tok/verify 3.26 / dec 18.4-19.2 FLAT in
     depth (bands: 66.8/71.5/65.8 accept). KEY RESULT: no rise-with-depth —
