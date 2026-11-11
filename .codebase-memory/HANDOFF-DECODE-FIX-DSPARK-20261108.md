@@ -1,6 +1,6 @@
 # HANDOFF — decode fix + dspark saga (canonical ledger)
 
-**Date:** 2026-11-11 morning (1110 closed: F1 + wall test + loop study) | **State:** pushed, engine idle
+**Date:** 2026-11-11 ~09:20 (exact@1.0 study live) | **State:** pushed, engine idle-between-tasks, watch oc1 armed
 **Predecessor for pre-fix numbers:** DS41-SMOKE-20261106.md
 
 ## 1. The solved problem
@@ -56,10 +56,19 @@ flat-in-age on corewars 2¼ h; flat-in-DEPTH too — doom R3 held 23.5 t/s and
 
 ## 4. Live system state (verified Nov 10 10:20; defaults finalized Nov 9 ~14:45)
 
-- Engine **PID 40559** (relaunch 1110 20:15:23 — EXACT therapeutic boot; formerly 36389,
-  and 26079 before the two 1110 restarts; 1763 pre-that): `--ctx 524288 --dspark --mtp-exact-sampling --mtp-model gguf/DeepSeek-V4.1-Flash-DSpark.gguf
-  --dspark-confidence 0.45`, env `DSPARK_EXACT=0 DS4_DSPARK_STATS=1
+- Engine **PID 40559** (booted 1110 20:15:23 on EXACT env — now HOSTING THE 1111
+  exact@1.0 STUDY: ocaml closed, path queued; formerly 36389, and 26079 before
+  the two 1110 restarts; 1763 pre-that): `--ctx 524288 --dspark --mtp-exact-sampling --mtp-model gguf/DeepSeek-V4.1-Flash-DSpark.gguf
+  --dspark-confidence 0.45`, env `DSPARK_EXACT=1 (study override) DS4_DSPARK_STATS=1
   DS4_DSPARK_TOOLLESS_NOEXACT=1 DS4_DSPARK_SCHEDULER_WINDOW=12`
+- **1111 live stack:** DSPARK_EXACT=1 is an ENV OVERRIDE ONLY (script default
+  stays 0 — plain `restart-v41-dspark` reverts to the finalized noexact lane);
+  watch `oc1` (/tmp/ds41_leg_oc1.snap, cap ~19:45, quiet 3600) with waiter
+  armed; PATH flows into the same capture — split tasks at path's cold-chain
+  `ctx=0..N` start (new task = new chain, no cd9e2bf3 hit); proxy 26097; blade
+  ~336 GiB (extract-r2 ate ~123 GiB/8h of deep stores — track disk growth);
+  RSS plateau 80.5 G / swap 0 (no reclaim dip observed past grace — budget the
+  plateau).
 - **CONFIG FINALIZED 2026-11-09 (operator):** these four values are now the
   SCRIPT DEFAULTS (`V41_CTX=524288`, `V41_KV_SIZE=262144`=256 GiB,
   `DSPARK_EXACT=0` default, `DS4_DSPARK_TOOLLESS_NOEXACT` + `DS4_DSPARK_STATS`
@@ -464,6 +473,14 @@ post-warm: ~160 embed-cache hits / 0 re-encodes, 30-image history turns.
     noexact@1.0 twin; family-level pairing only; true A/B needs same task on
     both lanes. PRIZE PASSES TO PATH (next task, same watch oc1): the 250k+
     deep-band exact number vs R3 twins.
+    0.8-TEMP QUESTION ANSWERED 09:2x (operator OK'd for-now-1.0): framing banked
+    — exact@1.0's "punishment" IS the price of fidelity (noexact's extra speed
+    = greedy-sharpening artifact, proven by the flat-accept result); DO NOT
+    change temp mid-suite (destroys 1109 pairing + confounds the depth-linked
+    loop study); no noexact twin exists at 0.7/0.8, so the right deferred study
+    is PAIRED: same task x both lanes x 0.8, back-to-back (ocaml is the cheap
+    re-run candidate). Shipping-lane decision unaffected: noexact@default stays
+    finalized; exact opt-in per run.
     detection (semantic cycles, varying lengths) — identical-length signature
     is a 0.3 artifact, don't wait for it.
     ---- original plan body ----
@@ -506,8 +523,11 @@ post-warm: ~160 embed-cache hits / 0 re-encodes, 30-image history turns.
 
 ## 8. Cold-session primer
 
-`./ds4-server.sh status` should show the all-spec 512k lane (PID 26079 at
-1110 10:16, or newer). Post-finalization `./ds4-server.sh start-v41-dspark` alone
+`./ds4-server.sh status` should show the all-spec 512k lane (PID 40559 at
+1110 20:15, or newer — check `ps -o command= -p $(pgrep -x ds4-server) |
+grep -c mtp-exact-sampling`: 1=EXACT study mode, 0=finalized noexact lane;
+plain `restart-v41-dspark` = revert to noexact defaults). Post-finalization
+`./ds4-server.sh start-v41-dspark` alone
 boots the validated lane (§4). Invariants:
 decode 19-23 t/s flat at ANY session age is the fixed behavior — if decay
 returns, `DS4_METAL_CB_TIMES=1` list-growth check FIRST (everything else is
@@ -529,4 +549,13 @@ the doom/merge/video family preamble, not universal.) (c) MEGATURN class: machin
 turns (dumps) run ~96.5% accept / ~40 t/s and skew band-accept (it attaches at
 request-END pos — within-turn avg= is the position-true evidence); two
 consecutive 64k finish=length messages kill the harbor/termbench harness while
-the engine stays error-free.
+the engine stays error-free. (d) SAMPLER-MODE READ from accept levels (all
+validated 1110-1111): exact@0.3 rides sharp-target overlap at 88-91%;
+exact@1.0 sits 65-71% and FLAT in depth (it cannot ride repetition); noexact
+bands 66-77% WITH a rise-with-depth that is itself a greedy-match artifact —
+decode cost of exact@1.0 = 2-3.5 t/s vs family twins (that is fidelity price,
+not inefficiency). (e) LOOP DETECTION: identical-length completions are a
+LOW-TEMP signature only (0.3: 4x exactly-17,123); at 1.0 expect semantic
+cycles with varying lengths — detect by content repetition, never count
+equality. Loops so far depth-linked (~256k+ onset), sampler-independent
+(falsified on exact), task/harbor-side.
