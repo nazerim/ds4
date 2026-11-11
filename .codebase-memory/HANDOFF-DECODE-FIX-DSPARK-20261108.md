@@ -517,6 +517,19 @@ post-warm: ~160 embed-cache hits / 0 re-encodes, 30-image history turns.
     (cold ctx=0..~5.7k TOOLS); accept curve vs depth compared ONLY within
     this phase (0.8 changes the distribution). Loop detector: content
     repetition (0.8 is mid-temp — equal-length partially unreliable).
+    GATE 1' RESULT 12:40 @ depth 22k: weighted accept 67.3% (10 turns p>=200,
+    59-83) = INSIDE the 1.0 zone, not the predicted 75-80. DESIGN CORRECTION:
+    the accept-level discriminator has NO RESOLUTION in 0.8<->1.0 (steep only
+    below ~0.6); corroborated structurally — morning PATH@1.0 had 83.3% @
+    ctx 13,715/294-tok, this leg 81.8% @ ctx 13,248/401-tok (~1 pt apart).
+    If 0.8 applied (operator-stated; engine log cannot confirm temp — harbor
+    payload is ground truth): EXACT@0.8 IS FREE at engine level — accept, dec
+    (18.5 vs 17.8 in-band) and tok/verify indistinguishable from 1.0, so the
+    fidelity-price verdict transfers unchanged and 0.8 is a pure agent-side
+    diversity knob. CHAIN CONTROL (first documented in-series re-run reuse):
+    ping 632 full disk-hit 47.7 ms; preamble 5,493/5,688 hit @14.6 ms + 195
+    tail prefill — re-run of same task on same engine forks at the harness
+    variable section, cold-prefill cost avoided; 0 errors, ladder clean.
     OCAML CLOSED 09:18: 62 reqs / 0 err / clean stop end / 51.4 min / depth
     92,546 / weighted accept 67.2 / tok/verify 3.26 / dec 18.4-19.2 FLAT in
     depth (bands: 66.8/71.5/65.8 accept). KEY RESULT: no rise-with-depth —
