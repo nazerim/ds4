@@ -462,6 +462,15 @@ post-warm: ~160 embed-cache hits / 0 re-encodes, 30-image history turns.
     07:52:48 disconnect-retry absorbed cleanly (bookkeeping fix proven in
     anger). Depth 54k, oc1 req=21. REAL PRIZE OPEN: deep-band exact-vs-noexact
     compare at 250k+ (twin = R3 bands 66-77) if ocaml runs that far.
+    PATH OPENED 09:27:17 (same oc1 capture; split marker = live=92552->prompt=632
+    miss + 576 MiB/210 ms evict-store of ocaml's chain). GATE1 PASSED on PATH
+    at 09:38: weighted accept 69.2% (11 turns p>=200, range 63-83) — inside
+    60-75 band, temp 1.0 re-confirmed on a second task. CORRECTION to ocaml
+    gate-3 note: cold-prefill final avg was 210 t/s/26.6 s at the 100% line
+    (270 was the 98% milestone); PATH twin = 184 t/s/31.0 s on 5,688 tok —
+    same tail-decay class, control holds. 1 disconnect absorbed, 0 errors.
+    Prize watch: PATH at ~28k/09:38 and climbing — background tripwire armed
+    at 240k (snap maxctx >92,552 requires PATH itself to clear it).
     OCAML CLOSED 09:18: 62 reqs / 0 err / clean stop end / 51.4 min / depth
     92,546 / weighted accept 67.2 / tok/verify 3.26 / dec 18.4-19.2 FLAT in
     depth (bands: 66.8/71.5/65.8 accept). KEY RESULT: no rise-with-depth —
