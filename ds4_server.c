@@ -11120,6 +11120,17 @@ struct server {
     int mixed_prefill_quantum;
     int idle_prefill_quantum;   /* V4.1: the engine's prefill cap, wide chunks while nothing generates */
     int last_prefill_slot;
+    /* Prefill executor-hold observability.  A context load holds the executor
+     * once per scheduling slice, and until now a multi-second hold left no
+     * direct trace: a 590 s decode blackout was visible only by inferring it
+     * from neighbouring chunk lines.  These measure the hold itself, so a dip
+     * can be attributed to whoever owned the executor.  Written and read under
+     * inference_mu, which the holder owns for the whole hold. */
+    double prefill_hold_t0;        /* now_sec() at acquisition, 0 = not held */
+    double prefill_hold_total_sec; /* summed over the process lifetime */
+    double prefill_hold_max_sec;   /* worst single hold */
+    uint64_t prefill_hold_count;
+    double prefill_hold_warn_sec;  /* log a WARNING at or above this hold */
     pthread_mutex_t mu;
     pthread_cond_t cv;
     pthread_cond_t clients_cv;
@@ -14486,6 +14497,7 @@ static bool server_prefill_enter(server *s, server_slot *slot) {
             pthread_mutex_unlock(&s->inference_mu);
             return false;
         }
+        s->prefill_hold_t0 = now_sec();
         return true;
     }
 
@@ -14508,11 +14520,34 @@ static bool server_prefill_enter(server *s, server_slot *slot) {
     s->model_busy = true;
     pthread_mutex_unlock(&s->model_mu);
     pthread_mutex_lock(&s->inference_mu);
+    s->prefill_hold_t0 = now_sec();
     return true;
 }
 
-static void server_prefill_leave(server *s) {
+/* Release one executor hold and account for how long it lasted.  Entered with
+ * inference_mu still owned, which is what makes the counters safe without a
+ * lock of their own.  The remaining arguments are for attribution: a hold that
+ * starves a decoder is only diagnosable if the log says what was being built
+ * and how much of the prompt was still to come. */
+static void server_prefill_leave(server *s, server_slot *slot, int from_tokens,
+                                 int to_tokens, int prompt_len, int quantum) {
     if (!s) return;
+    const double t0 = s->prefill_hold_t0;
+    s->prefill_hold_t0 = 0.0;
+    if (t0 > 0.0) {
+        const double held = now_sec() - t0;
+        s->prefill_hold_count++;
+        s->prefill_hold_total_sec += held;
+        if (held > s->prefill_hold_max_sec) s->prefill_hold_max_sec = held;
+        if (s->prefill_hold_warn_sec > 0.0 && held >= s->prefill_hold_warn_sec) {
+            server_log(DS4_LOG_WARNING,
+                       "ds4-server: prefill hold slot=%d %.2fs tokens=%d..%d remaining=%d quantum=%d (holds=%llu total=%.1fs max=%.2fs)",
+                       slot ? slot->id : -1, held, from_tokens, to_tokens,
+                       prompt_len > to_tokens ? prompt_len - to_tokens : 0,
+                       quantum, (unsigned long long)s->prefill_hold_count,
+                       s->prefill_hold_total_sec, s->prefill_hold_max_sec);
+        }
+    }
     pthread_mutex_unlock(&s->inference_mu);
     if (!s->batched_mode) return;
     pthread_mutex_lock(&s->model_mu);
@@ -14550,7 +14585,7 @@ static int server_session_sync(server *s, server_slot *slot,
     if (!s->batched_mode) {
         if (!server_prefill_enter(s, slot)) return DS4_SESSION_SYNC_INTERRUPTED;
         int rc = ds4_session_sync(slot->session, prompt, err, errlen);
-        server_prefill_leave(s);
+        server_prefill_leave(s, slot, 0, prompt->len, prompt->len, 0);
         return rc;
     }
 
@@ -14570,10 +14605,11 @@ static int server_session_sync(server *s, server_slot *slot,
 
         ds4_tokens prefix = *prompt;
         prefix.len = target;
+        const int hold_from = done;
         if (!server_prefill_enter(s, slot)) return DS4_SESSION_SYNC_INTERRUPTED;
         int rc = ds4_session_sync(slot->session, &prefix, err, errlen);
         if (rc == 0) done = ds4_session_pos(slot->session);
-        server_prefill_leave(s);
+        server_prefill_leave(s, slot, hold_from, target, prompt->len, quantum);
         called = true;
         if (rc != 0) return rc;
         if (done >= prompt->len) return 0;
@@ -14618,7 +14654,7 @@ static int server_session_sync_multimodal(server *s, server_slot *slot,
         int rc = ds4_session_sync_multimodal(slot->session, prompt,
                                              images, image_count,
                                              err, errlen);
-        server_prefill_leave(s);
+        server_prefill_leave(s, slot, 0, prompt->len, prompt->len, 0);
         return rc;
     }
 
@@ -14653,12 +14689,13 @@ static int server_session_sync_multimodal(server *s, server_slot *slot,
         }
         ds4_tokens prefix = *prompt;
         prefix.len = target;
+        const int hold_from = done;
         if (!server_prefill_enter(s, slot)) return DS4_SESSION_SYNC_INTERRUPTED;
         int rc = ds4_session_sync_multimodal(slot->session, &prefix,
                                              images, prefix_images,
                                              err, errlen);
         if (rc == 0) done = ds4_session_pos(slot->session);
-        server_prefill_leave(s);
+        server_prefill_leave(s, slot, hold_from, target, prompt->len, quantum);
         called = true;
         if (rc != 0) return rc;
         if (done >= prompt->len) return 0;
@@ -18726,6 +18763,18 @@ int main(int argc, char **argv) {
     s.qwen4_batch_mtp = cfg.engine.backend == DS4_BACKEND_METAL &&
                        ds4_engine_is_qwen4(engine) && ds4_engine_mtp_draft_tokens(engine) > 1;
     s.mixed_prefill_quantum = cfg.mixed_prefill_quantum;
+    /* Executor-hold warning threshold.  A scheduling slice that costs a decoder
+     * longer than this is worth a line of its own; below it the per-chunk
+     * progress logs already tell the story.  0 silences the warning - the
+     * lifetime counters keep running either way. */
+    s.prefill_hold_warn_sec = 2.0;
+    const char *hold_warn = getenv("DS4_PREFILL_HOLD_WARN_SEC");
+    if (hold_warn && hold_warn[0]) {
+        char *hold_end = NULL;
+        const double v = strtod(hold_warn, &hold_end);
+        if (hold_end != hold_warn && *hold_end == '\0' && v >= 0.0)
+            s.prefill_hold_warn_sec = v;
+    }
     s.last_prefill_slot = slot_count - 1;
     s.default_tokens = cfg.default_tokens;
     s.disable_exact_dsml_tool_replay = cfg.disable_exact_dsml_tool_replay;
