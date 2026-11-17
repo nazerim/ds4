@@ -176,11 +176,18 @@ consuming more I/O than the lock ever did. Sequence:
 5. **Loader `unlink` without the `children > 0` check** (4 raw unlink sites) —
    strands chain descendants; currently latent (1 orphan, 0.57 GiB, and 0
    `delta chain broken` lines so far).
-6. **S1 — split the store at the staging boundary**, releasing `inference_mu`
-   after staging and keeping `kv_mu` for format work, **never re-acquiring**
-   (re-acquiring risks ABBA against every load, since the order today is
-   `inference_mu → kv_mu`). Must skip the release when `prefill_hold_t0 > 0`
-   (§2b.2). Precedent: `.codebase-memory/adr.md:317`.
+6. **[DEPRIORITISED — see §9] S1 — split the store at the staging boundary.**
+   Superseded by measurement: every continued store is nested inside a prefill
+   hold on a recursive mutex, so the release frees nothing, and stores are 1.5%
+   of hold time. Revisit only if a real-traffic re-measure (with evict storms)
+   contradicts §9. If it is ever done: release `inference_mu` after staging, keep
+   `kv_mu` for format work, **never re-acquire** (re-acquiring risks ABBA against
+   every load, since the order today is `inference_mu → kv_mu`), and skip the
+   release when `prefill_hold_t0 > 0` or the recursive mutex leaks.
+   Precedent: `.codebase-memory/adr.md:317`.
+6b. **[NOW THE PRIORITY] Load path** — the file read outside `inference_mu`,
+   re-taking it only for the session swap; then break the back-to-back evict
+   store+load (`15928`→`15931`, 2-try loop).
 7. **`fsync` before `rename` — last, deliberately.** There is none today
    (`fsync` appears only at `ds4_agent.c:7193`), so a power loss can leave a
    renamed file whose payload is zeroed/stale while magic, size, token count and
@@ -257,3 +264,46 @@ mutation tests only; a natural decode-advanced frontier in real traffic settles 
 Other health: 0 errors; decode mean 65.0 t/s (thin sample); KV dir still pinned
 at 256 G, the ~89 GiB of pre-fix doomed files draining only as the loader meets
 them or eviction retires them.
+
+## 9. S1 (store split) is deprioritised — evidence, not preference
+
+Two independent reasons, both measured after 2b06dc7 was live:
+
+1. **It cannot work where it matters.** Both continued-store call sites are
+   inside `server_progress_cb` (`ds4_server.c:15073`, `15114`), which the engine
+   calls from within `ds4_session_sync` — so *every* rung store is nested inside
+   a prefill hold. `inference_mu` is `PTHREAD_MUTEX_RECURSIVE` (§2b.2), so a
+   "release after staging" there only decrements the nesting count and frees
+   nothing. The audit's own guard ("skip the release when `prefill_hold_t0 > 0`")
+   therefore applies to essentially all continued stores, i.e. S1 as designed
+   delivers ~nothing for the dominant store class.
+2. **The prize is small anyway.** Holds are 2048-token chunks measured at
+   522-890 t/s, so a hold is prefill compute, not disk: 23 stores contributed
+   **2.44 s against 163.0 s of total hold = 1.5%**. Even if the unmeasured
+   pre-`save=` stages (evict scan, two `kv_cache_refresh` calls, parent-chain
+   walk) tripled that, S1 caps out around 3-5% of hold time. Not worth
+   durability-path surgery.
+
+Note the trap in the historical aggregate: 238.3 s of store tail vs 96.3 s of
+load tail looks like stores dominate, but that traffic predates FIX 2, which
+removes ~341 of every 342 anchor stores, and FIX 1, which removes 41
+discard→re-store cycles. Post-fix is the only interpretable baseline, and it is
+the 1.5% above.
+
+**What still stands, and is now the priority instead:**
+
+- **The load path**, not the store path. Loads are fully under `inference_mu`
+  (`13198`→`13205`), 3-5x longer per event (p50 821 ms, p90 2.47 s, max 4.89 s),
+  and the file *read* — unlike the session swap that follows it — plausibly does
+  not need the lock at all.
+- **The back-to-back evict store+load** (`15928`→`15931`, with a 2-try reload
+  loop): up to ~1.16 s + 4.89 s of contiguous blackout in one request. Production
+  saw 93 evictions in two days; my synthetic load did not reproduce that regime,
+  so this is the one place where the 1.5% figure should not be trusted.
+- **`fsync` before rename** — a correctness gap, independent of any locking work,
+  and the only finding here that can serve wrong output.
+
+Caveat on generality: the 1.5% comes from synthetic multi-turn prefills with 0
+evict storms. Before closing S1 permanently, re-measure under real agent traffic
+(compaction-driven evictions + cold reloads), where store+load land back-to-back
+under the same lock.
