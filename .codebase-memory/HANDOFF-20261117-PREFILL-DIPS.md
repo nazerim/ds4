@@ -223,3 +223,37 @@ how we tell "fixed the KV cause" from "fixed nothing".
 - `DS4_VISION_KEEP_IMAGES=256` at 512k: `/Volumes/FireCuda520` 83% full (331 GiB
   free), KV dir at its 256 GiB budget.
 - Upstream still frozen at `b3f5018` (Nov 3); no new server-PR movement.
+
+## 8. First executor-hold baseline (2026-11-17 13:21-13:27, PID 69332)
+
+Synthetic load after the 2b06dc7 restart: four multi-turn prefills of 55k-97k
+tokens, `quantum=2048` idle / 512 mixed, box otherwise idle.
+
+```
+prefill hold slot=0 2.62s tokens=30720..32768 remaining=22490 quantum=2048
+prefill hold slot=0 2.49s tokens=77824..79872 remaining=10595 quantum=2048
+   (holds=105  total=163.0s  max=3.92s)
+```
+
+- **Mean hold 1.55 s, worst 3.92 s** against a store `save=` of 104-175 ms — so
+  the executor is held **10-20x longer than the measured store tail**, which is
+  exactly the §2b.1 blind spot. 163.0 s of hold in ~6 minutes of load.
+- This is the "before" number for S1. Judge S1 on total hold seconds and worst
+  hold at comparable token volume, not on `save=`.
+
+**FIX 2 confirmed live:** 3 anchor stores in this window vs **342** in the
+historical episode, each firing once at the live length once its target was
+reached (`divergence anchor stored tokens=67584 (target 66993)`).
+
+**FIX 1 only partly confirmed live:** 23 stores, all `trimmed=0`, zero discards,
+and 4 genuine disk loads including an off-grid one (`kv cache hit text
+tokens=67584 ... chain=9 load=231.1 ms`, serving 74.7% of a 90,467-token prompt)
+— so stored payloads really do round-trip. But **no off-grid `continued` rung
+store occurred**: every rung crossing landed grid-aligned because cold prefill
+advances in 8192-aligned 2048-token chunks, and pre-fix traffic produced
+`trimmed=0` in that case too. That specific path stays proven by code logic plus
+mutation tests only; a natural decode-advanced frontier in real traffic settles it.
+
+Other health: 0 errors; decode mean 65.0 t/s (thin sample); KV dir still pinned
+at 256 G, the ~89 GiB of pre-fix doomed files draining only as the loader meets
+them or eviction retires them.
