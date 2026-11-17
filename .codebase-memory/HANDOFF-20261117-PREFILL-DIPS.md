@@ -173,9 +173,22 @@ consuming more I/O than the lock ever did. Sequence:
    otherwise the suite keeps encoding the wrong contract.
 4. **Baseline the `cbc4db6` hold telemetry on real traffic** — needed because
    `save=` is only the tail (§2b.1), so no under-lock cost is known yet.
-5. **Loader `unlink` without the `children > 0` check** (4 raw unlink sites) —
-   strands chain descendants; currently latent (1 orphan, 0.57 GiB, and 0
-   `delta chain broken` lines so far).
+5. **[RESOLVED f90433f — no guard change needed] Loader `unlink` without the
+   `children > 0` check.** Enumerating every unlink site inverted the finding:
+   `kv_cache_unlink_entry`'s deferral exists to protect a file that is still
+   *loadable* but has dependents, whereas the loader reaches its raw unlinks only
+   for a file the chain walk just proved unreachable -- and `path` there is the
+   **candidate, the child end of the chain**, not the missing ancestor. `children`
+   is a refcount re-derived from a directory scan by `kv_cache_refresh()`, which
+   runs at the top of every load and every eviction pass, so a raw unlink cannot
+   strand a parent. The measured orphan was **a symptom of FIX 1**: parent
+   `25c52da8` stored `tokens=81920 trimmed=1 reason=continued`, a child chained off
+   it, then the loader discarded it -- deleting it was correct. Routing the loader
+   through the helper would have *worsened* things (keeps a permanently useless
+   file, re-invalidates the live session on every future load of that prefix, and
+   `memmove`s `kc->entry` while `try_load_text` retries keyed on entry indices).
+   Shipped as comments at the five sites + two model-free tests; zero production
+   statements changed (verified by comment-stripped diff and `nm`).
 6. **[DEPRIORITISED — see §9] S1 — split the store at the staging boundary.**
    Superseded by measurement: every continued store is nested inside a prefill
    hold on a recursive mutex, so the release frees nothing, and stores are 1.5%
@@ -185,22 +198,38 @@ consuming more I/O than the lock ever did. Sequence:
    every load, since the order today is `inference_mu → kv_mu`), and skip the
    release when `prefill_hold_t0 > 0` or the recursive mutex leaks.
    Precedent: `.codebase-memory/adr.md:317`.
-6b. **[NOW THE PRIORITY] Load path** — the file read outside `inference_mu`,
-   re-taking it only for the session swap; then break the back-to-back evict
-   store+load (`15928`→`15931`, 2-try loop).
-7. **`fsync` before `rename` — last, deliberately.** There is none today
-   (`fsync` appears only at `ds4_agent.c:7193`), so a power loss can leave a
-   renamed file whose payload is zeroed/stale while magic, size, token count and
-   tokenizer fingerprint all still pass — the only path found that can serve
-   *wrong output* rather than a cache miss. It goes last so its cost lands
-   outside the executor lock, not inside it.
+6b. **[ALSO A DEAD END] Load path.** Promoted to replace S1, then killed by the
+    same standard: `ds4_session_load_payload_span(session, fp, ...)`
+    (`ds4_kvstore.c:3831`/`3856`) streams rows **from the file into the session**,
+    so the disk read *is* the mutation -- there is no "read outside, swap inside"
+    seam for the payload. Only `kv_cache_refresh()` and the candidate header
+    probes could move out, and p50 821 ms for a ~380 MiB payload is the stream
+    (~463 MB/s), not the probe. The back-to-back evict store+load (`15928`→`15931`)
+    remains the worst single stall in principle and is **unmeasured under real
+    traffic** -- that is the one open item here, not a code change.
+7. **[IN PROGRESS] `fsync` before `rename`.** There is none today (`fsync` appears
+   only at `ds4_agent.c:7193`) and **the payload has no integrity check at all**:
+   the `sha` in the store log and the "hash/prefix mismatch" comment are the sha1
+   of the *prompt text* (also the filename) -- nothing checksums the KV rows. So a
+   renamed file whose bytes never left the page cache loads stale/zeroed rows that
+   still pass magic, size, token count and tokenizer fingerprint. This is the only
+   path found that can serve *wrong output* rather than a cache miss.
+   The earlier "do it last so its cost lands outside the lock" rationale is now
+   **void** -- S1 is dead, so the barrier lands inside the lock; measured cost is
+   ~2.4 ms per store against a 104-175 ms tail, which is why it is still worth it.
+   `F_FULLFSYNC` (the media-forcing barrier) returned EFAULT from a Python probe on
+   *both* internal and external APFS, i.e. a calling-convention artifact, not
+   ENOTSUP -- being settled in C, and its absence would mean this closes the panic
+   window and the device-cache window but not a drive with volatile cache.
 
-Left undone on purpose: steps 4-7 are lock-ordering and durability surgery on a
-production engine serving a live 512k session, arrived at via a research chain
-that included fabricated evidence, and cannot be validated without a restart that
-generates real traffic. Each needs sign-off. Before shipping, A/B with the hold
-counters and re-confirm that the ~35 non-KV-adjacent dips do *not* move — that is
-how we tell "fixed the KV cause" from "fixed nothing".
+**Status as of the unattended run later the same day:** steps 1-3 shipped
+(`2b06dc7`, `f90433f`), 4 was banked from live load (§8), 6 and 6b were killed by
+measurement (§9, above), and 7 is in progress. What genuinely remains undone is
+not code: re-measure under **real agent traffic** -- compaction-driven evictions
+and cold reloads, the one regime my synthetic load never produced -- to confirm
+the 1.5% store-tail figure and to settle whether the back-to-back evict
+store+load is a real stall. And re-confirm that the ~35 non-KV-adjacent dips do
+*not* move, which is how we tell "fixed the KV cause" from "fixed nothing".
 
 ## 7. Open
 
