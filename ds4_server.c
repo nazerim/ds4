@@ -19036,6 +19036,62 @@ static void test_mixed_prefill_quantum_option(void) {
     TEST_ASSERT(server_prefill_quantum_for(&s, true) == 128);
 }
 
+/* The prefill-hold counters are the only direct trace a multi-second executor
+ * hold leaves; before them a decode blackout was visible only by inferring it
+ * from neighbouring per-chunk progress lines, and two analyses of the same log
+ * disagreed about the cause partly for that reason.  Non-batched mode keeps
+ * this to the single lock the accounting relies on: the holder owns
+ * inference_mu for the whole hold, which is why the counters need none of their
+ * own. */
+static void test_prefill_hold_accounting(void) {
+    server s = {0};
+    server_slot slot = {.id = 3};
+    pthread_mutex_init(&s.inference_mu, NULL);
+
+    /* Releasing a slice that never acquired the executor stays inert. */
+    pthread_mutex_lock(&s.inference_mu);
+    server_prefill_leave(&s, &slot, 0, 512, 512, 512);
+    TEST_ASSERT(s.prefill_hold_count == 0);
+    TEST_ASSERT(s.prefill_hold_total_sec == 0.0);
+    TEST_ASSERT(s.prefill_hold_max_sec == 0.0);
+
+    /* A hold is counted exactly once and clears its own start stamp, so a
+     * double release cannot inflate the totals.  The warning threshold is 0:
+     * the counters are under test here, not the log line.
+     *
+     * Bounds are deliberately wide, not tight: t0 is seeded as now - N and then
+     * compared against a duration derived from the same N, so an assertion at N
+     * itself sits exactly on the rounding boundary and flips run to run (it did
+     * when first written as >= 1.5 against a 1.5 seed).  ~10% margins keep the
+     * test deterministic while still failing on the regressions that matter: a
+     * hold not counted, counted twice, or not accumulating. */
+    s.prefill_hold_warn_sec = 0.0;
+    pthread_mutex_lock(&s.inference_mu);
+    s.prefill_hold_t0 = now_sec() - 3.0;
+    server_prefill_leave(&s, &slot, 1024, 1536, 40000, 512);
+    TEST_ASSERT(s.prefill_hold_count == 1);
+    TEST_ASSERT(s.prefill_hold_t0 == 0.0);
+    TEST_ASSERT(s.prefill_hold_total_sec >= 2.7);
+    TEST_ASSERT(s.prefill_hold_max_sec >= 2.7);
+
+    /* Releasing again with no acquisition left behind adds nothing. */
+    pthread_mutex_lock(&s.inference_mu);
+    server_prefill_leave(&s, &slot, 1536, 2048, 40000, 512);
+    TEST_ASSERT(s.prefill_hold_count == 1);
+    TEST_ASSERT(s.prefill_hold_t0 == 0.0);
+
+    /* The worst case keeps the longest hold, not the most recent one, while the
+     * total still accumulates. */
+    pthread_mutex_lock(&s.inference_mu);
+    s.prefill_hold_t0 = now_sec() - 0.1;
+    server_prefill_leave(&s, &slot, 2048, 2560, 40000, 512);
+    TEST_ASSERT(s.prefill_hold_count == 2);
+    TEST_ASSERT(s.prefill_hold_total_sec >= 2.7);
+    TEST_ASSERT(s.prefill_hold_max_sec >= 2.7);
+
+    pthread_mutex_destroy(&s.inference_mu);
+}
+
 /* Reuse-aware slot routing: the probe must recognize every way a request
  * can reuse a slot's live state, and the router must steer requests that can
  * reuse nothing away from resident checkpoints. */
@@ -28788,6 +28844,7 @@ static void ds4_server_unit_tests_run(void) {
     test_server_image_embedding_cache();
     test_batched_prefill_round_robin();
     test_mixed_prefill_quantum_option();
+    test_prefill_hold_accounting();
     test_multimodal_prefill_resume_frontier();
     test_multimodal_appended_image_reuses_live_frontier();
     test_batched_live_continuation_slot_binding();
