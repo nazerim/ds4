@@ -1,4 +1,12 @@
 # RESUME — merge campaign closeout (20261106 ~18:15) — READ FIRST
+> **Doc-rot warning (2026-11-17):** the `$TMP/ds4-live-env.snapshot.txt` and
+> `ds4-live-argv.txt` files referenced in this document **no longer exist** (session
+> temp was cleaned). Do not follow those steps as written. The capture environment is
+> now built into the launcher itself -- `./ds4-server.sh restart-collect`, driven by
+> `COLLECT_*` defaults (`DS4_TRAIN_DUMP`, `DS4_TD_PARITY`, `DS4_TD_PARITY_MAX`,
+> `DSPARK_EXACT`, `DS4_REWIND_RESUME`) at `ds4-server.sh:222-233` and `arm_collect_env()`; a plain
+> `restart-qwen` runs with zero capture. Catalogued in
+> `.codebase-memory/DOC-ROT-20261117.md`.
 Authoritative live state for any session starting now. Night-history detail
 lives in the docs listed under POINTERS; this file is the map.
 

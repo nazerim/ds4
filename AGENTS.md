@@ -61,5 +61,7 @@ inference engine in C with Metal, CUDA, and ROCm backends. See `AGENT.md`
   no rule — its `.c` was deliberately removed in `dd1a02a` when upstream stochastic
   decoding superseded the fork's rejection-sampling verifier — so if it ever
   reappears, delete it rather than trying to rebuild it.
+- Dated docs rot: before following a file path in a workstream doc, check
+  `.codebase-memory/DOC-ROT-20261117.md` (regenerate: `doc-rot-scan.py`).
 - Do not commit secrets (see `auth_proxy.py` usage docs; credentials go in
   environment variables only).
