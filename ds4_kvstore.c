@@ -12,6 +12,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <math.h>
 #include <stdarg.h>
@@ -3382,6 +3383,50 @@ bool ds4_kvstore_store_live_prefix_text(ds4_kvstore *kc,
                                                save_err, sizeof(save_err)) == 0 &&
               kv_trailer_write(hooks, fp, text, &trailer_bytes) &&
               fflush(fp) == 0;
+    /* Durability barrier: force the payload to stable storage BEFORE the rename
+     * below makes the file visible.  Without it a crash can persist the directory
+     * entry while the KV rows are still only in the page cache, so the checkpoint
+     * comes back with stale/zeroed rows that still pass the header, text-hash,
+     * byte-prefix and tokenizer-fingerprint checks -- the one cache path that can
+     * yield wrong model output instead of a miss.  The bytes reach the kernel
+     * through fp's stdio buffer (payload copied via fwrite), so fflush above plus
+     * the barriers here are the complete path, and they must run before fclose.
+     *
+     * Two calls, because they stop at different layers: fsync() hands the file's
+     * dirty pages to the device, which is all a panic needs, but the drive may
+     * still be holding them in a volatile write cache; F_FULLFSYNC is the only
+     * portable-to-macOS way to push past that, and power loss is the threat this
+     * exists to close.  Measured on the KV volume at real store size (640 MiB):
+     * write ~153-165 ms, fsync ~2.8-6.4 ms, F_FULLFSYNC after fsync only ~1.7 ms
+     * because the writes are already drained -- about 1% of a store and 0.1% of a
+     * 1.55 s executor hold.  That asymmetry is the argument: if a bridge ignores
+     * the flush we pay 1.7 ms for nothing, and if it honours it we get the only
+     * power-loss protection available.  Where the ioctl is unsupported the store
+     * still stands on fsync alone, so an ENOTSUP/EINVAL never costs a checkpoint.
+     *
+     * A barrier failure is just a failed store: ok=false, so the rename is
+     * skipped and the tmp is unlinked below -- never a visible-but-broken entry,
+     * never a leak. */
+#if defined(__APPLE__) && !defined(F_FULLFSYNC)
+    /* Without this, a dropped <fcntl.h> makes the guard below evaluate to false
+     * and the media barrier vanish with no warning -- exactly what happened on
+     * the first cut of this code.  Fail the build instead of shipping a
+     * power-loss fix that never reaches the power. */
+#error "F_FULLFSYNC not visible: include <fcntl.h> or the durability barrier compiles out"
+#endif
+    if (ok) {
+        const double sync_t0 = kv_debug_enabled() ? kv_now_sec() : 0.0;
+        if (fsync(fileno(fp)) != 0) ok = false;
+#if defined(F_FULLFSYNC)
+        if (ok && fcntl(fileno(fp), F_FULLFSYNC) != 0 &&
+            errno != EINVAL && errno != ENOTSUP && errno != EOPNOTSUPP)
+            ok = false;
+#endif
+        if (kv_debug_enabled())
+            kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
+                    "%s: DBG store sync=%.1f ms tmp=%s", kv_log_name(kc),
+                    (kv_now_sec() - sync_t0) * 1000.0, tmp);
+    }
     int saved_errno = errno;
     if (fclose(fp) != 0) {
         if (!saved_errno) saved_errno = errno;
