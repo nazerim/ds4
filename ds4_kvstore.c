@@ -3418,9 +3418,18 @@ bool ds4_kvstore_store_live_prefix_text(ds4_kvstore *kc,
         const double sync_t0 = kv_debug_enabled() ? kv_now_sec() : 0.0;
         if (fsync(fileno(fp)) != 0) ok = false;
 #if defined(F_FULLFSYNC)
-        if (ok && fcntl(fileno(fp), F_FULLFSYNC) != 0 &&
-            errno != EINVAL && errno != ENOTSUP && errno != EOPNOTSUPP)
-            ok = false;
+        if (ok && fcntl(fileno(fp), F_FULLFSYNC) != 0) {
+            const int e = errno;
+            if (e != EINVAL && e != ENOTSUP && e != EOPNOTSUPP) {
+                ok = false;
+            } else {
+                /* Tolerated, so clear it: a rejected ioctl must not be reported
+                 * later as the reason an fclose or rename appeared to fail.  Found
+                 * while reviewing the upstream port of this barrier -- the pattern
+                 * here predates it. */
+                errno = 0;
+            }
+        }
 #endif
         if (kv_debug_enabled())
             kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
