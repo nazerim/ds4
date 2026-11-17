@@ -301,6 +301,15 @@ because `<fcntl.h>` was missing, with a clean warning-free build. `nm` for
 recorded in the code comment: a clean build is not evidence a preprocessor-guarded
 path exists.
 
+## 11. Evidence archive
+
+Working artifacts, agent reports and reproduction drivers for this investigation are
+in `.codebase-memory/20261117-kv/` — read **`INDEX.md` first**: it rates each report
+for trust, lists which recommendations were later disproved, and enumerates the
+figures from this chain that were fabricated or retracted. They were originally in
+the session temp dir, which has already destroyed evidence once (two files still
+cited by `.codebase-memory` docs no longer exist there).
+
 ## 8. First executor-hold baseline (2026-11-17 13:21-13:27, PID 69332)
 
 Synthetic load after the 2b06dc7 restart: four multi-turn prefills of 55k-97k
