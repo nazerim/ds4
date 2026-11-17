@@ -1452,6 +1452,31 @@ against ~1200 t/s idle). Shortening that window matters more than the interleavi
 frequency inside it. GLM-5.3 already floors this value at 1024 server-side, so 512 is
 well inside the supported range.
 
+**CORRECTION 2026-11-17 — the "Why" model above is wrong; do not re-tune on it.**
+The quantum is not a knob on interleaving *frequency*, it is the unit of executor
+**holdback**. One `ds4_session_sync()` call acquires `inference_mu` once and keeps it
+across every engine chunk inside the slice (the payload loop and the Qwen PLE prefetch
+join both run inside it, `ds4.c:80816-80846`; the server releases at
+`ds4_server.c:14612`), so a bigger slice means a LONGER uninterrupted stall for the
+decoding slot, not a less often interrupted one. Measured on the live lane with the
+`cbc4db6` hold telemetry: a 2048-token chunk held the executor **mean 1.55 s, worst
+3.92 s** at 522-890 t/s, and the store disk tail inside those holds was only **1.5%**
+of total hold seconds - i.e. a hold is prefill compute, so slice size buys a
+proportionally longer blackout.
+
+Two further reasons it is not a free dial: it is **not purely scheduling** - the
+quantum truncates the prefix handed to `ds4_session_sync`, which moves the engine's
+real chunk boundaries and therefore floating-point reduction order (`ds4.c:1059-1062`)
+and MTP prep boundaries; and on Qwen `idle_prefill_quantum` is never set (it is
+assigned only under `ds4_engine_is_deepseek41`), so the idle chunk falls back to the
+2048 floor and raising the mixed value to 2048 erases the mixed/idle distinction
+entirely rather than tuning it.
+
+History: raised to 2048 on 2026-11-17 for exactly the reasoning above, served **zero
+traffic**, and reverted to 512 in `1f9f3fa`. If you want to A/B it, the number to read
+is `prefill hold` from the log, not `save=` (which times only the tail of a store,
+starting at `ds4_kvstore.c:3301`).
+
 Confirm by watching decode t/s during a concurrent prefill, and whether the ladder
 rebuild (see .codebase-memory/OVERNIGHT-20260928.md 3h/3i) now lands rungs above the
 resume frontier instead of repeated siblings of one 131072-parented delta.

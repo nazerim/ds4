@@ -367,9 +367,10 @@ the 1.5% above.
   and the file *read* — unlike the session swap that follows it — plausibly does
   not need the lock at all.
 - **The back-to-back evict store+load** (`15928`→`15931`, with a 2-try reload
-  loop): up to ~1.16 s + 4.89 s of contiguous blackout in one request. Production
-  saw 93 evictions in two days; my synthetic load did not reproduce that regime,
-  so this is the one place where the 1.5% figure should not be trusted.
+  loop): up to ~1.16 s + 4.89 s of contiguous blackout in one request. Across all
+  retained qwen logs I counted **107 `evicting checkpoint` events / 18.92M tokens
+  dropped**, so the regime is real and frequent; my synthetic load did not
+  reproduce it, which is why the 1.5% figure should not be trusted outside it.
 - **`fsync` before rename** — a correctness gap, independent of any locking work,
   and the only finding here that can serve wrong output.
 

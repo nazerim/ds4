@@ -351,3 +351,168 @@ first replayed call — the 255k-token rebuild in the pi drift verdict.
 - A one-time render flip at deploy: checkpoints written before these commits whose
   text contains canonical-rendered calls stay unreachable past the first replayed
   call. The new lineage is stable across restarts.
+
+## ADR 2026-11-17 — a checkpoint's store length MUST equal the live session length
+
+### Status
+Accepted (implemented `2b06dc7`; library-side guard deliberately left permissive).
+
+### Context
+Payload staging always takes the whole live session — `ds4.c:66475`,
+`const uint32_t rows = (uint32_t)s->checkpoint.len;` — while the loader's terminal
+check requires the header to match it (`ds4_kvstore.c:3871`,
+`loaded_tokens->len == (int)hdr.tokens`). So any caller that stores at a length
+*shorter* than the live session writes a file that can never load. Continued stores
+did exactly that: they passed the snapped-down grid `target`.
+
+Measured cost over one server lifetime: 187 of 792 stores logged `trimmed != 0`
+(181 distinct files, mean 629 MiB) ≈ 89 GiB, ~35% of the 256 GiB budget, all
+write-only. 41 loader discards, **41/41 traceable to `trimmed != 0` files and none
+to a `trimmed == 0` file**; each discard cost a full payload read, an unlink, a
+live-session invalidation, a rewrite and a re-prefill.
+
+This is a repeat offence. The invariant is stated in a comment at
+`ds4_server.c:13118-13121`, is honoured by both divergence paths ("Store at the
+live length"), and `969bc97` (2026-08-08) fixed this exact class for divergence
+anchors while missing the continued path.
+
+### Decision
+Store at the live length. The companion watermark — `kv_cache_slot_note_store()` —
+records the **live length, not the rung**, because the field means "deepest length
+this session is durable at" (every other writer treats it that way). Ladder cadence
+is provably unchanged: with `L` recorded the next snapped target `B ≤ L` cannot
+re-fire, and `L < B + step` so the next boundary still fires when crossed.
+
+### Consequences
+- ~43% of store events removed in the measured window, and the whole
+  discard→re-store cycle eliminated.
+- The permissive guard at `ds4_kvstore.c:3146-3149` still accepts a short store
+  length, so a future caller can reintroduce the class. Tightening it needs a real
+  payload round-trip, which is not testable model-free (see below).
+- `ds4_kvstore_maybe_store_continued` still carries the
+  pre-fix code verbatim. Verified dormant: only its declaration
+  (`ds4_kvstore.h:360`), its definition, and a comment reference it — zero callers
+  tree-wide.
+- Pre-fix doomed files are not backfilled or swept; they drain only when the loader
+  meets them (which unlinks without a children check — correct, see the unlink
+  finding) or eviction retires them.
+- Why it survived three months: 52 `test_kv_*` functions and **none round-trips a
+  payload**; `test_kv_cache_continued_uses_aligned_frontiers` asserted the snap-down
+  target while saying nothing about the stored length, so the green suite encoded
+  the bug as intended behaviour. Fixed tests must pin behaviour at the production
+  call sites (`2b06dc7` adds a `DS4_SERVER_TEST` hook for exactly this) and be
+  proven by mutation, not by passing.
+
+## ADR 2026-11-17 — barrier the payload before the rename that makes it visible
+
+### Status
+Accepted (implemented `bf64327`).
+
+### Context
+`ds4_kvstore_store_live_prefix_text` wrote a temp file, `fflush`ed, closed and
+renamed it with **no barrier** — `fsync` appeared nowhere in the KV path. The
+payload also has **no integrity check of any kind**: the `sha` in the store log line
+and the loader's "hash/prefix mismatch" comment are the sha1 of the *prompt text*
+(which is also the filename), not a checksum over the rows. So an entry can be
+renamed into visibility while its rows are still only in the page cache, and come
+back carrying stale or zeroed rows that still pass magic, size, token count and the
+tokenizer fingerprint. That is the only path found in this investigation that can
+serve **wrong model output** rather than a cache miss.
+
+Note the threat is narrower than "a crash": a process crash or kernel panic is
+already covered, because the kernel flushes the page cache. Only loss of power (or
+a device that drops its volatile cache) creates the stale-payload case, which is
+what makes the choice of barrier the whole decision.
+
+### Decision
+`fflush` → `fsync(fileno)` → on Apple `fcntl(F_FULLFSYNC)`, all before
+`fclose`/`rename`. `fsync` alone stops at the device's write cache, so it does not
+close the power-loss case; `F_FULLFSYNC` is the only way past that layer and,
+measured, it is nearly free *after* an fsync because the writes are already drained.
+An unsupported ioctl (EINVAL/ENOTSUP) falls back to fsync rather than costing a
+checkpoint. A barrier failure is simply a failed store: rename skipped, tmp
+unlinked — never a visible-but-broken entry, never a leak.
+
+### Consequences
+- Cost measured on the KV volume at real store size: `store sync=` mean 4.05 ms
+  (max 4.40) across 6 live stores; ≈1% of a store tail (153-165 ms for 640 MiB) and
+  ≈0.26% of a 1.55 s executor hold.
+- **A compile-time `#error` was required.** Without `<fcntl.h>` the macro is
+  undefined, `#if defined(F_FULLFSYNC)` evaluates false, and the media barrier
+  silently compiles out — zero warnings, green suite. That is exactly what the
+  first cut did; only `nm` looking for `_fcntl` caught it. A clean build is not
+  evidence that a preprocessor-guarded path exists.
+- No repo test exercises this path: the store function needs a live engine and
+  session, and the suite's fixtures write files directly and bypass it. Stated
+  rather than stubbed. Actual crash durability would need fault injection.
+- The directory entry is deliberately not fsynced after rename: losing a rename
+  loses a checkpoint, which is a safe miss.
+- Still open, separate defect: the trailer rewrite truncates an existing file in
+  place (atomicity, not durability — should be write-then-rename).
+- `F_FULLFSYNC` returns success on this external NVMe bridge but may be a no-op
+  there. The asymmetry argues for keeping it: 1.7 ms if ignored, the only real
+  protection if honoured.
+
+## ADR 2026-11-17 — executor holds are prefill compute; two proposed features closed
+
+### Status
+Accepted — decision **not to build**. Recorded so the analysis is not redone.
+
+### Context
+The 3-4 tok/s decode dips during long context loads were explained three different
+ways in one day: prefill interleaving, KV disk I/O under `inference_mu`, and
+context depth/memory pressure. Re-measured against the **base rate** of the other
+46,435 decode samples rather than raw coincidence: prefill proximity **1.15x** (86.6%
+of *healthy* samples also sit near a prefill line, so "100% of dips had a prefill"
+proved nothing); context depth flat-to-inverted (400k+ is the safest band at 0.07%);
+KV store/load **7.32x** on the 101 dips — real, but small in absolute time.
+
+Then measured directly, post-store-fixes: holds are 2048-token chunks running at
+522-890 t/s, mean 1.55 s, worst 3.92 s, and the store disk tail is **1.5% of total
+hold seconds** (2.44 s of 163.0 s).
+
+### Decision
+- **S1 (split the store, release `inference_mu` after staging): not built.** Both
+  continued-store sites are inside `server_progress_cb`, which the engine calls from
+  within `ds4_session_sync`, so every rung store is *nested* inside a prefill hold —
+  and `inference_mu` is `PTHREAD_MUTEX_RECURSIVE`, so a release there only
+  decrements the count. It cannot help the dominant case, and the case it could help
+  is 1.5% of the time.
+- **Load path (read outside the lock, swap inside): not built.**
+  `ds4_session_load_payload_span(session, fp, …)` streams rows from the file *into*
+  the session, so the disk read is the mutation. Only `kv_cache_refresh()` and the
+  candidate header probes are separable, and 821 ms p50 for ~380 MiB is the stream.
+- **Serialize-prefill / `--loop-guard`-style policies: not built** — the premise
+  (co-residency causes the dips) is the 1.15x that failed the base-rate test.
+
+### Consequences
+The dips are prefill compute holding the executor. The levers that remain are
+engine-level (chunk granularity, or genuinely mixing prefill and decode in one
+epoch — upstream's blocked paths), or **removing the long prefills themselves**.
+Measured here across all retained qwen logs: **107 `evicting checkpoint` events
+dropping 18.92M tokens**, i.e. the demand for long re-prefills is manufactured by
+reuse misses rather than by user input. (A subagent additionally reported that
+84-87% of long-prefill volume falls within 10 s of an eviction in its 2-day window;
+that correlation is **not independently verified** and is recorded as a lead, not a
+fact.) The place to look is routing and checkpoint keying — `job_slot_score`,
+`slot_probe_reuse_locked` — not scheduling.
+
+Caveat kept honest: the 1.5% comes from synthetic load with **no evict storms**.
+Production's store-then-load-back-to-back path (`ds4_server.c:15928`→`15931`, up to
+1.16 s + 4.89 s in one request) is the one scenario that could revive S1, so the
+decision is re-openable on measurement, not on opinion.
+
+### Review-practice knowledge (added 2026-11-17, from this investigation)
+- Correlate against the **base rate**, not the coincidence rate. "95 of 98 slow
+  minutes had a prefill" and "100% of dips sit near a prefill line" were both
+  worthless — 86.6% of healthy samples sit near one too.
+- A warning-free build is not evidence that a preprocessor-guarded path exists.
+  Check the object (`nm -u`) for the symbol you believe you compiled in.
+- A probe's error may be the probe. `F_FULLFSYNC` returning EFAULT on the *internal*
+  volume too meant Python's calling convention, not hardware — the answer came from
+  a 20-line C program, not more searching.
+- Re-derive subagent numbers before they become a plan. In one run an agent
+  fabricated a log window containing zero lines, a `ctx` value that appears nowhere,
+  and a function symbol not in the tree; another's headline statistic collapsed under
+  a control group. Neither was caught by reading their prose — only by running the
+  queries again.
