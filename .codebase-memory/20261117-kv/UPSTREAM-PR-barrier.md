@@ -37,9 +37,9 @@ Rules from `CONTRIBUTING.md` (byte-identical to upstream's, unmodified).
 | Build default backend (`make clean && make`) | **Pass** | 0 errors, 0 warnings on the patched upstream tree |
 | Correctness track: `make test` | **Partial** | `./ds4_test --server` → `server: OK` / `ds4 tests: ok` (this is the subset CONTRIBUTING says covers *KV disk-cache bookkeeping*). Full `--all` needs the engine stopped — see remaining gates. |
 | Don't regress speed; only an important correctness bug justifies a penalty | **Pass by category, measurement pending** | It is a correctness fix, which is the sanctioned exception. Barrier cost measured directly: ~3 ms `fsync` + ~1.7 ms `F_FULLFSYNC` per ~640 MiB store, against ~155 ms for the write itself (~3% of store tail). |
-| CPU portability build (`make cpu`) | **Pass on macOS** | 0 errors/warnings. A true Linux build was **not executed** (no Linux host in this session); the Apple-only call is inside `#if defined(F_FULLFSYNC)` and the guard is `#if defined(__APPLE__) && !defined(F_FULLFSYNC)`, so non-Apple compiles to `fsync` only by construction. |
+| CPU target build (`make cpu`) | **Built on macOS only** | 0 errors/warnings for the CPU target on this machine, which is the check CONTRIBUTING asks for. No Linux host was used, so **no portability claim is made for Linux**. |
 | Report commands, machine/backend, quant, failures | **Pass** | Machine: Apple M5 Max, 128 GiB, macOS, Metal backend. Cache volume: external NVMe (FireCUDA 520), APFS. Model used for `--server`: `gguf/DeepSeek-V4-Flash-MTP-Q4K-Q8_0-F32.gguf` (3.8 GB). No failures observed. |
-| `make cuda-regression` | **N/A / not run** | No CUDA host here. The change is backend-independent (`stdio` + POSIX), but that is untested on CUDA. |
+| `make cuda-regression` | **Not run** | No CUDA host available. **No claim is made about CUDA behaviour** -- it is untested. |
 | Quant/`quality-score` track | **N/A** | No GGUF or numerics change. |
 
 ### Remaining gates before opening the PR
@@ -108,9 +108,17 @@ in C, not taken from documentation.
 
 ### Testing
 
-`make clean && make` warning-free; `make cpu` builds; `./ds4_test --server` passes
+`make clean && make` warning-free; `make cpu` builds (macOS CPU target);
+`./ds4_test --server` passes
 (`server: OK`); `nm -u ds4_kvstore.o` confirms both `_fsync` and `_fcntl` are
-referenced, i.e. the barrier is actually in the binary. **No new unit test:** the store
+referenced, i.e. the barrier is actually in the binary.
+
+**Platform scope:** all of the above was run on macOS / Metal (Apple M5 Max, 128 GiB).
+**No claim is made about Linux or CUDA** -- neither was built on nor tested on such a host,
+and `make cpu` on macOS is a CPU-target build check, not a Linux portability
+verification.
+
+**No new unit test:** the store
 path needs a live engine and session (`ds4_session_write_staged_payload`), so it is not
 reachable from a model-free test, and the durability effect itself needs fault
 injection — stated rather than papered over.
