@@ -13107,6 +13107,11 @@ static bool kv_cache_reload_repeat(server *s, server_slot *slot,
                "ds4-server: kv cache discarded reason=frontier-contradicted file=%s",
                path);
     pthread_mutex_lock(&s->kv_mu);
+    /* Raw unlink: the children refcount is a directory-derived scan (see
+     * kv_cache_unlink_entry in ds4_kvstore.c), so the next refresh re-derives
+     * it and no parent stays blocked by a file this slot deleted.  The
+     * deferring helper is eviction's route and would keep a file already
+     * proven useless for every future load of this prefix. */
     unlink(path);
     pthread_mutex_unlock(&s->kv_mu);
     slot->disk_reload_path[0] = '\0';
@@ -13118,6 +13123,11 @@ static void kv_cache_discard_failed_disk_entry(server *s, server_slot *slot,
                                                 const char *path) {
     if (!s || !slot || !path) return;
     pthread_mutex_lock(&s->kv_mu);
+    /* Raw unlink (children is re-derived by the directory scan, see
+     * kv_cache_unlink_entry in ds4_kvstore.c).  This file loaded fine but its
+     * continuation failed, so it is dead weight for this conversation; a file
+     * chained off it is not silently served - the load-time ancestor walk
+     * declines it. */
     if (unlink(path) == 0) {
         server_log(DS4_LOG_KVCACHE,
                    "ds4-server: kv cache discarded reason=prefill-failed file=%s",
@@ -25890,6 +25900,42 @@ static void test_kv_conv_stub_file(const char *dir, const char *text,
     free(path);
 }
 
+/* v3 delta-chain stub: this file holds rows [delta_from, tokens); rows
+ * [0, delta_from) live in parent_text's file, referenced by that file's sha
+ * (the file name is the content hash of its text section, so the link is
+ * derived from the parent TEXT exactly as the store path derives it). */
+static void test_kv_delta_stub_file(const char *dir, const char *text,
+                                    const char *parent_text, uint64_t conv_id,
+                                    uint8_t reason,
+                                    uint32_t tokens, uint32_t delta_from,
+                                    uint64_t last_used, uint64_t payload_bytes) {
+    char sha[41], psha[41];
+    sha1_bytes_hex(text, strlen(text), sha);
+    sha1_bytes_hex(parent_text, strlen(parent_text), psha);
+    char name[44];
+    snprintf(name, sizeof(name), "%.40s.kv", sha);
+    char *path = path_join(dir, name);
+    FILE *fp = fopen(path, "wb");
+    TEST_ASSERT(fp != NULL);
+    if (fp) {
+        uint8_t h[KV_CACHE_FIXED_HEADER + DS4_KVSTORE_HEADER_V3_EXTRA];
+        uint32_t bucket = DS4_KVSTORE_DEFAULT_ANCHOR_STEP > 0
+            ? tokens / (uint32_t)DS4_KVSTORE_DEFAULT_ANCHOR_STEP : 0u;
+        ds4_kvstore_fill_header_v3(h, 0, 2, reason, 0, tokens, 0, 32768,
+                                   100, last_used, payload_bytes,
+                                   conv_id, 0, bucket, 0, false, psha, delta_from);
+        uint8_t text_len[4];
+        le_put32(text_len, (uint32_t)strlen(text));
+        TEST_ASSERT(fwrite(h, 1, sizeof(h), fp) == sizeof(h));
+        TEST_ASSERT(fwrite(text_len, 1, sizeof(text_len), fp) == sizeof(text_len));
+        TEST_ASSERT(fwrite(text, 1, strlen(text), fp) == strlen(text));
+        for (uint64_t i = 0; i < payload_bytes; i++)
+            TEST_ASSERT(fputc(0, fp) != EOF);
+        TEST_ASSERT(fclose(fp) == 0);
+    }
+    free(path);
+}
+
 static char *test_kv_path_for_text(const char *dir, const char *text) {
     char sha[41];
     sha1_bytes_hex(text, strlen(text), sha);
@@ -25903,6 +25949,16 @@ static bool kv_file_exists(const char *dir, const char *text) {
     bool exists = access(p, F_OK) == 0;
     free(p);
     return exists;
+}
+
+/* Position of a checkpoint in the store's in-memory index, or -1.  Entries
+ * are readdir-ordered, so it must be re-looked-up after every refresh. */
+static int test_kv_entry_index(kv_disk_cache *kc, const char *text) {
+    char sha[41];
+    sha1_bytes_hex(text, strlen(text), sha);
+    for (int i = 0; i < kc->len; i++)
+        if (strcmp(kc->entry[i].sha, sha) == 0) return i;
+    return -1;
 }
 
 /* Read back a checkpoint's persisted stale flag (-1 if unreadable). */
@@ -28389,6 +28445,198 @@ static void test_kv_cache_lineage_active_head_not_covered_by_idle_window(void) {
     rmdir(dir);
 }
 
+/* The load path deletes checkpoint files with a raw unlink() instead of
+ * kv_cache_unlink_entry(), the eviction helper that defers any delete while
+ * children > 0 (ds4_kvstore.c).  This pins why that is not a guard bypass:
+ * `children` is a refcount re-derived from the directory by
+ * kv_cache_refresh(), and every load and every eviction pass refreshes
+ * first, so a file removed underneath the index can never leave its parent
+ * blocked forever.  It also pins the other half -- the loader MUST NOT use
+ * the helper, because the helper shrinks kc->entry while the load retry loop
+ * keys its skip list on entry indices (ds4_kvstore.c, try_load_text). */
+static void test_kv_cache_raw_unlink_recounts_children_on_refresh(void) {
+    char tmpl[] = "/tmp/ds4-kv-children-scan-test.XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    TEST_ASSERT(dir != NULL);
+    if (!dir) return;
+
+    const uint64_t now = (uint64_t)time(NULL);
+    const char *x1 = "children scan chain root text";
+    const char *x2 = "children scan chain child text";
+    test_kv_conv_stub_file(dir, x1, 1, 0, KV_REASON_CONTINUED, 40960, 0,
+                           now - 1000, 64);
+    test_kv_delta_stub_file(dir, x2, x1, 1, KV_REASON_EVICT, 49152, 40960,
+                            now - 1000, 64);
+
+    kv_disk_cache kc = {0};
+    kc.enabled = true;
+    kc.dir = xstrdup(dir);
+    kc.opt = kv_cache_default_options();
+    kc.budget_bytes = 1ull << 40;
+
+    /* The scan, not the store-side increment, is what arms the guard. */
+    ds4_kvstore_refresh(&kc);
+    TEST_ASSERT(kc.len == 2);
+    const int i1 = test_kv_entry_index(&kc, x1), i2 = test_kv_entry_index(&kc, x2);
+    TEST_ASSERT(i1 >= 0 && i2 >= 0);
+    if (i1 >= 0 && i2 >= 0) {
+        char psha[41];
+        sha1_bytes_hex(x1, strlen(x1), psha);
+        TEST_ASSERT(!strcmp(kc.entry[i2].parent_sha, psha));
+        TEST_ASSERT(kc.entry[i2].delta_from == 40960);
+        TEST_ASSERT(kc.entry[i1].children == 1);
+        TEST_ASSERT(kc.entry[i2].children == 0);
+    }
+
+    /* 1. The loader's raw unlink of the chain CHILD (what the
+     * "delta chain broken" and "discarded corrupt text-prefix payload" sites
+     * do: they delete the candidate, never the ancestor).  The index is left
+     * exactly as it was: no entry drops, so the indices the retry loop
+     * already skipped stay valid, and the parent's count is merely stale. */
+    char *p2 = test_kv_path_for_text(dir, x2);
+    TEST_ASSERT(unlink(p2) == 0);
+    TEST_ASSERT(kc.len == 2);
+    TEST_ASSERT(test_kv_entry_index(&kc, x2) >= 0);
+    TEST_ASSERT(test_kv_entry_index(&kc, x1) >= 0 &&
+                kc.entry[test_kv_entry_index(&kc, x1)].children == 1);
+
+    /* 2. The refresh that precedes every load/eviction pass drops the phantom
+     * and re-derives the count from the files that remain: the parent is
+     * deletable again, so the raw unlink strands nothing. */
+    ds4_kvstore_refresh(&kc);
+    TEST_ASSERT(kc.len == 1);
+    TEST_ASSERT(test_kv_entry_index(&kc, x2) < 0);
+    const int j1 = test_kv_entry_index(&kc, x1);
+    TEST_ASSERT(j1 >= 0);
+    if (j1 >= 0) TEST_ASSERT(kc.entry[j1].children == 0);
+
+    /* 3. The reverse direction: a corrupt PARENT deleted (the payload-discard
+     * site) while its child survives.  The child is not advertised as
+     * loadable by the index -- and it is not filtered out of it either:
+     * declining an unreachable chain is the load path's ancestor walk, which
+     * needs an engine and a session and so is out of reach for this suite
+     * (see the report's could-not-verify list).  What IS pinned here: the
+     * orphan stays a leaf, so no deferral can ever pin it against the budget. */
+    test_kv_conv_stub_file(dir, x1, 1, 0, KV_REASON_CONTINUED, 40960, 0,
+                           now - 1000, 64);
+    test_kv_delta_stub_file(dir, x2, x1, 1, KV_REASON_EVICT, 49152, 40960,
+                            now - 900, 64);
+    char *p1 = test_kv_path_for_text(dir, x1);
+    TEST_ASSERT(unlink(p1) == 0);
+    ds4_kvstore_refresh(&kc);
+    TEST_ASSERT(kc.len == 1);
+    const int k2 = test_kv_entry_index(&kc, x2);
+    TEST_ASSERT(k2 >= 0);
+    if (k2 >= 0) {
+        TEST_ASSERT(kc.entry[k2].children == 0);
+        TEST_ASSERT(kc.entry[k2].delta_from == 40960);
+    }
+    /* And the orphan is still OFFERED by the scan: declining an unreachable
+     * chain is the load path's ancestor walk, not the index's job.  Pinned
+     * because the opposite design (filter parentless rows out of the scan) is
+     * the tempting fix, and it would silently drop candidates that a later
+     * in-place rewrite makes loadable again.  Proven to bite by mutation M5 in
+     * the report. */
+    char x2sha[41];
+    sha1_bytes_hex(x2, strlen(x2), x2sha);
+    const int offered = ds4_kvstore_find_text_prefix(&kc,
+        "children scan chain child text continues here", 0, 2, 32768);
+    TEST_ASSERT(offered >= 0);
+    if (offered >= 0) TEST_ASSERT(!strcmp(kc.entry[offered].sha, x2sha));
+
+    kv_cache_close(&kc);
+    unlink(p1);
+    unlink(p2);
+    free(p1);
+    free(p2);
+    rmdir(dir);
+}
+
+/* The other half of the same accounting, pinned at a production call site
+ * that runs on the caller's index WITHOUT refreshing first (ds4_kvstore_evict
+ * refreshes at its top, which would re-derive the counts and hide the
+ * bookkeeping): unlink_entry must decrement the surviving parent while it
+ * frees a delta child, and must DEFER -- keeping the file -- when the victim
+ * still has live children.  The deferral half is exactly why the load path
+ * cannot use this helper: a file it proved unloadable would stay on disk. */
+static void test_kv_cache_unlink_entry_children_bookkeeping(void) {
+    char tmpl[] = "/tmp/ds4-kv-children-pass-test.XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    TEST_ASSERT(dir != NULL);
+    if (!dir) return;
+
+    const uint64_t now = (uint64_t)time(NULL);
+    /* Group A: parent -> child, plus a diverged duplicate of the child.  The
+     * duplicate sweep frees the child, and the parent must stop counting it
+     * in the same pass. */
+    const char *ga_parent = "children pass group A parent text";
+    const char *ga_child = "children pass group A child text";
+    const char *ga_dup = "children pass group A diverged twin text";
+    /* Group B: a parent with a live child that is itself a redundant
+     * duplicate.  Its delete must DEFER, file and all. */
+    const char *gb_parent = "children pass group B parent text";
+    const char *gb_child = "children pass group B child text";
+    const char *gb_dup = "children pass group B newer twin text";
+
+    test_kv_conv_stub_file(dir, ga_parent, 100, 0, KV_REASON_CONTINUED, 4096,
+                           0, now - 1000, 64);
+    test_kv_delta_stub_file(dir, ga_child, ga_parent, 101, KV_REASON_EVICT,
+                            8192, 4096, now - 1000, 64);
+    test_kv_conv_stub_file(dir, ga_dup, 101, 0, KV_REASON_COLD, 8192, 0,
+                           now - 10, 64);
+    test_kv_conv_stub_file(dir, gb_parent, 102, 0, KV_REASON_COLD, 12288, 0,
+                           now - 1000, 64);
+    test_kv_conv_stub_file(dir, gb_dup, 102, 0, KV_REASON_COLD, 12288, 0,
+                           now - 10, 64);
+    test_kv_delta_stub_file(dir, gb_child, gb_parent, 103, KV_REASON_EVICT,
+                            16384, 12288, now - 1000, 64);
+
+    kv_disk_cache kc = {0};
+    kc.enabled = true;
+    kc.dir = xstrdup(dir);
+    kc.opt = kv_cache_default_options();
+    kc.budget_bytes = 1ull << 40;   /* budget is not the pressure here */
+
+    ds4_kvstore_refresh(&kc);
+    TEST_ASSERT(kc.len == 6);
+    TEST_ASSERT(test_kv_entry_index(&kc, ga_parent) >= 0 &&
+                kc.entry[test_kv_entry_index(&kc, ga_parent)].children == 1);
+    TEST_ASSERT(test_kv_entry_index(&kc, gb_parent) >= 0 &&
+                kc.entry[test_kv_entry_index(&kc, gb_parent)].children == 1);
+
+    uint64_t total = 0;
+    ds4_kvstore_sweep_small_dense_divergents(&kc, NULL, 0, &total);
+
+    /* Group A: the diverged duplicate of the child was freed... */
+    TEST_ASSERT(!kv_file_exists(dir, ga_child));
+    /* ...and its parent stopped counting it WITHOUT a rescan.  RED if the
+     * decrement in unlink_entry is removed: the parent would sit at
+     * children == 1, be deferred on every later pass, and hold its file (and
+     * budget) until a directory scan happened to notice. */
+    const int a = test_kv_entry_index(&kc, ga_parent);
+    TEST_ASSERT(a >= 0);
+    if (a >= 0) TEST_ASSERT(kc.entry[a].children == 0);
+
+    /* Group B: the victim had a live child, so the delete DEFERRED: the entry
+     * left the index but the FILE stayed.  This is the behaviour the load
+     * path must not inherit -- there it would keep a checkpoint that can
+     * never load, to be re-read and re-discarded on every future attempt. */
+    TEST_ASSERT(test_kv_entry_index(&kc, gb_parent) < 0);
+    TEST_ASSERT(kv_file_exists(dir, gb_parent));
+    TEST_ASSERT(kv_file_exists(dir, gb_child));   /* never a victim: own bucket */
+    TEST_ASSERT(kc.len == 4);
+
+    kv_cache_close(&kc);
+    const char *texts[] = {ga_parent, ga_child, ga_dup,
+                           gb_parent, gb_dup, gb_child};
+    for (int i = 0; i < 6; i++) {
+        char *p = test_kv_path_for_text(dir, texts[i]);
+        unlink(p);
+        free(p);
+    }
+    rmdir(dir);
+}
+
 static void test_kv_cache_model_fp_routing(void) {
     /* A checkpoint written for a different weight fingerprint is neither
      * selected as a rebuild prefix nor marked stale for the current prompt. */
@@ -29492,6 +29740,8 @@ static void ds4_server_unit_tests_run(void) {
     test_kv_cache_lineage_active_head_survives_retirement();
     test_kv_cache_lineage_active_head_survives_overcap();
     test_kv_cache_lineage_active_head_not_covered_by_idle_window();
+    test_kv_cache_raw_unlink_recounts_children_on_refresh();
+    test_kv_cache_unlink_entry_children_bookkeeping();
     test_kv_cache_model_fp_routing();
     test_kv_cache_eviction_legacy_lru_evicts_oldest();
     test_kv_cache_small_dense_divergent_prune();

@@ -1934,6 +1934,20 @@ static void kv_defer_backoff_advance(ds4_kvstore *kc) {
     }
 }
 
+/* Drop one indexed entry: unlink its file, release its share of the running
+ * budget total, and hand its parent a children-- (an eviction pass never
+ * re-scans between picks, so without that decrement a parent would stay
+ * blocked for the rest of the pass).  Eviction's route only: the load path
+ * deletes provably-unloadable files with a raw unlink() instead, because this
+ * helper (a) defers children>0 - keeping a file no chain walk can ever load,
+ * which then re-reads and (at the payload-discard site) re-invalidates a live
+ * session on every future attempt - and (b) shrinks
+ * kc->entry, shifting the indices the load retry loop keys its skip list on.
+ * Nothing strands here either way: children is rebuilt from the directory by
+ * kv_cache_refresh(), which runs at the top of every load and eviction pass.
+ * (The deferral is right for eviction and wrong for the loader for the same
+ * reason: an evicted parent may still be loadable, a loader-dropped one is
+ * not - the chain walk or its own terminal check already proved it so.) */
 static void kv_cache_unlink_entry(ds4_kvstore *kc, int victim,
                                   uint64_t *total, const char *reason) {
     ds4_kvstore_entry e = kc->entry[victim];
@@ -1958,6 +1972,8 @@ static void kv_cache_unlink_entry(ds4_kvstore *kc, int victim,
         return;
     }
     bool freed = unlink(e.path) == 0;
+    /* This file was one link of a chain: the parent it hung off stops
+     * counting it, so the parent becomes deletable inside THIS pass. */
     if (freed && e.delta_from > 0 && e.parent_sha[0]) {
         for (int i = 0; i < kc->len; i++) {
             if (kc->entry[i].children > 0 &&
@@ -3811,6 +3827,14 @@ static int kv_cache_try_load_one(ds4_kvstore *kc, ds4_engine *engine,
                     kv_log_name(kc), path,
                     responses_protocol ? " " : "",
                     responses_protocol ? "RESPPROTO" : "");
+            /* `path` is the CANDIDATE (the child end of the chain), not the
+             * missing ancestor: the walk just proved this file unreachable,
+             * so this file is the garbage.  Raw unlink, not the deferring
+             * helper - a defer would keep a file no chain walk can ever load.
+             * Its descendants stay for now: they are unloadable through this
+             * one, decline themselves fail-closed at the walk above when
+             * picked, and being leaves-or-soon-to-be, the budget passes
+             * unwind them rung by rung. */
             unlink(path);
             fclose(fp);
             free(cached_text);
@@ -3893,6 +3917,15 @@ static int kv_cache_try_load_one(ds4_kvstore *kc, ds4_engine *engine,
             }
         } else {
             ds4_session_invalidate(session);
+            /* This file's payload contradicts its own header, so it can never
+             * serve a load as a terminal link: drop it now instead of paying a
+             * full payload read plus a live-session invalidation on every
+             * future attempt at this prefix.  Raw unlink, not the deferring
+             * helper (see kv_cache_unlink_entry()).  Nothing is lost that was
+             * loadable: names are content-addressed, so the next store of this
+             * exact text rewrites this same path, and until then any file
+             * chained off it declines itself, fail-closed, at the ancestor
+             * walk above. */
             unlink(path);
             /* The session was invalidated (reset) by the discard, so the
              * caller may safely try the next-largest candidate. */
@@ -3908,7 +3941,13 @@ static int kv_cache_try_load_one(ds4_kvstore *kc, ds4_engine *engine,
         ds4_session_invalidate(session);
         /* Payload load failed (version/layout mismatch, truncation): the
          * session was invalidated (reset), so fall back to the next-largest
-         * candidate instead of forcing a full prefill from 0. */
+         * candidate instead of forcing a full prefill from 0.
+         * NO unlink here, unlike the two drops above: this branch also takes
+         * failures that say nothing about the file's bytes - an accelerator
+         * sync error, an I/O error off the blade, a link racing with
+         * eviction ("file vanished").  Deleting a checkpoint on those would
+         * lose good data, which is why the loader only ever deletes a file it
+         * proved unusable from its own contents. */
         *retryable = true;
         kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
                 "%s: kv cache load failed%s%s %s: %s load=%.1f ms (falling back)",
