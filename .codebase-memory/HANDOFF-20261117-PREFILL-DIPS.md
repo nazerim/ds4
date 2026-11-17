@@ -123,6 +123,15 @@ The design subagent's numbers I spot-checked were accurate
 
 ## 4. Shipped
 
+- `2b06dc7` — **FIX 1 + FIX 2 (§2c) shipped**, with the store decisions extracted
+  into pure helpers and 5 new tests plus one corrected test. Proven by mutation,
+  not by assertion: reinstating either bug fails named asserts, and reinstating
+  the early-return branch with the helper left fixed still fails the driving test,
+  so the suite catches call-site regressions rather than its own stub
+  bookkeeping. Independent review: SHIP-WITH-CHANGES, both findings closed (the
+  sibling `covered` wiring is now pinned; fixtures assert `e.ok` so a broken
+  `/tmp` cannot make the suite vacuously green). Not in this commit: the store
+  split, `fsync`, the raw-unlink sites, and the §7 vision cadence.
 - `cbc4db6` — **observability**. `server_prefill_leave()` now takes slot + slice
   window and accounts hold count/total/max under `inference_mu`; holds ≥
   `DS4_PREFILL_HOLD_WARN_SEC` (default 2.0 s, 0 = silent) log slot, tokens,
@@ -156,11 +165,11 @@ rewind exemption and the `quantum=0` spin (`done < target` is strict,
 worth doing but it is no longer first: two one-line-class store bugs were
 consuming more I/O than the lock ever did. Sequence:
 
-1. **Continued-store length fix** (§2c.1) — makes doomed files loadable, frees
+1. **[DONE 2b06dc7] Continued-store length fix** (§2c.1) — makes doomed files loadable, frees
    ~88 GiB / ~35% of the 256 GiB budget.
-2. **Divergence-anchor firing fix** (§2c.2) — removes ~342 stores / 44.4 GiB per
+2. **[DONE 2b06dc7] Divergence-anchor firing fix** (§2c.2) — removes ~342 stores / 44.4 GiB per
    anchor event, i.e. ~97% of cold-store bytes.
-3. **Round-trip test coverage before/with both** (§2c, "why these survived") —
+3. **[DONE 2b06dc7, via helper+hook seam -- not a payload round-trip] Test coverage at the production call sites** (§2c, "why these survived") —
    otherwise the suite keeps encoding the wrong contract.
 4. **Baseline the `cbc4db6` hold telemetry on real traffic** — needed because
    `save=` is only the tail (§2b.1), so no under-lock cost is known yet.
