@@ -28,9 +28,10 @@ Depth breakdown (slow %, mean t/s): `<50k 0.41% 59.1 | 50-100k 0.67% 80.0 |
 100-200k 0.13% 70.8 | 200-300k 0.16% 68.2 | 300-400k 0.26% 62.2 | 400k+ 0.07%
 57.9`. 400k+ is the *safest* band. There is no depth cliff.
 
-Durations measured from the same log, matching the stall magnitudes:
+Durations measured from the same log:
 `KV store save ms: n=792 p50=258 p90=500 max=1156` ·
 `KV load ms: n=81 p50=804 p90=2470 max=4893`.
+**These store numbers are a floor, not the cost** — see §2.
 
 ## 2. Mechanism (verified in code, not inferred)
 
@@ -45,6 +46,55 @@ Durations measured from the same log, matching the stall magnitudes:
 A decoding slot needs `inference_mu`, so it parks for the whole disk op. That is
 the 0.3–4.9 s hole, and it explains why the dips look "prefill-adjacent":
 evictions and cold rebuilds happen around the same requests.
+
+### 2b. Corrections after the follow-up audit (same day, later)
+
+Both statements above are understated, and the line numbers shifted after
+`cbc4db6` (store now `12733`→`12927`, load `13198`→`13205`):
+
+1. **`save=` times only the tail of the store.** The timer starts at
+   `ds4_kvstore.c:3301`, immediately before `fopen(tmp,"wb")`. Everything above
+   it — `ds4_kvstore_evict()` at `:3296` (a directory scan), the two
+   `kv_cache_refresh()` calls, `pick_parent` and its parent-chain walk with
+   payload reads — is also I/O under `inference_mu` and is **unmeasured**. So
+   p50 258 ms is a floor; do not size the locking win from it.
+2. **`inference_mu` is `PTHREAD_MUTEX_RECURSIVE`** (`ds4_server.c:18797`;
+   `kv_mu` is plain). That is why stores nested inside a prefill hold never
+   deadlocked and went unnoticed: `server_progress_cb` calls
+   `kv_cache_maybe_store_continued` (`14969`, `15010`) from inside
+   `ds4_session_sync`, which `server_prefill_enter/leave` (`14609`/`14612`)
+   already holds the lock for. Two consequences: the `cbc4db6` hold telemetry
+   already measures this without new instrumentation, and any change that
+   releases the lock must **skip the release when `s->prefill_hold_t0 > 0`** and
+   keep the lock count balanced, or the recursive mutex leaks.
+
+### 2c. Two store-path bugs found in that audit — bigger than the locking
+
+Both verified by direct code reading; both are one-line-class fixes in
+`kv_cache_maybe_store_continued` and were more costly than the lock:
+
+1. **Continued stores passed the snapped-down grid `target` as the store length**
+   while the payload is always the live session (`ds4.c:66475`,
+   `rows = checkpoint.len`), so the header/payload length check at
+   `ds4_kvstore.c:3871` rejected every such file. The invariant is stated in a
+   comment 24 lines above the violation, and honoured by both divergence paths
+   ("Store at the live length") — the continued path was the outlier. Measured:
+   187 stores with `trimmed != 0`, 181 distinct files, mean 629 MiB ≈ 88+ GiB
+   written that can never load; 41 observed discards, **41/41 traced to
+   `trimmed != 0`**, none to `trimmed = 0`. Commit `969bc97` (2026-08-08) fixed
+   this exact class for divergence anchors and missed the continued path.
+2. **Divergence anchors fired on every chunk while climbing to their target.**
+   The clearing block is guarded by `tokens->len >= div_target` but the store is
+   guarded only by `div_target > 0`, so below the anchor the slot field is never
+   cleared and a full store happens per chunk. Measured: one anchor → **342
+   stores / 44.4 GiB in 12 minutes**, 341 with `tokens < target`; it also builds
+   a 342-link un-retirable chain behind 14,352 deferral lines.
+
+**Why these survived:** 52 `test_kv_*` functions exist and **none round-trips a
+payload**. `test_kv_cache_continued_uses_aligned_frontiers` asserts the snap-down
+target but says nothing about the length passed to the store — the green suite
+documented bug (1) as intended behaviour. `--kv-delta` is the only real parity
+test and always stores exactly at the live frontier, the one case that works.
 
 ## 3. Corrections — things said earlier today that are false
 
@@ -102,19 +152,39 @@ rewind exemption and the `quantum=0` spin (`done < target` is strict,
 
 ## 6. The fix, and why it isn't in yet
 
-Stage the payload/trailer under `inference_mu`, then **release the lock before
-`fwrite`/`fflush`**, and do the file read outside it, re-taking it only to swap
-the session. The fork already has this exact precedent for `tool_mu`
-(`.codebase-memory/adr.md:317`). Expected effect: removes the dominant cause of
-the dips and shrinks holds for any future policy. Effort ~1–1.5 d.
+**Reordered by the follow-up audit (see §2b/§2c).** The locking change is still
+worth doing but it is no longer first: two one-line-class store bugs were
+consuming more I/O than the lock ever did. Sequence:
 
-Left undone on purpose: this is lock-ordering surgery on the **durability path**
-(a race here silently loses or corrupts checkpoints), on a production engine
-serving a live 512k session, arrived at via a research chain that included
-fabricated evidence, and cannot be validated without a restart I will not do
-unattended. It needs your sign-off. Two things I'd want before shipping it: run
-it behind a flag and A/B with the new hold counters, and re-confirm on traffic
-that the 34/101 non-KV-adjacent dips don't move (so we know what we fixed).
+1. **Continued-store length fix** (§2c.1) — makes doomed files loadable, frees
+   ~88 GiB / ~35% of the 256 GiB budget.
+2. **Divergence-anchor firing fix** (§2c.2) — removes ~342 stores / 44.4 GiB per
+   anchor event, i.e. ~97% of cold-store bytes.
+3. **Round-trip test coverage before/with both** (§2c, "why these survived") —
+   otherwise the suite keeps encoding the wrong contract.
+4. **Baseline the `cbc4db6` hold telemetry on real traffic** — needed because
+   `save=` is only the tail (§2b.1), so no under-lock cost is known yet.
+5. **Loader `unlink` without the `children > 0` check** (4 raw unlink sites) —
+   strands chain descendants; currently latent (1 orphan, 0.57 GiB, and 0
+   `delta chain broken` lines so far).
+6. **S1 — split the store at the staging boundary**, releasing `inference_mu`
+   after staging and keeping `kv_mu` for format work, **never re-acquiring**
+   (re-acquiring risks ABBA against every load, since the order today is
+   `inference_mu → kv_mu`). Must skip the release when `prefill_hold_t0 > 0`
+   (§2b.2). Precedent: `.codebase-memory/adr.md:317`.
+7. **`fsync` before `rename` — last, deliberately.** There is none today
+   (`fsync` appears only at `ds4_agent.c:7193`), so a power loss can leave a
+   renamed file whose payload is zeroed/stale while magic, size, token count and
+   tokenizer fingerprint all still pass — the only path found that can serve
+   *wrong output* rather than a cache miss. It goes last so its cost lands
+   outside the executor lock, not inside it.
+
+Left undone on purpose: steps 4-7 are lock-ordering and durability surgery on a
+production engine serving a live 512k session, arrived at via a research chain
+that included fabricated evidence, and cannot be validated without a restart that
+generates real traffic. Each needs sign-off. Before shipping, A/B with the hold
+counters and re-confirm that the ~35 non-KV-adjacent dips do *not* move — that is
+how we tell "fixed the KV cause" from "fixed nothing".
 
 ## 7. Open
 
