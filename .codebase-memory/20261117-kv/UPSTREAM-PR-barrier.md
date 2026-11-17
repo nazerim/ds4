@@ -1,19 +1,24 @@
 # Upstream PR — durability barrier for KV checkpoint writes
 
-Branch **`fix/kvstore-write-barrier`** = `a5e9e77`, one commit, +31/-0 on
-`ds4_kvstore.c`, signed, based on `origin/main` (`b3f5018`). Pushed to **`nazerim`**
-only — nothing has been opened against `antirez/ds4`.
+Branch **`fix/kvstore-write-barrier`** = `4aa5130`, one commit, +45/-0 on
+`ds4_kvstore.c`, signed, based on `origin/main` (`b3f5018`, still current). Pushed to
+**`nazerim`** only — nothing has been opened against `antirez/ds4`. Superseded shas:
+`a5e9e77` (first port) → `a2cda53` (dropped Linux/CUDA claims) → `f7db783` (cost
+provenance) → `7c49f0b` (review fixes) → `4aa5130` (measured cost, final).
 
 Worktree: `~/Projects/ds4-pr-kvstore-barrier` (matches the existing `ds4-pr*`
 convention; the temporary worktree this was first drafted in has been removed).
 
-**Not filed yet.** Two CONTRIBUTING gates still need an engine-stop window — see
-"Remaining gates" below.
+**Not filed yet, but every gate that can be closed on this host is closed.** The
+engine-stop window was taken 21:16–22:58 and all of it was spent: clean build, the
+`--server` suite, a full-`make test` baseline control, four `ds4-bench` sweeps in
+alternating order, and a live execution proof on the upstream tree. What remains
+blocked is not a gate we can pass here — see *Gate results*.
 
 ## Why this one and not the rewrite
 
 `ds4_kvstore.c` is upstream's file, not ours: upstream is 1,352 lines, our fork
-4,086 (**+3,163/−206 over 45 commits**). Upstream has **none** of `anchor_step`,
+4,086 (**+3,163/−206 over 46 commits for `.c`+`.h`**; `ds4_kvstore.c` alone is +2,933/−199 over 45 commits — the two scopes were previously conflated here). Upstream has **none** of `anchor_step`,
 `small_dense`, `parent_sha`, `children` or divergence anchors, and seven open PRs by
 other contributors currently touch this area — #1340/#1342 propose *overlapping*
 continued-store scheduling. Upstream `main` has merged nothing since **Nov 3**, and
@@ -35,36 +40,37 @@ Rules from `CONTRIBUTING.md` (byte-identical to upstream's, unmodified).
 | Requirement | Status | Evidence |
 |---|---|---|
 | Build default backend (`make clean && make`) | **Pass** | 0 errors, 0 warnings on the patched upstream tree |
-| Correctness track: `make test` | **Partial** | `./ds4_test --server` → `server: OK` / `ds4 tests: ok` (this is the subset CONTRIBUTING says covers *KV disk-cache bookkeeping*). Full `--all` needs the engine stopped — see remaining gates. |
-| Don't regress speed; only an important correctness bug justifies a penalty | **Pass by category, measurement pending** | It is a correctness fix, which is the sanctioned exception. Barrier cost measured directly: ~3 ms `fsync` + ~1.7 ms `F_FULLFSYNC` per ~640 MiB store, against ~155 ms for the write itself (~3% of store tail). |
+| Correctness track: `make test` | **Cannot complete here; control proves it is not the patch** | `./ds4_test --server` → `server: OK` / `ds4 tests: ok` (this is the subset CONTRIBUTING says covers *KV disk-cache bookkeeping*). Full `--all` needs the engine stopped — see remaining gates. |
+| Don't regress speed; only an important correctness bug justifies a penalty | **Pass — 2 reps/arm, alternating** | It is a correctness fix, which is the sanctioned exception. Barrier cost measured directly: ~3 ms `fsync` + ~1.7 ms `F_FULLFSYNC` per ~640 MiB store, against ~155 ms for the write itself (~3% of store tail). |
 | CPU target build (`make cpu`) | **Built on macOS only** | 0 errors/warnings for the CPU target on this machine, which is the check CONTRIBUTING asks for. No Linux host was used, so **no portability claim is made for Linux**. |
 | Report commands, machine/backend, quant, failures | **Pass** | Machine: Apple M5 Max, 128 GiB, macOS, Metal backend. Cache volume: external NVMe (FireCUDA 520), APFS. Model used for `--server`: `gguf/DeepSeek-V4-Flash-MTP-Q4K-Q8_0-F32.gguf` (3.8 GB). No failures observed. |
 | `make cuda-regression` | **Not run** | No CUDA host available. **No claim is made about CUDA behaviour** -- it is untested. |
 | Quant/`quality-score` track | **N/A** | No GGUF or numerics change. |
 
-### Remaining gates before opening the PR
+### Gate results
 
-Both need the engine stopped (`ds4_test` without `--server`/`--mtp-slice` loads a
-second model; `AGENTS.md` records the process lock and that the full suite refuses to
-run mid-suite):
+Engine stopped 21:16:46, restarted 22:58 (PID 83032, verified answering on :8002, 0
+errors in the log since restart).
 
-1. `make clean && make && make test` — full correctness track.
-2. Speed before/after per CONTRIBUTING: two `ds4-bench` CSVs on the same
-   machine/backend/model/sweep, comparing `prefill_tps` **and** `gen_tps`, on
-   `b3f5018` vs `a5e9e77`. Expect parity — the patch touches only the store path, no
-   kernel or scheduler — but the doc asks for the CSVs, so run them rather than argue
-   it should be exempt.
+| Gate | Result |
+|---|---|
+| `make clean && make` on the upstream base | **Pass** — 0 errors, 0 warnings, repeatedly |
+| `./ds4_test --server` | **Pass** — `server: OK`, `ds4 tests: ok` |
+| full `make test` | **Cannot run here.** Unpatched `b3f5018` produces the **identical 17 failures**, so the patch is exonerated by control. Root cause is deeper than RAM: every DeepSeek V4/V4.1/Vision-Exp GGUF on this host fails to load in *upstream's* build (`required metadata key is missing: deepseek4.block_count`) — only the Qwen3.8 file loads, at 177 GB. |
+| Speed, before/after, `prefill_tps` and `gen_tps` | **Parity.** Order A/B/B/A, 32 ctx points (2048–65536), 2 reps/arm: prefill 115.81 → 116.42 tps (**+0.52 %**) vs same-arm spread 0.92 %/0.50 %; gen 23.08 → 23.01 (**−0.27 %**) vs 0.13 %/1.47 %. Both deltas inside repeatability. |
+| Execution proof on the upstream tree | **Pass.** 10 real stores, `fsync=0/0 fullsync=0/0` every time → `F_FULLFSYNC` honoured, not ignored. See `proof-execution-upstream-tree.md`. |
+| Independent review of the exact sha | **Done, 2 findings, both fixed.** Tolerated-`F_FULLFSYNC` errno was leaking into upstream's `saved_errno` and could mislabel a later `fclose` failure; and the comment claimed load-time validation by a "tokenizer fingerprint" that **does not exist upstream** (0 occurrences; it is ours, unmerged, #1020). |
+| `make cpu` | Builds on macOS. **No Linux claim** — see *Platform scope*. |
+| `make cuda-regression` | **Not run. No CUDA claim.** |
 
-Suggested commands (from the repo root, engine stopped):
-
-```sh
-git checkout b3f5018 && make && ./ds4-bench -m ds4flash.gguf \
-  --prompt-file speed-bench/promessi_sposi.txt --ctx-start 2048 --ctx-max 65536 \
-  --step-incr 2048 --gen-tokens 128 --csv /tmp/barrier-before.csv
-git checkout fix/kvstore-write-barrier && make && ./ds4-bench -m ds4flash.gguf \
-  --prompt-file speed-bench/promessi_sposi.txt --ctx-start 2048 --ctx-max 65536 \
-  --step-incr 2048 --gen-tokens 128 --csv /tmp/barrier-after.csv
-```
+Two things the speed work changed in the claims, not just the table: the first
+single-rep pair showed `gen_tps` at **−1.02 %**, which a second rep dissolved (22.85
+vs 23.18 within the patched arm). And the cost numbers moved: the barrier is ~4 ms
+when the kernel has already written the data back, but **17–48 ms** when it has not,
+so the earlier "~2.4 % of store time" was the favourable case only. `PERFORMANCE.md`
+asks for alternating repeats precisely because of the first effect; had I filed on one
+rep each I would have shipped a regression that did not exist, and a cost claim that
+understated the unfavourable case by ~10x.
 
 ## PR body (draft; the temp copy is superseded by this file)
 
@@ -97,14 +103,22 @@ hidden `.tmp` name, so nothing can observe a partially durable entry.
 
 ### Cost
 
-Cache volume (APFS, external NVMe), 640 MiB — a real checkpoint size — 3 reps:
+Measured on this tree with temporary instrumentation around **real** stores
+(internal NVMe, `--ssd-streaming` active, 168–195 MiB checkpoints, 7 stores):
 
-| | write | `fsync` | + `F_FULLFSYNC` |
-|---|---|---|---|
-| mean | ~155 ms | ~3 ms | ~1.7 ms more |
+| situation | barrier cost |
+|---|---|
+| first barrier, pages still dirty | 17 – 48 ms |
+| second barrier, same file, nothing pending | **3.7 – 4.0 ms** |
+| fork production build, external NVMe, ~647 MiB stores, `save=` ~166 ms | 4.05 ms mean, n=6 |
 
-`F_FULLFSYNC` is cheap *after* `fsync` because the writes are already drained. Measured
-in C, not taken from documentation.
+So the calls themselves cost ~4 ms; the rest is writeback the kernel had not yet
+performed. That write is not new work — without the barrier it happens asynchronously
+later, or not at all before a power loss — but it now lands inside the store's
+synchronous window, which is the honest way to state the cost. A store whose own
+duration is long enough for background writeback to finish sees only the ~4 ms floor.
+Both syscalls returned 0 with errno 0 on all ten stores, so `F_FULLFSYNC` is honoured
+here rather than silently accepted.
 
 ### Testing
 
