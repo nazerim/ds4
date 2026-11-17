@@ -260,6 +260,47 @@ store+load is a real stall. And re-confirm that the ~35 non-KV-adjacent dips do
   free), KV dir at its 256 GiB budget.
 - Upstream still frozen at `b3f5018` (Nov 3); no new server-PR movement.
 
+## 10. Unattended run, later on 2026-11-17 — what shipped and what was disproved
+
+Commits: `2b06dc7` (store length + anchor firing), `f90433f` (unlink verdict +
+tests), `bf64327` (durability barrier). All pushed to `nazerim/main`; engine
+restarted onto the final build (PID 73570, `--batched-session 2 --ctx 524288
+--mixed-prefill-quantum 512`, no debug env, 0 errors).
+
+**Live verification of the barrier.** With `DS4_KV_DEBUG=1` temporarily exported
+(then removed by a clean restart), 6 of 6 stores executed it: `store sync=` mean
+**4.05 ms**, max 4.40 ms — within prediction from the C probe. The honest cost
+figure is that `sync=` line, **not** a `save=` mean comparison: this window's
+`save=` averaged 166.2 ms vs 106.2 ms earlier, but these were bigger rungs
+(114688/131072 tokens → 647 MiB files), and `save=` includes the payload write.
+0 discards, 0 errors.
+
+**Cross-restart reuse demonstrated.** A 96,883-token prompt that took 75.6 s cold
+completed in 12.1 s after the restart, with `cached=81920` served from a checkpoint
+written before the restart.
+
+**Still not exercised live:** a `continued` store crossing a rung at an off-grid
+live length. Every crossing landed grid-aligned because prefill advances in
+2048-aligned chunks from grid-aligned resume points. Off-grid stores did appear
+(`tokens=109199`, `121497`, both `trimmed=0`) but with `reason=evict`, a path that
+always stored at the live length. So FIX 1's specific branch rests on code reading
+plus the mutation battery, while its aggregate effect is visible: 24% of stores
+were `trimmed != 0` historically, and every store since has been `trimmed=0`.
+
+**Two locking projects closed on measurement, not opinion.** S1 (store split) and
+the load-path change are both dead — §9 and §6b. The 3-4 t/s dips are prefill
+compute holding `inference_mu`, which the hold telemetry showed directly
+(1.55 s mean, 3.92 s worst, at 522-890 t/s per 2048-token chunk).
+
+**Errors caught in this run that were nearly shipped as facts:** a Python
+`F_FULLFSYNC` probe returning EFAULT was almost reported as "the bridge cannot
+media-flush" — it failed identically on internal APFS, so it was a calling
+convention; and the barrier's first cut silently compiled the media flush out
+because `<fcntl.h>` was missing, with a clean warning-free build. `nm` for
+`_fcntl` caught it; the `#error` guard now makes that a build failure. Lesson
+recorded in the code comment: a clean build is not evidence a preprocessor-guarded
+path exists.
+
 ## 8. First executor-hold baseline (2026-11-17 13:21-13:27, PID 69332)
 
 Synthetic load after the 2b06dc7 restart: four multi-turn prefills of 55k-97k
