@@ -20,7 +20,7 @@ anything here.
 | `research-serialize-prefill.md` | Serialize-prefill scheduler design (v3) | **Historical / do not implement.** Its premise (co-residency causes the dips) failed the base-rate test at 1.15x. Useful for its scheduler map, lock topology and the `quantum=0` infinite-loop finding. |
 | `census-doomed-kv-files.md` + `kv_doomed_census.py` | Our own measurement of unloadable checkpoints (143 files / 88.78 GiB / 34.7% of a 255.95 GiB cache), replacing the audit's inherited figure | **Current, and it corrects two things.** Fixes the fused 113.62-GiB-written vs 88.78-GiB-resident arithmetic in `adr.md`, and records the mtime-vs-birthtime trap. Read its "does NOT license" section before quoting any number: the 89 GiB is NOT reclaimed. |
 | `proof-execution-upstream-tree.md` + `barrier_probe.py` | Live execution proof that the ported barrier runs on the upstream tree (10 stores, `fsync=0/0 fullsync=0/0`), and the two-tier cost finding | **Current.** Supersedes any inference from `nm` alone. Explains why model-backed `make test` cannot run on the upstream tree here (local GGUFs fail upstream's metadata check). |
-| `RFC-ladder-draft.md` | Draft upstream RFC issue for the retention/lineage design conversation | **Draft, reviewed by author only.** Claims ledger included; FIX 1/FIX 2 numbers deliberately quarantined from it. Needs an independent pass before posting. |
+| `RFC-ladder-draft.md` | Draft upstream RFC issue for the retention/lineage design conversation | **Draft, independently audited 2026-11-17 (6 blocking findings, all applied; 1 finding rejected as a phantom quote).** Postable after a read-through. Claims ledger included; FIX 1/FIX 2 numbers deliberately quarantined from it. Needs an independent pass before posting. |
 | `UPSTREAM-PR-barrier.md` | Scoped upstream contribution: durability barrier only, not the rewrite | **Current.** Contains the CONTRIBUTING.md compliance table, what still needs an engine-stop, and why the 3k-line rewrite should not be PR'd as a unit. |
 | `evidence-prefill-decode-contention.md` | My first attribution pass | **Contains a retracted error.** Its "92 of 101 dips, 9x enrichment" compared slow samples against whole minutes with no control group; the real enrichment is 1.15x. Kept because it documents how the mistake was made. |
 | `kv_roundtrip.py`, `kv_offgrid.py`, `kv_barrier_live.py` | Reproduction drivers: long cold prefill, multi-turn off-grid attempt, barrier-exercise load | **Working.** Deterministic content; re-runnable against a live engine to regenerate stores/loads. `kv_offgrid.py` did NOT achieve an off-grid `continued` store — prefill chunking keeps crossings grid-aligned. |
@@ -30,21 +30,56 @@ anything here.
 Do not reuse, do not cite, do not re-derive plans from them. One subagent in this
 chain invented evidence; another produced statistics without control groups.
 
+- **`ctx=488387` and "0.44 t/s at 480k depth"** — that ctx appears nowhere in any
+  log. Fabricated. The claimed depth cliff does not exist (400k+ is in fact the
+  *safest* band measured, 0.07%).
+- **"quantum A/B at 1117 02:50–03:07"** — zero log lines exist in that window; the
+  11-17 coverage is hours 00 and 09 only. Fabricated. There is exactly **one**
+  `mixed_prefill_quantum=2048` startup (1117 09:49:13) and it served no traffic,
+  so "raising the quantum didn't fix it" was never true either way.
+- **`ple_prefetch_window`** — symbol does not exist in the tree.
 - **"93 evictions / 17.46M tokens"** — this one was **reproduced**
-  (`design-kv-io-lock.md:69`: "in fact exactly right — I reproduced 17,463,570
-  tokens"), for **slot evictions in one log set**. The 107 events / 18.92 M tokens in
-  `HANDOFF` §9 counts **all retained qwen logs**. Different scopes; both stand. An
-  earlier revision of this table called the 93 figure "not reproduced", which was
-  wrong — the correction is here so nobody re-retracts a verified number.
+  (`design-kv-io-lock.md:69-70`: "in fact exactly right — I reproduced 17,463,570
+  tokens"), counting **slot evictions in one log set**. The 107 events / 18,917,350
+  tokens in `HANDOFF` §9 counts **all retained qwen logs**. Different scopes, both
+  stand. An earlier revision of this table called the 93 figure "not reproduced",
+  which was wrong — recorded here so nobody re-retracts a verified number.
+- **"0.30 s hold at 512 / 1.46 s hold at 2048"** — source report was in the lost temp
+  dir; **unverifiable rather than disproved**. Hold telemetry cannot settle it either
+  way: the warn threshold is 2.0 s (sub-2 s holds are never logged) and every hold line
+  in every retained log shows `quantum=2048`, none at 512.
+- **"solo 1,353 vs co-resident 859 t/s"** — **unreproduced, NOT fabricated, and
+  misattributed in the earlier revision of this table.** They are in
+  `research-serialize-prefill.md:118` (the *design* agent's file), not the fabricating
+  mechanism report, whose inventions were `ctx=488387`, the empty 1117 02:50–03:07
+  window and `ple_prefetch_window`. The interval-partition method behind 1,353/859 was
+  never recovered (a proxy recount finds 14 long runs, not 88), so do **not** cite them
+  as measurement — which also reaches §2.4's "~660 s / 56 % of wall destroyed"
+  counterfactual and the §5.3/§6 cap-sizing built on it. The
+  verified hold numbers are: mean 1.55 s, worst 3.92 s, for 2048-token chunks at
+  522-890 t/s, with the store disk tail at 1.5% of total hold seconds.
+- **"prefill interleaving causes the dips"** — 1.15x against an 86.6% base rate.
+  Not a cause.
 
 ## Still unverified / open
 
-- Whether the `84-87% of long-prefill volume within 10 s of an eviction` correlation
-  holds (design agent's figure, never re-derived).
+- Whether the `84-87 % of long-prefill volume within 10 s of an eviction **or a
+  `live kv cache miss reason=token-mismatch`**` correlation holds — the source
+  (`research-serialize-prefill.md:133`) is a **union** of two triggers, which an
+  earlier revision of this table dropped. Any re-derivation must exclude the
+  triggering request itself: the miss/evict line is logged by the very request that
+  then prefills, so the naive metric is ≈100 % by construction (a proxy run confirmed
+  the circularity).
 - FIX 1's off-grid `continued` store branch: proven by code reading and mutation
   tests only, never observed live.
-- The 1.5% hold figure is from synthetic traffic with no evict storms — the one
-  measurement that could reopen the S1 decision.
+- The 1.5 % hold figure re-derives **exactly** (23 stores, 2.44 s of 163.0 s window =
+  1.49 %), but its "no evict storms" caveat is **false as written**: that same window
+  contains 4 `evicting checkpoint` events and 3 back-to-back evict store→load pairs
+  (479.6 / 190.4 / 231.1 ms), with 4 of 23 stores at `reason=evict`. Light evict
+  traffic is already priced in. What would reopen S1 is evict **density** plus
+  load-side holds — so `HANDOFF` §9.3's "did not reproduce the regime" must be read as
+  "not at storm density", and the bar to overturn 1.5 % is higher than this bullet
+  implied.
 - 35 of 101 dips remain unattributed.
 - Whether `F_FULLFSYNC` is honoured by this Thunderbolt bridge or silently ignored
   (returns success either way; 1.7 ms, kept on the asymmetry argument).

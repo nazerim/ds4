@@ -79,8 +79,9 @@ Both verified by direct code reading; both are one-line-class fixes in
    `ds4_kvstore.c:3871` rejected every such file. The invariant is stated in a
    comment 24 lines above the violation, and honoured by both divergence paths
    ("Store at the live length") — the continued path was the outlier. Measured:
-   187 stores with `trimmed != 0`, 181 distinct files, mean 629 MiB ≈ 88+ GiB
-   written that can never load; 41 observed discards, **41/41 traced to
+   187 stores with `trimmed != 0`, 181 distinct files, mean 629 MiB = **113.62 GiB
+   written** that can never load (the *resident* set at last-store-per-sha is 143 files
+   / 88.78 GiB — two different quantities; the same sentence previously fused them); 41 observed discards, **41/41 traced to
    `trimmed != 0`**, none to `trimmed = 0`. Commit `969bc97` (2026-08-08) fixed
    this exact class for divergence anchors and missed the continued path.
 2. **Divergence anchors fired on every chunk while climbing to their target.**
@@ -165,8 +166,10 @@ rewind exemption and the `quantum=0` spin (`done < target` is strict,
 worth doing but it is no longer first: two one-line-class store bugs were
 consuming more I/O than the lock ever did. Sequence:
 
-1. **[DONE 2b06dc7] Continued-store length fix** (§2c.1) — makes doomed files loadable, frees
-   ~88 GiB / ~35% of the 256 GiB budget.
+1. **[DONE 2b06dc7] Continued-store length fix** (§2c.1) — makes *new* doomed files
+   impossible. **Frees nothing:** the fix is prospective, and the 143 existing files /
+   88.78 GiB (34.7 % of the 255.95 GiB cache) are still resident until the loader meets
+   them or eviction retires them. Measured 2026-11-17, `20261117-kv/census-doomed-kv-files.md`.
 2. **[DONE 2b06dc7] Divergence-anchor firing fix** (§2c.2) — removes ~342 stores / 44.4 GiB per
    anchor event, i.e. ~97% of cold-store bytes.
 3. **[DONE 2b06dc7, via helper+hook seam -- not a payload round-trip] Test coverage at the production call sites** (§2c, "why these survived") —

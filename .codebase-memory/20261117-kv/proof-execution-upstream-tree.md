@@ -21,7 +21,7 @@ visibly run anywhere, and `nm` showing the symbols only proves the call compiled
   loads. That, not the RAM budget alone, is why model-backed `make test` cases cannot
   run on the upstream tree here.
 
-## Run 1 -- seven stores, single barrier
+## Run 1 -- single barrier (8 executions over 8 stores)
 
 ```
     BARRIER-PROBE fsync=0/0 fullsync=0/0 ms=35.07
@@ -68,14 +68,19 @@ done? Re-barreiring the same file immediately answers it.
 
 ## Reading
 
-- `fsync=0/0 fullsync=0/0` on all ten stores: both calls return 0 with errno 0, so
+- `fsync=0/0 fullsync=0/0` on all 12 barrier executions: both calls return 0 with errno 0, so
   `F_FULLFSYNC` is honoured, not silently ignored, on this host from the upstream
   build. `INDEX.md` listed exactly this as unresolved for the Thunderbolt bridge; note
   this run wrote to the **internal** volume, so the bridge question stays open.
-- Barrier 17-48 ms while pages were dirty; 3.7-4.0 ms when nothing was pending. The
+- Barrier 16.7-51.6 ms while pages were dirty; 3.7-4.1 ms when nothing was pending. The
   fixed cost is ~4 ms and the rest is the physical write.
 - Fork production (external volume, ~647 MiB stores, unbarriered `save=` ~166 ms)
   measured 4.05 ms mean over 6 stores. Different device and duty cycle, which is why
   both figures are reported and neither is presented as *the* cost. The earlier
   "~2.4 % of store time" framing in the commit notes was the favourable case only and
   has been replaced.
+
+> Count note (corrected 2026-11-18 after review): this file earlier said "seven
+> stores" and "all ten stores". Actual: 12 barrier executions across two runs
+> (8 in run 1 over 8 stores, 4 in run 2 over 4 stores). The run-1 log grew after
+> the first capture because a second batch of requests reused the same server.

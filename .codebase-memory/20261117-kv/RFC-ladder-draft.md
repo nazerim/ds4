@@ -31,18 +31,47 @@ against upstream. Platform of all *fork-side* measurements below: macOS /
 Metal (Apple M5 Max, external NVMe, APFS). **Nothing here has been built or
 tested on Linux or CUDA; we make no claim about those platforms.**
 
-- **Score-based eviction before a write.** Each candidate scores
-  `(effective_hits + 1) × tokens / file_bytes`, with hits decayed by age
-  (`exp2(-age_hours / 6)`), a ×2.0 prior for anchor-reason entries, and a prefix
-  supersede discount of `×(0.05 + 0.45·h)`, `h ∈ [0,1)`. Eviction runs pre-store.
+| Surface | Upstream today (file:line at `origin/main`) |
+|---|---|
+| Budget | Opt-in: cache exists only with `--kv-disk-dir` (`ds4_server.c:16021`); default budget **4096 MiB** (`ds4_kvstore.h:12`, `ds4_kvstore.c:633`) |
+| Store reasons | `cold`, `continued`, `evict`, `shutdown`, `agent-system`, `agent-session` (`ds4_kvstore.c:174-182`) |
+| Continued grid | one flat step: `continued_interval_tokens` default 10000, aligned up to 10240 by `boundary_align_tokens` 2048 (`ds4_kvstore.c:33-42,736-745`); fires **only at exact multiples** — `live_tokens % step != 0 → 0` (`ds4_kvstore.c:747-754`) |
+| Cold stores | skipped for multimodal requests and for prompts over `cold_max_tokens` (default 30000) (`ds4_server.c:13727-13739`); cut position = stable chat prefix (`ds4_kvstore_chat_anchor_pos`, `ds4_kvstore.c:717-733`) or boundary-trimmed prompt (`ds4_kvstore_store_len`, `:706-715`) |
+| Retention | per-file eviction score `(effective_hits+1)·tokens/file_size`, hits decayed `exp2` with a **6 h half-life** (`ds4_kvstore.h:13`, `ds4_kvstore.c:538-566`); ×2.0 prior for anchor reasons cold/evict/shutdown (`:52-56,532-536`); a continued file that is a strict text-prefix of the incoming store is discounted by `×(0.05 + 0.45·h)`, `h ∈ [0,1)` (`:44-50,510-530`). Runs before a store that would overflow (`:1050-1058`) |
+| Identity | files keyed by sha1 of prompt text; no lineage ids, no parent/child links — 0 occurrences of `parent_sha`, `children`, `anchor_step`, `small_dense`, `divergence`, `retire`, `grace`, `ladder` or any tokenizer fingerprint in upstream `ds4_kvstore.c` (the word `anchor` there means the reason-prior and the chat-prefix position, not a grid rung) |
+| Load checks | model_id, optional quant, expected file size from header, `loaded_tokens->len == hdr.tokens` (`ds4_kvstore.c:1254,1286,463-465`) |
+| Images | upstream KV payloads carry no image identity: 0 `image` occurrences in `ds4_kvstore.c`; continued stores gated `if (!multimodal)` (`ds4_server.c:13827,13966`) |
+| Durability | tmp+rename with no `fsync` anywhere in `ds4_kvstore.c` (count = 0; write path `:1061-1113`); sha1 keys the *text*, nothing checksums the payload |
 
 ## The design axes we found load-bearing
 
 Fork experience, in the order they bit us:
 
-  budget 4096 MiB and opt-in via `--kv-disk-dir`; ours: 256 GiB, which is the current
-  `ds4-server.sh:38` default (`KV_SIZE="${KV_SIZE:-262144}"`) and was 64 GiB when the
-  motivating trace ran.
+1. **Retention / eviction pressure, and when *not* to store.** Under a
+   production budget (ours: 256 GiB current default, `ds4-server.sh:38`; 64 GiB when
+   the trace below ran), every store can
+   trigger an eviction; which file dies matters more than how many are kept.
+   Our fork ranks victims per-lineage with a grace window on the leaf
+   (`--kv-cache-retire-grace-seconds` default 3600,
+   `ds4_kvstore.h:30,116`); upstream ranks files individually. Both are
+   policies over the same two inputs: recency and bytes-per-reused-token.
+2. **Cross-restart reuse.** Checkpoints' main value is surviving process
+   death; keys must stay valid across restarts. Upstream keeps files after a
+   successful load (`24fa85e`) and keys by text sha. We needed more: a
+   tokenizer fingerprint stamped into files (fork PR #1020, still open
+   upstream) after real incidents where a changed tokenizer made stale files
+   load "successfully".
+3. **Lineage / parent chains vs single-file checkpoints.** Upstream files are
+   fully self-contained. Our fork chains stores (`parent_sha` + `children`
+   refcount) so a deep continued store writes a delta (~607-609 MiB flat vs a
+   14,023 MiB full file at ~426k tokens, measured on the fork). Chain safety
+   then *forces* lineage-aware retention: a parent with live children cannot
+   simply be evicted.
+4. **Anchor / frontier granularity.** Where rungs sit and when they fire
+   decides both write amplification and worst-case re-prefill. Upstream: one
+   exact-multiple grid. Fork: `anchor_step` 8192, doubled above 49152 tokens
+   (`ds4_kvstore.h:20,25`), plus miss-driven divergence anchors at the exact
+   common prefix when a load misses mid-session.
 
 ## Relation to the open PRs
 
@@ -61,6 +90,13 @@ Mechanism-level only; no claims about author intent.
   grace/lineage axis asks). Note both #1340 and #1342 cite "#1323 root cause"
   investigation in their bodies — the three are one conversation we should
   join, not fork.
+- **#1343** (*save image conversations in the disk KV cache*) is the **largest open
+  change to `ds4_kvstore.c`**: +1080/−63 across both kvstore files plus docs and two
+  new test files, open, updated 2026-11-10. It also introduces payload-side identity,
+  so any format-level lineage discussion (slice 5) must treat it as prior art and a
+  textual conflict, even though image handling is out of scope for this RFC.
+- **#1345** (*make layer-major prefill chunk boundaries saveable*, `ds4.c` only) sits in
+  the same grid-reachability space as open question 2.
 - **#1323 (`--kv-cache-cold-anchor last-user`, +86/−6).** **Orthogonal in
   mechanism** (cold-store cut position, a different code path), **same
   underlying axis**: it exists because long fixed histories want *reusable*
@@ -70,14 +106,6 @@ Mechanism-level only; no claims about author intent.
   the same conversation; #1228 ("retain bounded cold cache prefixes for long
   prompts", by title) is in that space too.
 
-
-- **#1343** (*save image conversations in the disk KV cache*) is the largest open
-  change to `ds4_kvstore.c` — **+1080/−63 across both kvstore files**, plus docs and
-  two new test files, open and updated 2026-11-10. It also introduces payload-side
-  identity, so any format-level lineage discussion must treat it as prior art and a
-  textual conflict, even though image handling is out of scope for this RFC.
-- **#1345** (*make layer-major prefill chunk boundaries saveable*, `ds4.c` only) sits in
-  the same grid-reachability space as open question 2 and should be counted there.
 ## Explicit non-goals
 
 - **Not** upstreaming the fork's KV rewrite (+2,933/−199 on
@@ -98,14 +126,23 @@ Mechanism-level only; no claims about author intent.
 
 Held (fork-side, macOS/Metal):
 
-The trace that motivated the grace window is ours, from 2026-08-07 (743 requests at a
-64 GiB cache), and it exercised **our** lineage-retirement ranking
-(`conversation-retired`, `4f4a486`, 2026-08-02) — **not** upstream's score-based
-evictor, which has been in mainline since 2026-05-19 (`599e49d`) with the anchor prior
-and prefix discount added 2026-05-26 (`ec6a82a`). So the finding was never measured
-against the evictor you actually ship. The cross-session retirement pathology may be
-an artifact of our own ranking rather than anything upstream needs to fix, and we are
-saying so before anyone has to ask.
+- A 743-request trace (2026-08-07) showing cross-session retirement — a
+  just-live conversation's frontiers evicted while idle lineages were kept —
+  as the dominant rebuild cost in *our deployment, on our pre-grace eviction,
+  against a 64 GiB budget*. It is motivation, not an upstream measurement, and the
+  ordering matters: that trace ran against **our** lineage-retirement ranking
+  (`conversation-retired`, `4f4a486`, 2026-08-02), while upstream's score-based evictor
+  has been in mainline since 2026-05-19 (`599e49d`) with the anchor prior and prefix
+  discount added 2026-05-26 (`ec6a82a`). So the finding was never measured against the
+  evictor you ship, and the pathology may be an artifact of our own ranking.
+- Unit coverage of the ladder/anchor policies (fork `--server` suite, plus a
+  policy harness in `make test`), and a mutation-proven store-decision suite
+  from `2b06dc7`.
+- Adjacent measurements that bound why retention matters here: 107 eviction
+  events dropping 18.92 M tokens in retained logs (demand for long
+  re-prefills is manufactured by reuse misses), and a demonstrated
+  cross-restart hit: a 96,883-token prompt, 75.6 s cold → 12.1 s after
+  restart, `cached=81920` (fork build).
 
 Lacked — stated plainly:
 
@@ -138,23 +175,23 @@ Lacked — stated plainly:
 5. **Lineage/parent-chain**: design discussion only until 1-3 land. Format
    change; needs maintainer appetite before code exists.
 
-
 Two notes that shrink this offer rather than grow it:
 
 - **Slice 1 is smaller than it reads.** Upstream already logs evictions
   (`kv cache evicted reason=disk-cache-full tokens=%u hits=%u size=%.2f MiB file=%s`,
   `ds4_kvstore.c:597`). The increment is exposing the *score components*, not adding a
-  log line — so it should be a small, uncontroversial patch.
-- **Where coverage already exists we will point at it rather than promise it.**
+  log line.
+- **Where coverage exists we point at it rather than promising it.**
   `tests/kv_policy_harness` is wired into `make test`, and retention has model-free
   `--server` coverage (`test_kv_cache_retire_grace_protects_recent`).
 
-Separately, and independent of any retention decision: we hold a small
-macOS/Metal-tested patch that barriers checkpoint writes before the publish-rename.
-`ds4_kvstore.c` currently contains no `fsync` (count 0) while publishing via
-tmp→rename, and nothing on the load path validates payload bytes — so an entry whose
-data did not survive can load as a valid checkpoint. We are filing that on its own;
-it is not contingent on this discussion.
+Separately, and independent of any retention decision: we hold a small macOS/Metal-
+tested patch that barriers checkpoint writes before the publish-rename.
+`ds4_kvstore.c` contains no `fsync` (count 0) while publishing via tmp→rename, and
+nothing on the load path validates payload bytes — so an entry whose data did not
+survive can load as a valid checkpoint. We are filing that on its own; it is not
+contingent on this discussion.
+
 ## Open questions for maintainers
 
 1. Is per-file eviction the intended permanent model, or should the kvstore
@@ -181,21 +218,21 @@ unverified, stated as such.
 | # | Claim | Source | How verified |
 |---|---|---|---|
 | 1 | Upstream `ds4_kvstore.c` = 1,352 lines; fork = 4,086 | both files | [G][F] `wc -l` on `git show` output and working tree |
-| 2 | Divergence scale: `ds4_kvstore.c` alone +2,933/−199 over 45 commits; `.c`+`.h` +3,163/−206 over 46 | `git diff --numstat`/`git rev-list` at `b3f5018` | [G] re-verified. The barrier doc previously mispaired these scopes; corrected 2026-11-17 23:04 |
+| 2 | Divergence scale: `ds4_kvstore.c` alone +2,933/−199 over 45 commits; `.c`+`.h` +3,163/−206 over 46 | `git diff --numstat` + `git rev-list` at `b3f5018` | [G] re-verified. `UPSTREAM-PR-barrier.md` previously conflated these two scopes; corrected 2026-11-17 23:04 |
 | 3 | Upstream continued target = exact equality ⇒ FIX-1-class bug cannot occur upstream | `ds4_kvstore.c:747-754` | [G] direct read |
 | 4 | No fork vocabulary upstream (`anchor_step`/`small_dense`/`parent_sha`/`children`/`divergence`/`retire`/`grace`/`ladder`/fingerprint = 0 hits) | upstream `ds4_kvstore.c` | [G] `grep -ci` per symbol |
 | 5 | Upstream defaults: 4096 MiB budget, opt-in dir, min 512, cold_max 30000, interval 10000→10240, align 2048, trim 32, half-life 6 h | `ds4_kvstore.h:12-13`, `ds4_kvstore.c:33-42`, `ds4_server.c:16021` | [G] |
 | 6 | Eviction score + priors (×2.0 anchor reasons; 0.05/0.45 prefix supersede; pre-store evict) | `ds4_kvstore.c:44-56,510-566,1050-1058` | [G] |
 | 7 | Load keeps files; load checks model_id/size/len; no fsync (0 hits); sha1 = text key, payload unchecked | commit `24fa85e`; `ds4_kvstore.c:1254,1286,463-465,1061-1113` | [G] |
 | 8 | Cold stores skipped for multimodal and prompts > cold_max | `ds4_server.c:13727-13739,13827,13966` | [G] |
-| 9 | #1340, #1342, #1323 open; sizes, authors, quoted in-PR numbers | live `gh pr view` | [gh] verified. Dates: #1340/#1342 opened & updated 2026-11-10; **#1323 opened 2026-11-05, last updated 2026-11-11** |
-| 10 | Aug-7 trace (743 req, 64 GiB) motivated the fork's grace window | `adr.md:7`; grace `3faa8d7` 2026-08-08 | [G] verified. **Scope caveat:** the trace ran against fork lineage-retirement ranking (`4f4a486`, 2026-08-02), not upstream's evictor (`599e49d` 2026-05-19 + `ec6a82a` 2026-05-26, both ancestors of the fork). Never re-derived against upstream's scorer. |
-| 11 | Ladder live verification (phase 6) never ran; "half the anchor writes above 48k" is by construction (8192→16384) | [D] `adr.md` KV-Cache-v2 ADR consequences (the phase-6 line) + grid ADR (the 8192→16384 arithmetic); `20261117-kv/census-doomed-kv-files.md` "does NOT license" | [D] |
+| 9 | #1340 +116/−18 (5 files, OPEN, emilianbold), #1342 +74/−3 (3 files, OPEN, emilianbold), #1323 +86/−6 (4 files, OPEN, maciekd); their quoted in-PR measurements | live `gh pr view` | [gh] verified. Dates: #1340/#1342 opened & updated 2026-11-10; **#1323 opened 2026-11-05, last updated 2026-11-11** |
+| 10 | Aug-7 743-request trace (64 GiB) motivated the fork's retire-grace | `adr.md` "KV Cache v2" Context; grace `3faa8d7` 2026-08-08 | [D] verified. **Scope caveat:** the trace exercised fork lineage-retirement ranking (`4f4a486`, 2026-08-02), not upstream's evictor (`599e49d` 2026-05-19 + `ec6a82a` 2026-05-26, both ancestors of the fork). Never re-derived against upstream's scorer |
+| 11 | Ladder live verification (phase 6) never ran; "half the anchor writes above 48k" is by construction (8192→16384 above 49152) | [D] `adr.md` KV-Cache-v2 ADR consequences (the phase-6 sentence) + grid ADR (the arithmetic); `20261117-kv/census-doomed-kv-files.md` "does NOT license" | [D] |
 | 12 | Census: 143 files / 88.78 GiB **resident, unloadable, still present** (34.7% of a 255.95 GiB cache; 753/753 payload magics verified); nothing reclaimed | [D] `20261117-kv/census-doomed-kv-files.md` (script `kv_doomed_census.py`) | [D]; belongs to FIX 1/2, **not** ladder evidence; fork production only |
 | 13 | FIX 1: 187/792 stores `trimmed != 0`, 113.62 GiB written (≠ resident 88.78 GiB), 41 loader discards; FIX 2: one anchor → 342 stores / 44.4 GiB | [D] `adr.md` (2026-11-17 ADR + correction), census, `HANDOFF-20261117-PREFILL-DIPS.md` §2c | [D]; fork-only bug classes (see #3) |
 | 14 | Cross-restart hit 96,883 tok: 75.6 s → 12.1 s, `cached=81920` | [D] `HANDOFF-20261117-PREFILL-DIPS.md` §10 | [D]; fork build, macOS/Metal |
 | 15 | Chained delta ~607-609 MiB flat vs full 14,023 MiB @ ~426k (23.0×) | [D] `adr.md` ADR 2026-09-29 consequences | [D]; fork measurement |
-| 16 | Eviction pressure: 107 `evicting checkpoint` events / 18.92 M tokens | `HANDOFF` §9 | [D]. Different scope from the 93 / 17,463,570 in `design-kv-io-lock.md` (one log set, slot evictions) — that figure was **reproduced there**, not retracted; both stand for their own scope |
+| 16 | Eviction pressure: 107 `evicting checkpoint` events / 18.92 M tokens | `HANDOFF` §9 | [D]; recount over all retained qwen logs gives 107 / 18,917,350. Different scope from the 93 / 17,463,570 in `design-kv-io-lock.md` (slot evictions, one log set, **reproduced there at :69-70**, not retracted) |
 | 17 | Fork production budget 256 GiB | `ds4-server.sh:38` (`KV_SIZE=262144`) | [F] |
 | 18 | Fork knobs: anchor_step 8192 / wide step above 49152 / grace 3600 s / max-divergence-anchors 8 | `ds4_kvstore.h:20,25,30,31` | [F] |
 | 19 | Tokenizer fingerprint = fork-side, unmerged PR #1020 (#983 superseded by it) | [D] `adr.md` Sep-6 ADR; barrier doc; PR #983 comment | [gh][D]; #1020 still open at draft time |
