@@ -69,6 +69,12 @@ Override model: `DS4_TEST_MODEL=/path/to/model.gguf ./ds4_test --server`
 - **Fork:** `nazerim/ds4` (nazerim remote) — KV retention lineage, DSML recovery hardening, DSpark/agent tooling ahead of upstream
 - **Local mirror:** `/Users/naz/Projects/ds4-upstream` tracks `antirez/ds4` for comparison
 - **Merged 2026-08-04:** upstream through `b7e9f00` (merge `e23cb2f`): MXFP4 (CUDA native + portable Metal experts + GGUF format), CUDA TP/HMMA work, decode-island graphs, batched-serving knobs (`--mixed-prefill-quantum` replaces the `DS4_SERVER_MIXED_PREFILL_QUANTUM` env var), checkpoint-versioned test fixtures. Merge was conflict-free; upstream never touched `ds4_kvstore.c/h` or the agent path.
+- **Clarification 2026-11-17:** "upstream never touched `ds4_kvstore.c/h`" describes that merge
+  range only -- those files are **upstream's own** (`4844d55` distributed KV checkpoints,
+  `24fa85e` keep-after-load, `ccea768` Qwen3.8 support). Upstream's `ds4_kvstore.c` is 1,352
+  lines against our 4,086 (+3,163/-206 over 45 commits), and contains none of `anchor_step`,
+  `small_dense`, `parent_sha`, `children` or divergence anchors. Read the sentence as "no
+  conflicts to resolve", not "this file is ours and so cannot be contributed back".
 
 ### DSpark — temperature-aware speculative decoding (ABANDONED — superseded upstream)
 
