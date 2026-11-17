@@ -367,7 +367,15 @@ did exactly that: they passed the snapped-down grid `target`.
 
 Measured cost over one server lifetime: 187 of 792 stores logged `trimmed != 0`
 (181 distinct files, mean 629 MiB) ≈ 89 GiB, ~35% of the 256 GiB budget, all
-write-only. 41 loader discards, **41/41 traceable to `trimmed != 0` files and none
+write-only.
+> **Correction 2026-11-17, see `20261117-kv/census-doomed-kv-files.md`.** The
+> parenthetical and the GiB above are two different quantities fused into one
+> sentence: 187 stores / 181 distinct shas summing **113.62 GiB of bytes written**
+> (mean 630 MiB), versus **88.78 GiB resident in 143 files** at last-store-per-sha.
+> The resident half is now measured by us, not inherited from the audit (143 files,
+> 88.78 GiB, 34.7% of the 255.95 GiB cache, payload magic verified on all 753
+> files). Also: nothing here is *reclaimed* — the fix is prospective and all 143
+> files are still on disk. 41 loader discards, **41/41 traceable to `trimmed != 0` files and none
 to a `trimmed == 0` file**; each discard cost a full payload read, an unlink, a
 live-session invalidation, a rewrite and a re-prefill.
 
