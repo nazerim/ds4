@@ -390,3 +390,54 @@ Caveat on generality: the 1.5% comes from synthetic multi-turn prefills with 0
 evict storms. Before closing S1 permanently, re-measure under real agent traffic
 (compaction-driven evictions + cold reloads), where store+load land back-to-back
 under the same lock.
+
+---
+
+## Close-out — 2026-11-18 01:20 (this run ended here)
+
+**Shipped publicly.** Upstream PR **antirez/ds4#1358** (durability barrier, `dcf77c4`,
++47/−0 in `ds4_kvstore.c`, base `b3f5018`, `MERGEABLE`) and a comment on **#1020**
+re-opening the representation question. Both posted texts are committed in
+`20261117-kv/post-*.md` and were read back hash-identical.
+
+**Fork.** The review's errno fix was back-ported (`8ec3f2c`) and the owner restarted production at 01:15:39; engine PID 87193 verified
+answering correctly with 0 log errors, running the 01:09 binary that carries it.
+
+**Gate record.** `make clean && make` 0 warnings; `./ds4_test --server` passes; speed is
+parity measured A/B/B/A ×2 reps (prefill +0.52 %, gen −0.27 %, both below the largest
+same-arm spread); the barrier was **executed** 12/12 times on the upstream tree with
+`fsync=0/0 fullsync=0/0`. Full `make test` remains unachievable here and is disclosed as
+such — budget refusals on the V4.1 fixture plus DeepSeek V4-era files this build rejects
+outright.
+
+**Knowledge corrected, not just added.** Census measured our own unloadable-checkpoint
+figure (143 files / 88.78 GiB resident / 34.7 %, nothing reclaimed); the fused
+written-vs-resident arithmetic was split apart in both `adr.md` and this file; `INDEX.md`
+carried a **false retraction** (the 93/17,463,570 figure was reproduced, not unverified)
+and a **misattribution** (1,353/859 t/s belong to the design agent, unreproduced rather
+than invented — which also taints §2.4's counterfactual); the "1.5 % with no evict storms"
+caveat is false as written; the 84-87 % metric is a union and is circular unless the
+triggering request is excluded.
+
+**Deliberately NOT closed.**
+- **The RFC is held.** Its motivating claim was reversed during review: the Aug-7 trace
+  exercised our lineage ranking, not upstream's score-based evictor (`599e49d`/`ec6a82a`,
+  May). It needs a re-derivation against their evictor at storm density — the same run
+  that would reopen S1 — before it says anything honest.
+- ~35 of 101 decode dips still unattributed; the parked scope items (in-place trailer
+  truncate, payload checksum) remain parked.
+- FIX 1's off-grid `continued` branch: still never observed live; code reading plus the
+  mutation battery only.
+- `F_FULLFSYNC` across the Thunderbolt bridge: unresolved. ret 0/errno 0 is not proof of a
+  media commit, and the proof run used the internal volume.
+- Upstream **#1331** (ours) unreviewed since Nov 8; deliberately not nudged as well, to
+  avoid turning the inbox into noise.
+- Two standing commitments made in public: rebase #1358 onto #1343 if that lands first
+  (same function, adjacent hunks), and reconcile the `ftell` anchor between #1020 and
+  #1343 if either merges.
+- GitHub shows no Verified badge: the SSH signing key is not registered on the account
+  (all our PRs show blank status). Operator action, cosmetic — see `20261117-kv/SIGNATURE-NOTE.md`.
+
+**Housekeeping.** Baseline bench worktree and 2.1 GiB of probe checkpoints deleted; the
+empty probe dir removed from the cache volume; production cache confirmed untouched at 753
+files. Tree clean, 0 unpushed, 0 behind upstream.
