@@ -137,6 +137,20 @@ path needs a live engine and session (`ds4_session_write_staged_payload`), so it
 reachable from a model-free test, and the durability effect itself needs fault
 injection — stated rather than papered over.
 
+**Full `make test`: not completed, and I'd rather say so than bury it.** On this
+machine the unmodified base commit fails the same 17 cases as this patch (control run,
+same command), so the failures are not introduced here. The cause is that the GGUFs I
+have locally cannot be opened by this build at all — `required metadata key is missing:
+deepseek4.block_count` for the DeepSeek V4/V4.1/Vision-Exp files — so the model-backed
+cases never start. The subset that covers KV disk-cache bookkeeping does pass:
+`./ds4_test --server` → `server: OK`.
+
+**Executed, not just compiled:** with temporary instrumentation on this tree, ten real
+checkpoint stores each logged `fsync=0/0 fullsync=0/0` — both calls succeed and
+`F_FULLFSYNC` is honoured rather than silently accepted. The instrumentation was
+reverted before this commit was finalised; the tree I pushed builds warning-free with
+no probe code in it.
+
 ### Deliberately not included
 
 - **No directory `fsync` after `rename`.** Losing a rename loses a checkpoint, which is
@@ -146,6 +160,12 @@ injection — stated rather than papered over.
   hundreds of MiB. Happy to open a discussion.
 - The trailer rewrite opens the live file with `fopen(path, "r+b")` and truncates in
   place, a related atomicity gap. Separate change.
+- Two sibling call sites in `ds4_agent.c` write the same envelope through
+  tmp→rename with no barrier either. Left alone deliberately: this patch fixes the
+  disk-cache path the server reloads, and widening the blast radius makes a small
+  correctness fix harder to review for no extra safety.
+- Payload checksum, which would detect corruption from any cause rather than closing
+  one window for it. It is the better fix and a much bigger conversation.
 
 ## Review posture
 
