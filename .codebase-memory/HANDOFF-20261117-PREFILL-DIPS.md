@@ -441,3 +441,44 @@ triggering request is excluded.
 **Housekeeping.** Baseline bench worktree and 2.1 GiB of probe checkpoints deleted; the
 empty probe dir removed from the cache volume; production cache confirmed untouched at 753
 files. Tree clean, 0 unpushed, 0 behind upstream.
+
+### Resume cold from here (next session)
+
+Read in this order, nothing else first: (1) this close-out, (2) `20261117-kv/INDEX.md`
+trust table, (3) `20261117-kv/UPSTREAM-PR-barrier.md` gate record, (4) the three ADRs
+dated 2026-11-17 in `adr.md`. Do not follow any path in an older doc without checking
+`DOC-ROT-20261117.md`.
+
+Live state: production engine PID 87193 since 01:15:39 on the binary built 01:09:23,
+which carries the tolerated-`errno` fix (`8ec3f2c`). Fork `main` pushed; branch
+`fix/kvstore-write-barrier` = `dcf77c4` on `nazerim`, worktree
+`~/Projects/ds4-pr-kvstore-barrier` kept for rebase work. `origin/main` still `b3f5018`.
+
+**If a maintainer replies on #1358:** the two commitments made publicly are (a) rebase
+onto #1343 if it lands first -- same function `ds4_kvstore_store_live_prefix_text`,
+adjacent hunks -- and (b) accept an `fsync`-only outcome without arguing, because the
+finding is the missing barrier, not the choice of barrier.
+
+**If #1020 gets a reply:** he may name a different representation than `ext_flags`; the
+open decision is whether weight-identity invalidation stays out of that PR.
+
+**The RFC blocker, stated accurately:** the Aug-7 743-request trace is **not retained**
+-- `adr.md` cites no file for it and no matching artifact exists on this host (verified
+2026-11-18; the only `743` hit is an unrelated log timestamp `074323`). So the
+re-derivation against upstream's score-based evictor cannot be done by re-analysis; it
+needs a **new** comparable workload at evict-storm density, which is a recording session
+on the live engine, not an afternoon of grep. That is the honest cost of unblocking the
+RFC, and it is the same run that would settle whether S1 stays closed.
+
+**Smaller open items, in rough value order:** the `84-87 %` correlation needs the union
+trigger and same-request exclusion before it can be quoted at all; ~35 of 101 decode dips
+unattributed; FIX 1's off-grid `continued` branch still unobserved live; `F_FULLFSYNC`
+across the Thunderbolt bridge unproven (ret 0 is not a media commit); #1331 unreviewed
+since Nov 8 and deliberately left un-nudged; GitHub signature badge needs the SSH signing
+key registered (operator action, `20261117-kv/SIGNATURE-NOTE.md`).
+
+**Two process lessons from this run, because they are the kind that recur.** Editing
+markdown by replacing a *paragraph* destroys every sibling bullet in it -- a bullet list
+is one block (this deleted five entries from the trust table). And porting a patch to
+another tree requires re-verifying every noun in its *prose*: the fork's comment about
+tokenizer fingerprints is true here and false upstream, and the port nearly shipped it.

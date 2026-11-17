@@ -72,7 +72,12 @@ asks for alternating repeats precisely because of the first effect; had I filed 
 rep each I would have shipped a regression that did not exist, and a cost claim that
 understated the unfavourable case by ~10x.
 
-## PR body (draft; the temp copy is superseded by this file)
+## PR body (draft)
+
+> **SUPERSEDED.** The text actually filed is `post-pr-barrier.md`, verified
+> byte-identical against live PR #1358. Kept only to show what review changed -- do
+> not paste this section.
+
 
 ### Problem
 

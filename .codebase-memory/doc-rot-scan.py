@@ -33,7 +33,33 @@ ALLOWED_DEAD = {
     ".codebase-memory/20261117-kv/INDEX.md": {
         "ds4-live-argv.txt", "ds4-live-env.snapshot.txt",
     },
+    # Same situation: the bench manifest names them to explain why the CSVs were
+    # copied out of temp. A citation about rot is not rot, and it certainly is not a
+    # boot recipe -- which is how this file was misfiled under Severity A once already.
+    ".codebase-memory/20261117-kv/BENCH-MANIFEST.md": {
+        "ds4-live-argv.txt", "ds4-live-env.snapshot.txt",
+    },
 }
+
+# Severity A means "a recipe you could paste will fail", so mere mention must not
+# qualify: the line also has to look like a command. Requiring this stopped the
+# detector labelling documentation-that-discusses-the-bug as documentation-containing-
+# the-bug. KNOWN_SEVERITY_A below stays as the safety net, because a missed executable
+# recipe is the dangerous direction of error.
+RECIPE_CUE = re.compile(
+    r"(set -a|source |bash -c|\.\s+\$?\{?TMP|\.\s+/|\bexport\s|\bcmp\b|\bcat\s|nohup|eval )"
+)
+
+
+def mentions_in_recipe(doc: str, cue: str) -> bool:
+    try:
+        with open(doc, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if cue in line and RECIPE_CUE.search(line):
+                    return True
+    except OSError:
+        return False
+    return False
 
 # The generated index quotes every dead reference it catalogues, so scanning it
 # would report the catalogue as rot. Skip the output file itself.
@@ -127,7 +153,8 @@ def markdown(results: dict) -> str:
                if not os.path.basename(d).startswith(OUT_OF_REPO_PREFIXES)}
     out_repo = {d: r for d, r in results.items() if d not in in_repo}
     sev_a = {d: r for d, r in results.items()
-             if any(c in r for c in EXECUTABLE_CUES) or d in KNOWN_SEVERITY_A}
+             if any(mentions_in_recipe(d, c) for c in EXECUTABLE_CUES)
+             or d in KNOWN_SEVERITY_A}
     for d in KNOWN_SEVERITY_A:      # curated entries may have nothing else detected
         sev_a.setdefault(d, [])
     L = ["# Doc-rot index -- dead references in project documentation", "",
