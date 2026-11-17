@@ -108,9 +108,17 @@ QWEN_MTP="${QWEN_MTP:-1}"
 # decode stops being starved sooner.  Measured with 128: a resumed 137k-token session
 # re-prefilled 88479 tokens in 74.3 s (~1200 t/s when the engine is idle, ~400 t/s
 # when a generation is active).  Set QWEN_MIXED_QUANTUM=128 to restore upstream
-# behaviour.  GLM-5.3 already floors this at 1024 in the server, so 512 is well inside
-# the supported range for that family.
-QWEN_MIXED_QUANTUM="${QWEN_MIXED_QUANTUM:-512}"
+# behaviour.  GLM-5.3 already floors this at 1024 in the server, so 2048 is above
+# that family's floor and at the server's idle-chunk floor (2048), and it divides
+# the engine prefill cap (8192) and the KV anchor grid (8192), so continued
+# checkpoints still land on their rungs.
+# Note: idle_prefill_quantum is only ever set for DeepSeek V4.1, so on Qwen the idle
+# chunk is this same 2048 floor - mixed now equals idle, and a concurrent load no
+# longer prefills in smaller slices than an idle one.
+# 2026-11-17: raised 512 -> 2048 to lift concurrent-prefill rate.  Watch decode
+# t/s during a load: this direction makes the interleaved-collapse (observed
+# 3-4 t/s) deeper per stall, not shallower; the fix for that is serialize-prefill.
+QWEN_MIXED_QUANTUM="${QWEN_MIXED_QUANTUM:-2048}"
 QWEN_PORT="${QWEN_PORT:-8002}"
 QWEN_PID_FILE="./ds4-server-qwen.pid"
 QWEN_KV_DIR="${QWEN_KV_DIR:-/Volumes/FireCuda520/ds4-kv-qwen}"
