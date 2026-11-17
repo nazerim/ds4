@@ -12720,6 +12720,26 @@ static ds4_kvstore_trailer_hooks kv_cache_tool_map_hooks(kv_trailer_ctx *cx,
     return hooks;
 }
 
+#ifdef DS4_SERVER_TEST
+/* Test instrumentation for the store *decision*: which length a caller asked
+ * to store, how often, and under which reason.  ds4_session is opaque outside
+ * ds4.c, so the model-free suite cannot hand the policy a real checkpoint
+ * graph; with the hook active the store is recorded instead of executed (no
+ * session, no disk).  That is what lets the suite pin the header/payload
+ * length invariant at the production call sites rather than only in a helper.
+ * Test builds only: production pays nothing and there is no unsynchronized
+ * write. */
+static const ds4_tokens *kv_test_live_tokens;   /* non-NULL: fake live session */
+static bool kv_test_store_hook;
+static bool kv_test_store_ok = true;            /* what the hooked store returns */
+#define KV_TEST_STORE_MAX 8
+static int kv_test_store_calls;
+static int kv_test_store_len[KV_TEST_STORE_MAX];      /* store_len, in order */
+static int kv_test_store_live[KV_TEST_STORE_MAX];     /* tokens->len, in order */
+static char kv_test_store_reason[KV_TEST_STORE_MAX][16];
+static void kv_test_store_reset(void) { kv_test_store_calls = 0; }
+#endif
+
 static bool kv_cache_store_live_prefix_text(server *s, server_slot *slot,
                                             const ds4_tokens *tokens,
                                             int store_len, const char *reason,
@@ -12729,6 +12749,18 @@ static bool kv_cache_store_live_prefix_text(server *s, server_slot *slot,
                                             const char *evict_protect_text,
                                             size_t evict_protect_len) {
     if (!s || !slot) return false;
+#ifdef DS4_SERVER_TEST
+    if (kv_test_store_hook) {
+        if (kv_test_store_calls < KV_TEST_STORE_MAX) {
+            kv_test_store_len[kv_test_store_calls] = store_len;
+            kv_test_store_live[kv_test_store_calls] = tokens ? tokens->len : -1;
+            snprintf(kv_test_store_reason[kv_test_store_calls],
+                     sizeof(kv_test_store_reason[0]), "%s", reason ? reason : "");
+        }
+        kv_test_store_calls++;
+        return kv_test_store_ok;
+    }
+#endif
     char err[160] = {0};
     pthread_mutex_lock(&s->inference_mu);
     /* sync_image_count covers progress-callback writes during prefill;
@@ -13102,10 +13134,85 @@ static void kv_cache_discard_failed_disk_entry(server *s, server_slot *slot,
     pthread_mutex_unlock(&s->inference_mu);
 }
 
+/* ---- continued / divergence store decisions (pure, so the model-free suite
+ * can pin them) -------------------------------------------------------------
+ *
+ * Both plans exist to keep a SCHEDULING value from being used as a PAYLOAD
+ * length.  The invariant, stated at the divergence branch below and honoured
+ * by every other caller of kv_cache_store_live_prefix(): the length handed to
+ * the store MUST equal the live session length, because the payload is staged
+ * from the live checkpoint graph (ds4.c: the payload writer takes the
+ * session's checkpoint row count and cannot be told to stop earlier).  A
+ * shorter value records fewer tokens than the payload holds, so the loader's
+ * terminal check (ds4_kvstore.c: loaded_tokens->len == hdr.tokens) rejects the
+ * file every single time, invalidates the session, unlinks the file and forces
+ * a full re-prefill: a rung that is indexed, charged to the budget, offered as
+ * a candidate, and can never serve.  The grid target is the TRIGGER of a
+ * store, never its length.  969bc97 fixed exactly this for the divergence
+ * path; the continued path kept the conflation until the 2026-11-17 audit
+ * (187 stores with trimmed != 0, mean 629 MiB, none loadable).
+ */
+typedef struct {
+    int store_len;   /* length to store at; 0 = no continued store */
+    int note_len;    /* watermark to record after a successful store */
+} kv_continued_store_plan;
+
+typedef struct {
+    int store_len;     /* length to store at; 0 = no anchor store this call */
+    bool clear_target; /* consume slot->divergence_target_tokens */
+} kv_anchor_store_plan;
+
+static kv_continued_store_plan kv_cache_continued_store_plan(int target,
+                                                             int live_tokens) {
+    kv_continued_store_plan p = {0, 0};
+    if (target <= 0 || target > live_tokens) return p;
+    /* Store, and record, the LIVE length.  The rung stays the trigger, so the
+     * cadence is untouched: snapped targets are monotone in the live length
+     * and the next boundary is target + step > live, so no rung re-fires and
+     * none is skipped.  Recording what was actually stored - not the rung -
+     * is also what every other caller of kv_cache_slot_note_store() does, and
+     * what a disk load leaves behind: the resume watermark is the loaded
+     * frontier, off-grid by construction (see the 306163 case in
+     * test_kv_cache_continued_uses_aligned_frontiers).  The retention bucket
+     * (tokens/anchor_step) can land one bucket above the rung, exactly as any
+     * frontier store's does — those already write the exact live length. */
+    p.store_len = live_tokens;
+    p.note_len = live_tokens;
+    return p;
+}
+
+/* Pending divergence anchor -> store decision.  `covered` says the anchor
+ * depth is already on disk as a continued rung: either its target sits on the
+ * writing grid at that depth, or the caller just wrote this very rung.
+ *
+ * Below the target nothing is stored and the target STAYS pending: the rebuild
+ * has not reached the depth the miss asked to anchor, and this runs on every
+ * prefill chunk, so storing there is premature and pure write amplification -
+ * one requested anchor fired 342 stores / 44.4 GiB in 12 minutes, 341 of them
+ * while tokens < target, and built a 342-link chain eviction cannot retire.
+ * At or above it the anchor fires once, at the live length, and the pending
+ * target is consumed.  Both call sites share this predicate so they cannot
+ * drift apart again; the clearing semantics of the covered case (leave the
+ * target pending) are the pre-existing ones. */
+static kv_anchor_store_plan kv_cache_divergence_anchor_plan(int div_target,
+                                                            int live_tokens,
+                                                            bool covered) {
+    kv_anchor_store_plan p = {0, false};
+    if (div_target <= 0 || covered || live_tokens < div_target) return p;
+    p.store_len = live_tokens;
+    p.clear_target = true;
+    return p;
+}
+
 static void kv_cache_maybe_store_continued(server *s, server_slot *slot) {
     if (!s || !slot) return;
     kv_disk_cache *kc = &s->kv;
+#ifdef DS4_SERVER_TEST
+    const ds4_tokens *tokens = kv_test_live_tokens ? kv_test_live_tokens
+                                                   : ds4_session_tokens(slot->session);
+#else
     const ds4_tokens *tokens = ds4_session_tokens(slot->session);
+#endif
     if (!tokens) return;
     if (getenv("DS4_KV_DEBUG") && ds4_session_has_vision_state(slot->session))
         server_log(DS4_LOG_KVCACHE,
@@ -13120,28 +13227,29 @@ static void kv_cache_maybe_store_continued(server *s, server_slot *slot) {
          * session length — storing at `common` with a full-session payload
          * produced corrupt files on load).  The anchor sits at >= common,
          * still much deeper than the anchor A that caused the miss. */
-        int div_target = slot->divergence_target_tokens;
-        if (div_target > 0 && tokens->len >= div_target) {
-            /* Grid effective AT the target length: above 48k the grid doubles,
-             * so an odd 8192 multiple up there is not covered by continued
-             * stores and keeps its divergence anchor. */
-            const int step = ds4_kvstore_continued_step_at(kc, div_target);
-            if (step > 0 && div_target % step == 0)
-                div_target = 0; /* on the continued grid: already covered */
-            else
-                slot->divergence_target_tokens = 0;
-        }
-        if (div_target > 0) {
-            const int store_len = tokens->len;
-            if (kv_cache_store_live_prefix(s, slot, tokens, store_len, "cold"))
-                server_log(DS4_LOG_KVCACHE,
-                           "ds4-server: divergence anchor stored tokens=%d (target %d)",
-                           store_len, div_target);
-        }
+        const int div_target = slot->divergence_target_tokens;
+        /* Grid effective AT the target length: above 48k the grid doubles, so
+         * an odd 8192 multiple up there is not covered by continued stores and
+         * keeps its divergence anchor. */
+        const int step = div_target > 0
+            ? ds4_kvstore_continued_step_at(kc, div_target) : 0;
+        const bool covered = div_target > 0 && step > 0 &&
+                             div_target % step == 0;
+        const kv_anchor_store_plan ap =
+            kv_cache_divergence_anchor_plan(div_target, tokens->len, covered);
+        if (ap.clear_target) slot->divergence_target_tokens = 0;
+        if (ap.store_len > 0 &&
+            kv_cache_store_live_prefix(s, slot, tokens, ap.store_len, "cold"))
+            server_log(DS4_LOG_KVCACHE,
+                       "ds4-server: divergence anchor stored tokens=%d (target %d)",
+                       ap.store_len, div_target);
         return;
     }
-    if (kv_cache_store_live_prefix(s, slot, tokens, target, "continued")) {
-        kv_cache_slot_note_store(slot, target);
+    const kv_continued_store_plan cp =
+        kv_cache_continued_store_plan(target, tokens->len);
+    if (cp.store_len > 0 &&
+        kv_cache_store_live_prefix(s, slot, tokens, cp.store_len, "continued")) {
+        kv_cache_slot_note_store(slot, cp.note_len);
         /* Review M-5: mirror the library's maybe_store_continued maintenance.
          * A continued store on a re-rendered head (AGENTS.md edit) just added
          * a fresh anchor on the new branch; prune the old branch's small-dense
@@ -13158,20 +13266,16 @@ static void kv_cache_maybe_store_continued(server *s, server_slot *slot) {
         /* Fire a pending divergence anchor that landed at the same boundary
          * as this continued store (already covered) or at a different point
          * (fire now if reachable).  Store at the live length (see above). */
-        int div_target = slot->divergence_target_tokens;
-        if (div_target > 0) {
-            if (div_target == target || tokens->len < div_target)
-                div_target = 0;
-            else
-                slot->divergence_target_tokens = 0;
-        }
-        if (div_target > 0) {
-            const int store_len = tokens->len;
-            if (kv_cache_store_live_prefix(s, slot, tokens, store_len, "cold"))
-                server_log(DS4_LOG_KVCACHE,
-                           "ds4-server: divergence anchor stored tokens=%d (target %d)",
-                           store_len, div_target);
-        }
+        const int div_target = slot->divergence_target_tokens;
+        const kv_anchor_store_plan ap =
+            kv_cache_divergence_anchor_plan(div_target, tokens->len,
+                                            div_target == target);
+        if (ap.clear_target) slot->divergence_target_tokens = 0;
+        if (ap.store_len > 0 &&
+            kv_cache_store_live_prefix(s, slot, tokens, ap.store_len, "cold"))
+            server_log(DS4_LOG_KVCACHE,
+                       "ds4-server: divergence anchor stored tokens=%d (target %d)",
+                       ap.store_len, div_target);
     }
 }
 
@@ -25230,7 +25334,15 @@ static void test_kv_cache_continued_uses_aligned_frontiers(void) {
      * tokens), wrote zero rungs, and its four frontier stores all re-chained from
      * the last grid rung at 131072 - 19.5 GiB instead of the ~5.8 GiB an intact
      * ladder costs.  Snapping down to the deepest boundary fixes the ladder while
-     * keeping every rung on the grid, which is what makes it chainable in turn. */
+     * keeping every rung on the grid.
+     *
+     * What the snapped value IS, and IS NOT: it is the TRIGGER (the cadence that
+     * decides when a rung is due) and the grid alignment that lets a rung itself
+     * be a delta parent.  It is NOT the stored length - the payload is the live
+     * session's own graph, so the store must go in at the live length or its
+     * header contradicts its payload and the loader rejects the file forever
+     * (that conflation is what test_kv_cache_continued_store_uses_live_length
+     * and the driving test below now pin; 2026-11-17 audit, finding 1). */
     kc.opt = kv_cache_default_options();
     kc.continued_last_store_tokens = 131072;
     TEST_ASSERT(kv_cache_continued_store_target(&kc, 251255) == 245760);
@@ -25273,6 +25385,22 @@ static void test_kv_cache_continued_uses_aligned_frontiers(void) {
     TEST_ASSERT(kv_cache_continued_store_target(&kc, 320000) == 0);
     TEST_ASSERT(kv_cache_continued_store_target(&kc, 327680) == 327680);
     TEST_ASSERT(kv_cache_continued_store_target(&kc, 340000) == 327680);
+
+    /* ---- the contract, for the same numbers as above ----
+     * Every rung this grid schedule fires must be STORED at the live length and
+     * must RECORD the live length as the watermark.  Written as pairs so the
+     * scheduling answer and the payload answer can never be conflated again by
+     * a reader (or a caller) of the targets asserted above. */
+    struct { int live; int target; } rungs[] = {
+        {251255, 245760}, {263089, 262144}, {279831, 278528},
+        {315000, 311296}, {340000, 327680}, {65537, 65536},
+    };
+    for (size_t i = 0; i < sizeof(rungs) / sizeof(rungs[0]); i++) {
+        const kv_continued_store_plan p =
+            kv_cache_continued_store_plan(rungs[i].target, rungs[i].live);
+        TEST_ASSERT(p.store_len == rungs[i].live);
+        TEST_ASSERT(p.note_len == rungs[i].live);
+    }
 }
 
 static void test_kv_cache_cold_store_suppresses_duplicate_continued_boundary(void) {
@@ -25288,6 +25416,325 @@ static void test_kv_cache_cold_store_suppresses_duplicate_continued_boundary(voi
     kv_cache_restore_suppressed_continued(&kc, old, 8192);
     TEST_ASSERT(kc.continued_last_store_tokens == 0);
     TEST_ASSERT(kv_cache_continued_store_target(&kc, 8192) == 8192);
+}
+
+static void test_kv_cache_continued_store_uses_live_length(void) {
+    /* The grid target is the TRIGGER; the payload is the live session.  A
+     * store at target < live writes a header recording fewer tokens than its
+     * own payload holds, the loader's terminal check rejects it on every load,
+     * unlinks the file and re-prefills from zero.  Measured 2026-11-17: 187
+     * such stores (181 distinct files, mean 629 MiB) = 88+ GiB that could
+     * never load, and 41 load discards, every one traced to trimmed != 0.
+     * Regression: the continued path passed the snapped rung as the length. */
+    kv_continued_store_plan p;
+
+    /* The bug case: snap-down leaves rows between the rung and the frontier. */
+    p = kv_cache_continued_store_plan(245760, 251255);
+    TEST_ASSERT(p.store_len == 251255);      /* header == payload */
+    TEST_ASSERT(p.note_len == 251255);       /* durable at what was stored */
+
+    /* The in-grid case (the majority, and the only one the old suite looked
+     * at): live IS the rung, so nothing about the decision changes. */
+    p = kv_cache_continued_store_plan(65536, 65536);
+    TEST_ASSERT(p.store_len == 65536);
+    TEST_ASSERT(p.note_len == 65536);
+
+    /* No rung due: no store, and nothing recorded. */
+    p = kv_cache_continued_store_plan(0, 251255);
+    TEST_ASSERT(p.store_len == 0);
+    TEST_ASSERT(p.note_len == 0);
+
+    /* A rung above the live length cannot be staged at all - the payload
+     * writer only ever holds live rows.  Fail closed instead of writing a
+     * file the loader is guaranteed to throw away. */
+    p = kv_cache_continued_store_plan(262144, 251255);
+    TEST_ASSERT(p.store_len == 0);
+    TEST_ASSERT(p.note_len == 0);
+}
+
+static void test_kv_cache_divergence_anchor_waits_for_target(void) {
+    /* A divergence anchor is requested at `common` - the depth a miss rebuilds
+     * to.  Below it the store would anchor a depth nobody asked for, and this
+     * runs on every prefill chunk, so it is pure write amplification: one
+     * "divergence anchor requested" produced 342 stores / 44.4 GiB in 12
+     * minutes, 341 of them while tokens < target, and a 342-link chain
+     * eviction cannot retire (14 352 deferral lines).
+     * Regression: the early-return branch guarded the grid check with
+     * `tokens->len >= div_target` but the store with `div_target > 0` alone;
+     * the sibling branch already had this right. */
+    kv_anchor_store_plan p;
+
+    /* Below the target: silent, and the target STAYS pending so the anchor
+     * still lands when the rebuild reaches it. */
+    p = kv_cache_divergence_anchor_plan(442343, 262656, false);
+    TEST_ASSERT(p.store_len == 0);
+    TEST_ASSERT(!p.clear_target);
+
+    /* Nothing pending: nothing to do, and nothing to clear. */
+    p = kv_cache_divergence_anchor_plan(0, 442343, false);
+    TEST_ASSERT(p.store_len == 0);
+    TEST_ASSERT(!p.clear_target);
+
+    /* Reached, off the writing grid: store once, at the live length, and
+     * consume the pending target so it cannot re-fire. */
+    p = kv_cache_divergence_anchor_plan(442343, 442903, false);
+    TEST_ASSERT(p.store_len == 442903);
+    TEST_ASSERT(p.clear_target);
+
+    /* Reached exactly at the target: same, and the length stored is live, not
+     * the target - they coincide here, which is why the bug stayed hidden. */
+    p = kv_cache_divergence_anchor_plan(442343, 442343, false);
+    TEST_ASSERT(p.store_len == 442343);
+    TEST_ASSERT(p.clear_target);
+
+    /* Covered by a continued rung (grid-aligned target, or the very rung the
+     * caller just wrote): no store, and the target stays pending - the
+     * pre-existing clearing semantics, unchanged by the fix. */
+    p = kv_cache_divergence_anchor_plan(442368, 442903, true);
+    TEST_ASSERT(p.store_len == 0);
+    TEST_ASSERT(!p.clear_target);
+
+    /* Covered AND below: still nothing.  The coverage test must not be able to
+     * smuggle a below-target store back in. */
+    p = kv_cache_divergence_anchor_plan(442368, 400000, true);
+    TEST_ASSERT(p.store_len == 0);
+    TEST_ASSERT(!p.clear_target);
+}
+
+/* Shared fixture for the driving tests below: a server with an empty KV dir,
+ * the store hooked (recorded, never executed), and a fake live token view of
+ * whatever length the case needs.  ds4_session is opaque outside ds4.c, so a
+ * real checkpoint graph cannot exist here: what these tests cover is the
+ * production DECISION - the length and reason that reach the store call, how
+ * many calls fire, and what watermark is left behind.  They are not a payload
+ * round trip; only a model-backed run (tests/ds4_test.c --kv-delta) is. */
+typedef struct {
+    server s;
+    server_slot slot;
+    ds4_tokens live;
+    int ids[1];   /* the hook never reads the ids; only live.len is consulted */
+    char dir[64];
+    bool ok;
+} kv_store_env;
+
+static void kv_store_env_open(kv_store_env *e, const char *tag) {
+    char tmpl[64];
+    snprintf(tmpl, sizeof(tmpl), "/tmp/ds4-kv-%s.XXXXXX", tag);
+    memset(e, 0, sizeof(*e));
+    e->ok = mkdtemp(tmpl) != NULL;
+    if (!e->ok) return;
+    snprintf(e->dir, sizeof(e->dir), "%s", tmpl);
+    pthread_mutex_init(&e->s.kv_mu, NULL);
+    e->s.slots = &e->slot;
+    e->s.slot_count = 1;
+    e->slot.srv = &e->s;
+    e->s.kv.enabled = true;
+    e->s.kv.dir = xstrdup(e->dir);
+    e->s.kv.opt = kv_cache_default_options();
+    e->live.v = e->ids;
+    e->live.cap = 1;
+    /* Pin the grid to the shipped behaviour: the expected rungs below assume
+     * snap-down, which DS4_KV_CONTINUED_SNAP=0 turns off. */
+    setenv("DS4_KV_CONTINUED_SNAP", "1", 1);
+    kv_test_store_hook = true;
+    kv_test_store_ok = true;
+    kv_test_live_tokens = &e->live;
+    kv_test_store_reset();
+}
+
+static void kv_store_env_close(kv_store_env *e) {
+    if (!e->ok) return;
+    kv_test_store_hook = false;
+    kv_test_live_tokens = NULL;
+    unsetenv("DS4_KV_CONTINUED_SNAP");
+    kv_cache_close(&e->s.kv);
+    rmdir(e->dir);
+}
+
+static void test_kv_cache_maybe_store_continued_stores_live_length(void) {
+    kv_store_env e;
+    kv_store_env_open(&e, "live-len");
+    TEST_ASSERT(e.ok);   /* a skipped fixture would make the suite vacuously green */
+    if (!e.ok) return;
+    server *s = &e.s;
+    server_slot *slot = &e.slot;
+
+    /* 1. A snapped rung still stores at the live length.  Resumed frontier:
+     *    rung 245760 due at live 251255. */
+    slot->continued_last_store_tokens = 131072;
+    slot->divergence_target_tokens = 0;
+    e.live.len = 251255;
+    kv_test_store_reset();
+    kv_cache_maybe_store_continued(s, slot);
+    TEST_ASSERT(kv_test_store_calls == 1);
+    TEST_ASSERT(!strcmp(kv_test_store_reason[0], "continued"));
+    TEST_ASSERT(kv_test_store_len[0] == 251255);
+    TEST_ASSERT(kv_test_store_live[0] == 251255);
+    TEST_ASSERT(slot->continued_last_store_tokens == 251255);
+
+    /* 2. Same rung, one chunk later: already stored, so nothing re-fires. */
+    e.live.len = 251767;
+    kv_test_store_reset();
+    kv_cache_maybe_store_continued(s, slot);
+    TEST_ASSERT(kv_test_store_calls == 0);
+    TEST_ASSERT(slot->continued_last_store_tokens == 251255);
+
+    /* 3. The FIX 2 case: no rung due, an anchor pending far above the rebuild
+     *    point.  Three chunks of the measured climb (262656 -> 263680 toward
+     *    common=442343) must write nothing and keep the anchor pending;
+     *    production wrote a full checkpoint on each of them. */
+    slot->continued_last_store_tokens = 262144;   /* the rung below is done */
+    slot->divergence_target_tokens = 442343;
+    const int climb[] = {262656, 263168, 263680};
+    for (size_t i = 0; i < sizeof(climb) / sizeof(climb[0]); i++) {
+        e.live.len = climb[i];
+        kv_test_store_reset();
+        kv_cache_maybe_store_continued(s, slot);
+        TEST_ASSERT(kv_test_store_calls == 0);
+        TEST_ASSERT(slot->divergence_target_tokens == 442343);
+    }
+
+    /* 4. Reached, off the grid: exactly one anchor store, at the live length,
+     *    and the pending target consumed.  The rung at 442368 is already
+     *    durable, so this is the no-boundary branch. */
+    slot->continued_last_store_tokens = 442368;
+    slot->divergence_target_tokens = 442343;
+    e.live.len = 442903;
+    kv_test_store_reset();
+    kv_cache_maybe_store_continued(s, slot);
+    TEST_ASSERT(kv_test_store_calls == 1);
+    TEST_ASSERT(!strcmp(kv_test_store_reason[0], "cold"));
+    TEST_ASSERT(kv_test_store_len[0] == 442903);
+    TEST_ASSERT(slot->divergence_target_tokens == 0);
+
+    /* 5. An anchor sitting on the writing grid is covered by the continued
+     *    ladder: no store, and the target stays pending (unchanged). */
+    slot->continued_last_store_tokens = 458752;
+    slot->divergence_target_tokens = 442368;
+    e.live.len = 458752;
+    kv_test_store_reset();
+    kv_cache_maybe_store_continued(s, slot);
+    TEST_ASSERT(kv_test_store_calls == 0);
+    TEST_ASSERT(slot->divergence_target_tokens == 442368);
+
+    /* 6. Sibling branch (already correct before the fix, pinned so it cannot
+     *    regress): the rung fires and an off-boundary anchor that is now
+     *    reachable rides along, both at the live length. */
+    slot->continued_last_store_tokens = 442368;
+    slot->divergence_target_tokens = 450000;
+    e.live.len = 458752;
+    kv_test_store_reset();
+    kv_cache_maybe_store_continued(s, slot);
+    TEST_ASSERT(kv_test_store_calls == 2);
+    TEST_ASSERT(!strcmp(kv_test_store_reason[0], "continued"));
+    TEST_ASSERT(kv_test_store_len[0] == 458752);
+    TEST_ASSERT(!strcmp(kv_test_store_reason[1], "cold"));
+    TEST_ASSERT(kv_test_store_len[1] == 458752);
+    TEST_ASSERT(slot->divergence_target_tokens == 0);
+
+    /* 7. Sibling branch with the anchor sitting exactly on the rung that just
+     *    fired: `covered` must suppress the second store, because the continued
+     *    checkpoint already carries this live length.  Wiring covered false here
+     *    re-stores the identical file on every such boundary -- write noise,
+     *    and the argument this refactor made shared, so pin it at the call site
+     *    rather than only in the helper's truth table.  Rung 458752 is due at
+     *    live 459000 (step 16384 above 49152). */
+    slot->continued_last_store_tokens = 442368;
+    slot->divergence_target_tokens = 458752;
+    e.live.len = 459000;
+    kv_test_store_reset();
+    kv_cache_maybe_store_continued(s, slot);
+    TEST_ASSERT(kv_test_store_calls == 1);
+    TEST_ASSERT(!strcmp(kv_test_store_reason[0], "continued"));
+    TEST_ASSERT(kv_test_store_len[0] == 459000);
+    TEST_ASSERT(slot->divergence_target_tokens == 458752);
+
+    kv_store_env_close(&e);
+}
+
+static void test_kv_cache_continued_store_cadence_across_rungs(void) {
+    /* What note_store must record (fix 1, companion decision): the watermark
+     * feeds the next rung, so a wrong record either re-fires a rung that is
+     * done or lets one slip.  Walk a resumed off-grid session (the measured
+     * 251255 frontier) across the doubled grid in 512-token prefill chunks and
+     * require: one store per boundary crossing, at the live length each time,
+     * strictly ahead of the previous store, and the watermark left at the last
+     * live length.  The expected fires are the grid crossings of a sequence
+     * that is 375 mod 512, so live never lands on a boundary. */
+    kv_store_env e;
+    kv_store_env_open(&e, "cadence");
+    TEST_ASSERT(e.ok);   /* a skipped fixture would make the suite vacuously green */
+    if (!e.ok) return;
+    const int expected_live[] = {251255, 262519, 278903, 295287};
+
+    e.slot.continued_last_store_tokens = 131072;
+    e.slot.divergence_target_tokens = 0;
+    kv_test_store_reset();
+    for (int live = 251255; live <= 296000; live += 512) {
+        e.live.len = live;
+        kv_cache_maybe_store_continued(&e.s, &e.slot);
+    }
+    TEST_ASSERT(kv_test_store_calls == 4);
+    for (int i = 0; i < kv_test_store_calls && i < KV_TEST_STORE_MAX; i++) {
+        TEST_ASSERT(!strcmp(kv_test_store_reason[i], "continued"));
+        TEST_ASSERT(kv_test_store_len[i] == expected_live[i]);
+        TEST_ASSERT(kv_test_store_live[i] == expected_live[i]);
+        if (i > 0) TEST_ASSERT(kv_test_store_len[i] > kv_test_store_len[i - 1]);
+    }
+    /* The watermark is the durable frontier, not the snapped rung: that is
+     * what a disk load also leaves behind (continued_last_store_tokens is set
+     * to the loaded frontier), and what keeps the next rung one step away. */
+    TEST_ASSERT(e.slot.continued_last_store_tokens == 295287);
+    kv_store_env_close(&e);
+}
+
+static void test_kv_cache_cold_store_suppression_survives_live_length(void) {
+    /* Fix 1 must not defeat the cold-store duplicate suppression: a cold
+     * checkpoint landing exactly on a rung frontier marks that rung handled,
+     * and the prefill callback must then write nothing. */
+    kv_store_env e;
+    kv_store_env_open(&e, "suppress");
+    TEST_ASSERT(e.ok);   /* a skipped fixture would make the suite vacuously green */
+    if (!e.ok) return;
+    server *s = &e.s;
+    server_slot *slot = &e.slot;
+
+    /* The cold path is about to write 16384 as "cold". */
+    slot->continued_last_store_tokens = 0;
+    TEST_ASSERT(kv_cache_slot_suppress_continued(s, slot, 16384) == 0);
+    TEST_ASSERT(slot->continued_last_store_tokens == 16384);
+
+    /* The sync reaches exactly that frontier, off-grid cases included. */
+    kv_test_store_reset();
+    e.live.len = 16384;
+    kv_cache_maybe_store_continued(s, slot);
+    TEST_ASSERT(kv_test_store_calls == 0);
+    kv_test_store_reset();
+    e.live.len = 16896;
+    kv_cache_maybe_store_continued(s, slot);
+    TEST_ASSERT(kv_test_store_calls == 0);
+
+    /* The next rung still fires, and fires at the live length: the rung was
+     * 24576, the session was at 25088 when it became due. */
+    e.live.len = 25088;
+    kv_test_store_reset();
+    kv_cache_maybe_store_continued(s, slot);
+    TEST_ASSERT(kv_test_store_calls == 1);
+    TEST_ASSERT(kv_test_store_len[0] == 25088);
+
+    /* A failed cold store restores the old schedule, so the rung is due
+     * again: the suppression is not a one-way door. */
+    slot->continued_last_store_tokens = 0;
+    const int old = kv_cache_slot_suppress_continued(s, slot, 24576);
+    TEST_ASSERT(old == 0);
+    kv_cache_slot_restore_suppressed(slot, old, 24576);
+    TEST_ASSERT(slot->continued_last_store_tokens == 0);
+    kv_test_store_reset();
+    e.live.len = 25088;
+    kv_cache_maybe_store_continued(s, slot);
+    TEST_ASSERT(kv_test_store_calls == 1);
+    TEST_ASSERT(kv_test_store_len[0] == 25088);
+    kv_store_env_close(&e);
 }
 
 static void test_kv_cache_divergence_target_logic(void) {
@@ -29005,6 +29452,11 @@ static void ds4_server_unit_tests_run(void) {
     test_kv_cache_chat_anchor_ignores_multiturn_tail();
     test_kv_cache_continued_uses_aligned_frontiers();
     test_kv_cache_cold_store_suppresses_duplicate_continued_boundary();
+    test_kv_cache_continued_store_uses_live_length();
+    test_kv_cache_divergence_anchor_waits_for_target();
+    test_kv_cache_maybe_store_continued_stores_live_length();
+    test_kv_cache_continued_store_cadence_across_rungs();
+    test_kv_cache_cold_store_suppression_survives_live_length();
     test_kv_cache_divergence_target_logic();
     test_kv_cache_file_size_must_fit_budget();
     test_sha1_bytes_hex_matches_known_vector();
