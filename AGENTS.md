@@ -28,7 +28,9 @@ inference engine in C with Metal, CUDA, and ROCm backends. See `AGENT.md`
 ## Workstreams
 
 - KV cache v2 rewrite: `PLAN-KV-REWRITE.md`, `PLAN-KV-LINEAGE.md`,
-  `.codebase-memory/adr.md`
+  `.codebase-memory/adr.md` (2026-11-17 ADRs: store length = live session length,
+  write barrier before rename, holds-are-compute),
+  `HANDOFF-20261117-PREFILL-DIPS.md`
 - Checkpoint self-healing + session handoff: `.codebase-memory/adr.md`
   (ADR 2026-09-06) and `.codebase-memory/TODO-20260906.md` (PR states,
   pending #984 port, open questions, proven diagnostics).
@@ -42,9 +44,8 @@ inference engine in C with Metal, CUDA, and ROCm backends. See `AGENT.md`
 - Qwen3.8 PLE n-gram preload/cache: `PLAN-PLE-PRELOAD.md`
 - Qwen3.8 prefill/decode optimization: `PLAN-PREFILL-M5.md`, `PLAN-INT8-MOE.md` (closed),
   `PLAN-GATED-SCAN.md` (closed), `.codebase-memory/QSA-ATTRIBUTION-20261004.md`
-- Live-state + handoffs (merge landed, collection closed, audit final):
-  `.codebase-memory/RESUME-MERGE-CLOSEOUT-20261106.md`; stall fix lane it
-  supersedes: `PLAN-DSML-REWIND.md` (closed, defaults now on).
+- Live-state + handoffs: `.codebase-memory/RESUME-MERGE-CLOSEOUT-20261106.md`;
+  stall fix lane it supersedes: `PLAN-DSML-REWIND.md` (closed, defaults now on).
 - Fork divergence notes: `DS4FORK.md`
 
 ## Conventions
