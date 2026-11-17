@@ -1,0 +1,5 @@
+f2 server pid=92492 args: --ctx 65536 --kv-disk-space-mb 6144 --kv-cache-small-dense 49152 --kv-cache-retire-grace-seconds 0 --kv-cache-max-divergence-anchors 8
+ready after ~10s
+generator exit=0
+5.8G	/Volumes/FireCuda520/ds4-ab-f2
+kv files left: 28

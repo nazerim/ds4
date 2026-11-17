@@ -482,3 +482,15 @@ markdown by replacing a *paragraph* destroys every sibling bullet in it -- a bul
 is one block (this deleted five entries from the trust table). And porting a patch to
 another tree requires re-verifying every noun in its *prose*: the fork's comment about
 tokenizer fingerprints is true here and false upstream, and the port nearly shipped it.
+
+### Addendum 2026-11-18 (overnight A/B run) -- supersedes the RFC-blocker paragraph above
+
+The "record a new workload" blocker is **done**: `20261118-kvstorm/` holds the generator, protocol (pre-registered),
+four arms (A/B/B/A) and `RESULTS.md`. Verdict by the pre-registered rule: **inconclusive for the RFC premise.**
+Upstream returned 76.5 % cold rebuilds vs the fork's 23.5 % at a 6 GiB budget (same-arm spread <= 0.2 pts), but upstream
+evicted only as `disk-cache-full` (no retirement class) and the 6 GiB budget held 29 fork files vs 11 upstream, so
+**capacity (delta chains vs full checkpoints), not eviction order, is the leading explanation.** The RFC stays unposted.
+Next experiment: rerun at a budget both trees can fit (~16 GiB) -- see `RESULTS.md`. Also found: with production's
+`--kv-cache-retire-grace-seconds 3600` the budget is advisory (0 evictions, 35 GB in a 6 GiB budget over 129 requests).
+Production was stopped 02:26-06:23 for this and restored via `start-qwen` (PID 92879), cache untouched at 753 files.
+`~/Projects/ds4-ab-upstream` (b3f5018, built) is kept for the follow-up.

@@ -1,0 +1,18 @@
+requests ok=700 err=0 empty_replies=0
+returning-turn requests=576  latency s: mean=3.3 median=1.1 p90=9.2 max=14.5
+returning-turn prefill tokens rebuilt (approx)=1823902
+  class cold_rebuild returning=False n=64
+  class cold_rebuild returning=True  n=130
+  class disk_hit     returning=False n=60
+  class disk_hit     returning=True  n=443
+  class live_reuse   returning=True  n=3
+  log disk_hit = 298
+  log evicted:conversation-retired = 934
+  log evicted:frontier-superseded = 105
+  log live_miss = 609
+  log lru_retire_candidate = 496
+  log stored:cold = 312
+  log stored:continued = 145
+  log stored:evict = 609
+  log stored:shutdown = 1
+duration=46.4 min  evictions=1039  evictions/request=1.48

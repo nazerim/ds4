@@ -1,0 +1,5 @@
+u1 server pid=91688 args: --ctx 65536 --kv-disk-space-mb 6144 
+ready after ~10s
+generator exit=0
+5.7G	/Volumes/FireCuda520/ds4-ab-u1
+kv files left: 11
