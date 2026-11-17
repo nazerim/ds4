@@ -102,31 +102,35 @@ if [ -z "${QWEN_BATCH_SESSION:-}" ]; then
 fi
 QWEN_MTP="${QWEN_MTP:-1}"
 # Prefill chunk used while another generation is in flight (server default: 128).
-# Raising it trades interleaving frequency for prefill throughput: a bigger slice
-# means FEWER interleaved decode steps, so instantaneous decode t/s during a
-# concurrent prefill can be lower, but the prefill finishes several times sooner and
-# decode stops being starved sooner.  Measured with 128: a resumed 137k-token session
-# re-prefilled 88479 tokens in 74.3 s (~1200 t/s when the engine is idle, ~400 t/s
-# when a generation is active).  Set QWEN_MIXED_QUANTUM=128 to restore upstream
-# behaviour.  GLM-5.3 already floors this at 1024 in the server, so 2048 is above
-# that family's floor and at the server's idle-chunk floor (2048), and it divides
-# the engine prefill cap (8192) and the KV anchor grid (8192), so continued
-# checkpoints still land on their rungs.
-# Note: idle_prefill_quantum is only ever set for DeepSeek V4.1, so on Qwen the idle
-# chunk is this same 2048 floor - mixed now equals idle, and a concurrent load no
-# longer prefills in smaller slices than an idle one.
-# 2026-11-17: raised 512 -> 2048 to lift concurrent-prefill rate.  Watch decode
-# t/s during a load: this direction makes the interleaved-collapse (observed
-# 3-4 t/s) deeper per stall, not shallower; the fix for that is serialize-prefill.
-# CAVEAT found after the change: this is NOT purely a scheduling knob.  The quantum
-# truncates the prefix handed to ds4_session_sync, so it moves the engine's real
-# chunk boundaries and therefore floating-point reduction order (ds4.c:1059-1062,
-# "changing chunk boundaries also changes floating-point reduction order").  It also
-# gates MTP prep boundaries.  Live concurrent-prefill numerics at 2048 differ from
-# the 512 era and from the idle path.
-# No traffic has yet been served at 2048, so its effect is UNMEASURED here; and
-# co-resident prefill rate is driven by co-residency itself (solo 1353 t/s vs
-# co-resident 859 t/s, n=49/39), not by slice size.  Re-measure before trusting it.
+#
+# This value is the unit of executor HOLDBACK, not of interleaving frequency.
+# Each slice is one ds4_session_sync() that takes inference_mu once and keeps it
+# across every engine chunk inside the slice (join + per-chunk work happen
+# inside that loop, ds4.c:80816-80846; the server releases at
+# ds4_server.c:14612), so a decoding slot cannot run until the slice ends.
+# Doubling the quantum therefore doubles the worst-case time a decoder waits.
+#
+# 512 is chosen over 2048 on two verified grounds, not on measurement:
+#  1. Ladder coverage.  A slice resumes at a non-aligned frontier, so positions
+#     are frontier + N*quantum.  512 reaches 15 of every 16 8192-token rungs;
+#     2048 reaches 1 of 4.  The fork's snap-down (ds4_kvstore.c, kill switch
+#     DS4_KV_CONTINUED_SNAP) softens this by storing the deepest boundary at or
+#     below live, but 2048 still thins the dense-small ladder this lane is built
+#     around.
+#  2. Numerics.  The quantum truncates the prefix handed to ds4_session_sync, so
+#     it moves the engine's real chunk boundaries and hence floating-point
+#     reduction order (ds4.c:1059-1062: "changing chunk boundaries also changes
+#     floating-point reduction order") and gates MTP prep boundaries.
+#
+# 2048 was tried on 2026-11-17 to raise concurrent-prefill rate and served ZERO
+# traffic, so no evidence supports it; it would have changed live numerics for an
+# unmeasured gain.  Concurrent prefill rate looks capped by the PLE n-gram read
+# that is joined under inference_mu inside the chunk loop, which no quantum
+# setting fixes.  Re-measure before raising it again.
+#
+# Set QWEN_MIXED_QUANTUM=2048 to A/B holdback; 128 restores upstream.
+# GLM-5.3 floors this at 1024 server-side.
+QWEN_MIXED_QUANTUM="${QWEN_MIXED_QUANTUM:-512}"
 QWEN_MIXED_QUANTUM="${QWEN_MIXED_QUANTUM:-2048}"
 QWEN_PORT="${QWEN_PORT:-8002}"
 QWEN_PID_FILE="./ds4-server-qwen.pid"
