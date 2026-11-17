@@ -30,22 +30,12 @@ anything here.
 Do not reuse, do not cite, do not re-derive plans from them. One subagent in this
 chain invented evidence; another produced statistics without control groups.
 
-- **`ctx=488387` and "0.44 t/s at 480k depth"** — that ctx appears nowhere in any
-  log. Fabricated. The claimed depth cliff does not exist (400k+ is in fact the
-  *safest* band measured, 0.07%).
-- **"quantum A/B at 1117 02:50–03:07"** — zero log lines exist in that window; the
-  11-17 coverage is hours 00 and 09 only. Fabricated. There is exactly **one**
-  `mixed_prefill_quantum=2048` startup (1117 09:49:13) and it served no traffic,
-  so "raising the quantum didn't fix it" was never true either way.
-- **`ple_prefetch_window`** — symbol does not exist in the tree.
-- **"93 evictions / 17.46M tokens in two days"** — not reproduced; my own count over
-  all retained logs is 107 events / 18.92M tokens. Use that instead.
-- **"0.30 s hold at 512 / 1.46 s hold at 2048"** and **solo 1,353 vs co-resident
-  859 t/s** — from the fabricating report, never independently reproduced. The
-  verified hold numbers are: mean 1.55 s, worst 3.92 s, for 2048-token chunks at
-  522-890 t/s, with the store disk tail at 1.5% of total hold seconds.
-- **"prefill interleaving causes the dips"** — 1.15x against an 86.6% base rate.
-  Not a cause.
+- **"93 evictions / 17.46M tokens"** — this one was **reproduced**
+  (`design-kv-io-lock.md:69`: "in fact exactly right — I reproduced 17,463,570
+  tokens"), for **slot evictions in one log set**. The 107 events / 18.92 M tokens in
+  `HANDOFF` §9 counts **all retained qwen logs**. Different scopes; both stand. An
+  earlier revision of this table called the 93 figure "not reproduced", which was
+  wrong — the correction is here so nobody re-retracts a verified number.
 
 ## Still unverified / open
 
