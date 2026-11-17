@@ -188,6 +188,23 @@ how we tell "fixed the KV cause" from "fixed nothing".
 
 ## 7. Open
 
+- **Vision rung cadence — separate scope, deliberately not addressed here.**
+  FIX 1 (§2c) has a side effect on image sessions: the vision gate
+  `okv = vs->valid && store_len == tokens->len` (`ds4_server.c:12798-12802`)
+  used to fail for every snapped rung store, and the failure path is
+  `if (!okv) { log(vrej = "not-frontier"); return false; }` — the store was
+  **skipped entirely**, not written text-only, so no correctness hazard either
+  way. `server_progress_cb` calls `kv_cache_maybe_store_continued` with **no
+  multimodal guard**, so with the fix, deep Vision-Exp prefills now write rungs
+  they never wrote: ~7-9 stores per 100k tokens of growth (`anchor_step` 8192,
+  doubling above 48k) at ~630 MiB mean ≈ **4.5-5.5 GiB per 100k tokens**, each
+  currently under `inference_mu`, on a KV dir at 255.9/256 GiB. Benefit is real
+  (resumable rungs instead of a full ladder re-append), but it is derived
+  arithmetic, not measurement, and the path is untested without a model. Zero
+  vision stores in the two-day window (`reason=turn` = 0, `not-frontier` = 0), so
+  this is latent until image traffic. Options if it costs too much: widen the
+  vision rung step, or gate the behaviour on a deep-session test — do **not**
+  re-introduce the skip as FIX 1's exception.
 - 35 of 101 dips unexplained. Candidates, **none yet verified**: MTP/DSpark
   verify stalls, generation rewind rebuilds (`~350 t/s` per the design agent's
   log read), the vision encoder if it runs under `inference_mu` (unconfirmed —
