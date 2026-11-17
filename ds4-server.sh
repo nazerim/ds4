@@ -118,6 +118,15 @@ QWEN_MTP="${QWEN_MTP:-1}"
 # 2026-11-17: raised 512 -> 2048 to lift concurrent-prefill rate.  Watch decode
 # t/s during a load: this direction makes the interleaved-collapse (observed
 # 3-4 t/s) deeper per stall, not shallower; the fix for that is serialize-prefill.
+# CAVEAT found after the change: this is NOT purely a scheduling knob.  The quantum
+# truncates the prefix handed to ds4_session_sync, so it moves the engine's real
+# chunk boundaries and therefore floating-point reduction order (ds4.c:1059-1062,
+# "changing chunk boundaries also changes floating-point reduction order").  It also
+# gates MTP prep boundaries.  Live concurrent-prefill numerics at 2048 differ from
+# the 512 era and from the idle path.
+# No traffic has yet been served at 2048, so its effect is UNMEASURED here; and
+# co-resident prefill rate is driven by co-residency itself (solo 1353 t/s vs
+# co-resident 859 t/s, n=49/39), not by slice size.  Re-measure before trusting it.
 QWEN_MIXED_QUANTUM="${QWEN_MIXED_QUANTUM:-2048}"
 QWEN_PORT="${QWEN_PORT:-8002}"
 QWEN_PID_FILE="./ds4-server-qwen.pid"
