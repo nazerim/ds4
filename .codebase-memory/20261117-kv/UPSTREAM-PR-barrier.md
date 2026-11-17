@@ -1,15 +1,15 @@
 # Upstream PR — durability barrier for KV checkpoint writes
 
-Branch **`fix/kvstore-write-barrier`** = `4aa5130`, one commit, +45/-0 on
+Branch **`fix/kvstore-write-barrier`** = `dcf77c4`, one commit, +47/-0 on
 `ds4_kvstore.c`, signed, based on `origin/main` (`b3f5018`, still current). Pushed to
 **`nazerim`** only — nothing has been opened against `antirez/ds4`. Superseded shas:
 `a5e9e77` (first port) → `a2cda53` (dropped Linux/CUDA claims) → `f7db783` (cost
-provenance) → `7c49f0b` (review fixes) → `4aa5130` (measured cost, final).
+provenance) → `7c49f0b` (review fixes) → `4aa5130` (measured cost) → `d4a8bbd` (proofread counts) → `dcf77c4` (final: the load-path claim about payload tags vs KV rows, which was wrong in the shipped comment too).
 
 Worktree: `~/Projects/ds4-pr-kvstore-barrier` (matches the existing `ds4-pr*`
 convention; the temporary worktree this was first drafted in has been removed).
 
-**Not filed yet, but every gate that can be closed on this host is closed.** The
+**FILED 2026-11-17: https://github.com/antirez/ds4/pull/1358** — `OPEN`, `MERGEABLE`, base `main` (`b3f5018`), +47/−0 in `ds4_kvstore.c` only; posted body verified byte-identical to `post-pr-barrier.md` on read-back. Every gate closeable on this host was closed first. The
 engine-stop window was taken 21:16–22:58 and all of it was spent: clean build, the
 `--server` suite, a full-`make test` baseline control, four `ds4-bench` sweeps in
 alternating order, and a live execution proof on the upstream tree. What remains
