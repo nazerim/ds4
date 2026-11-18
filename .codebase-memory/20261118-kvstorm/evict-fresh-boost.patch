@@ -1,0 +1,38 @@
+diff --git a/ds4_kvstore.c b/ds4_kvstore.c
+index d9d3311..483d84e 100644
+--- a/ds4_kvstore.c
++++ b/ds4_kvstore.c
+@@ -54,6 +54,14 @@
+  * survive comparable continued entries, while still allowing pressure and poor
+  * density to evict them. */
+ #define KV_CACHE_ANCHOR_REASON_SCORE_FACTOR 2.0
++/* Experimental recency boost for never-hit entries.  Without it a checkpoint
++ * written seconds ago (hits==0) always scores below any entry that has been hit
++ * once, because the hit decay half-life is hours.  Real logs show ~98% of
++ * evictions picking zero-hit entries, ~75% of them within 10s of being written,
++ * so the cache freezes on old content instead of the fresh prefix it was
++ * written to serve.  Both constants are guesses, not measured optima. */
++#define KV_CACHE_FRESH_BOOST 8.0
++#define KV_CACHE_FRESH_HALF_LIFE_SECONDS 300
+ 
+ typedef struct {
+     char *ptr;
+@@ -553,6 +561,18 @@ double ds4_kvstore_entry_eviction_score(
+     }
+     double score = (effective_hits + 1.0) *
+                    (double)e->tokens / (double)e->file_size;
++    /* Experimental: lift freshly written, never-hit checkpoints so they are not
++     * instant victims.  A zero-hit entry scores (0+1)*tokens/size while any
++     * once-hit entry scores about 2*tokens/size (1.9x after an hour), and with a 6-hour hit half-life
++     * that gap lasts for hours: in the measured run 98% of evictions were
++     * zero-hit entries and 75% happened within 10s of the entry being written,
++     * so the cache freezes on old content.  Both constants are experimental. */
++    if (effective_hits == 0.0 && e->created_at != 0) {
++        double age = (now > e->created_at) ?
++            (double)(now - e->created_at) : 0.0;
++        score *= 1.0 + KV_CACHE_FRESH_BOOST *
++            exp2(-age / (double)KV_CACHE_FRESH_HALF_LIFE_SECONDS);
++    }
+     if (kv_cache_reason_is_anchor(e->reason))
+         score *= KV_CACHE_ANCHOR_REASON_SCORE_FACTOR;
+     if (kv_cache_incoming_supersedes_continued(e, incoming)) {
