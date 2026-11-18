@@ -100,6 +100,19 @@ the suffix standalone while the cold path tokenises the whole prompt -- if BPE i
 SEQUENCE. Equal `prompt_tokens` argues against it but does not prove it, and no existing test covers it (`tests/test_prompt_prefix.c` tests a parser, not the
 tokenizer). Settled by the logprobs forced-hit vs forced-cold experiment, which needs a stop window.
 
+**VERIFIED LEAD (2026-11-18, by me, from the real call path -- not from an agent report): the risk is reachable in production.**
+Chain: `continue_after_invalid_dsml` (`ds4_server.c:14990`) -> `append_rendered_suffix_to_live_session` (`:14825`) ->
+`build_prompt_from_exact_prefix_and_text_suffix` (`:14838`) -> `ds4_kvstore.c:2539` (identical body in fork and upstream). The suffix is the whole
+string from `build_invalid_tool_call_error_suffix` (`:14585`), which dispatches by syntax:
+- **DeepSeek/DSML** (`:14499`) starts `"</think>"` then `"<｜end▁of▁sentence｜><｜User｜>..."` -- unspaced markers, presumably registered specials =>
+  a hard token boundary => low risk.
+- **Qwen** starts with the literal `"< |im_end| >\n< |im_start| >user"` then English prose. Those are **spaced** marker strings that may tokenise as
+  ordinary text, so cross-boundary BPE merges are plausible -- **and prod runs Qwen syntax**, so this fires on every malformed tool call.
+- `--inspect` cannot check the vocab either: `./ds4 --inspect -m gguf/...` exits *"another ds4 process is already running (pid 849)"*, i.e. the lock is
+  global, so nothing in this area is probeable without a window.
+Status: harness `tests/test_kv_prefix_stability.c` drafted and being revised to test these real shapes; NOT built, NOT run. Whether `< |im_end| >` is a
+registered special in `gguf/Qwen3.8-Flash-Next-Q4.gguf` is **UNVERIFIED** -- it decides whether this is a bug or a non-issue.
+
 ---
 
 ## SUPERSEDED FIRST PASS (kept so the reasoning trail is auditable; do not quote)
