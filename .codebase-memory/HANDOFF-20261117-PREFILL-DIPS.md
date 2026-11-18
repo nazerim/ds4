@@ -554,7 +554,17 @@ different chunk schedule => different answer.
 
 Prior art searched (read-only): #1266/#1186/#174 concern continued checkpoints being EVICTED; nothing found on
 output changing between chunk schedules. Issue **POSTED** as antirez/ds4#1359 (2026-11-19): `20261118-kvstorm/ISSUE-POST-BODY.md` is the
-public text (verified byte-identical after posting); the draft file keeps the rejected framings. Separate evidence comment already on #711. Full study:
+public text (verified byte-identical after posting); the draft file keeps the rejected framings. Separate evidence comment already on #711.
+
+FORK MITIGATION COMMITTED (same night, after the filing): `git log --grep=cold-stop-parity` - one revertible
+commit in ds4_server.c. It computes the cold-anchor stop even with the disk cache off and inserts the same
+intermediate sync, so the prefill chunk plan depends on the request alone and not on --kv-disk-dir. It does
+NOT move the stop, therefore: cache-on output is byte-identical (proved by building the pre-fix binary in a
+temp worktree and re-running the same prompts with a fresh empty KV dir - identical sha256 on both prompts,
+identical plans), and reuse depth is unchanged (still tokens=12288 trimmed=1570). Verified with a negative
+control: `--disable-kv-cache-cold-stop-parity` restores the old plan (8192->13858) and the divergence
+(1/2 prompts, sim 0.42). Back out with `git revert`, or flip the flag without a rebuild. NOT fixed: off-schedule
+`continued` resume still changes answers - deliberately left for antirez's response to #1359. Full study:
 `20261118-kvstorm/CACHE-DIVERGENCE.md`.
 
 MECHANISM, corrected same day by an independent Opus pass I then verified myself: the harm is the DENSITY term, not the missing age term.

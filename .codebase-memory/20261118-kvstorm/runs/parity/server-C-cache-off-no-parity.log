@@ -1,0 +1,34 @@
+ds4: Qwen BF16 n-grams: 95.37 GiB, disk reads only
+ds4: Metal device Apple M5 Max, 128.00 GiB RAM
+ds4: Metal 4 tensor API enabled for Tensor kernels
+ds4: drift-patch flags hc_stable=on norm_unify=on kv_raw_f32=off rope_exp2_log2=off math_safe=off tensor_matmul=on
+ds4: Metal model views created in 2.072 ms, residency requested in 514.141 ms, warmup 4.150 ms (mapped 71400.44 MiB from offset 10.51 MiB)
+ds4: Metal mapped mmaped model as 1 overlapping shared buffers
+ds4: metal backend initialized for graph diagnostics
+ds4: memory: KV 2.08 GiB (raw 1.63 + compressed 0.46) + buffers 8.68 GiB + resident model 69.73 GiB = 80.49 GiB planned
+ds4: memory detail: ctx=65536 prefill_cap=8192 raw_kv_rows=65536 compressed_kv_rows=16385 backend=metal
+1119 00:21:24 ds4-server: context buffers 11024.12 MiB (ctx=65536, backend=metal, prefill_chunk=8192, raw_kv_rows=65536, compressed_kv_rows=16385)
+1119 00:21:24 ds4-server: disk KV cache disabled; prefill plan parity off
+1119 00:21:24 ds4-server: listening on http://127.0.0.1:8079
+1119 00:21:28 ds4-server: chat ctx=0..13858:13858 prompt start
+1119 00:21:33 ds4-server: chat ctx=0..13858:13858 prefill chunk 8192/13858 (59.1%) chunk=0.00 t/s avg=1820.73 t/s 4.499s
+1119 00:21:37 ds4-server: chat ctx=0..13858:13858 prefill chunk 13858/13858 (100.0%) chunk=1450.81 t/s avg=1648.84 t/s 8.405s
+1119 00:21:37 ds4-server: prefill hold slot=0 8.40s tokens=0..13858 remaining=0 quantum=0 (holds=1 total=8.4s max=8.40s)
+1119 00:21:37 ds4-server: chat ctx=0..13858:13858 prompt done 8.405s
+1119 00:21:37 ds4-server: DSML token not found in vocab; suppression disabled
+1119 00:21:38 ds4-server: chat ctx=13858..13908:50 gen=50 decoding chunk=57.04 t/s avg=57.04 t/s 0.877s
+1119 00:21:39 ds4-server: chat ctx=13908..13958:50 gen=100 decoding chunk=57.93 t/s avg=57.48 t/s 1.740s
+1119 00:21:39 ds4-server: chat ctx=13958..13960:2 gen=102 decoding chunk=57.49 t/s avg=57.48 t/s 1.774s
+1119 00:21:39 ds4-server: chat ctx=0..13858:13858 gen=102 finish=stop 10.179s
+1119 00:21:39 ds4-server: live kv cache miss live=13960 prompt=13858 common=5 vision=match reason=token-mismatch
+1119 00:21:39 ds4-server: chat ctx=0..13858:13858 prompt start
+1119 00:21:43 ds4-server: chat ctx=0..13858:13858 prefill chunk 8192/13858 (59.1%) chunk=0.00 t/s avg=1732.12 t/s 4.729s
+1119 00:21:47 ds4-server: chat ctx=0..13858:13858 prefill chunk 13858/13858 (100.0%) chunk=1379.78 t/s avg=1568.37 t/s 8.836s
+1119 00:21:47 ds4-server: prefill hold slot=0 8.84s tokens=0..13858 remaining=0 quantum=0 (holds=2 total=17.2s max=8.84s)
+1119 00:21:47 ds4-server: chat ctx=0..13858:13858 prompt done 8.836s
+1119 00:21:47 ds4-server: DSML token not found in vocab; suppression disabled
+1119 00:21:48 ds4-server: chat ctx=13858..13908:50 gen=50 decoding chunk=56.88 t/s avg=56.88 t/s 0.879s
+1119 00:21:49 ds4-server: chat ctx=13908..13958:50 gen=100 decoding chunk=57.59 t/s avg=57.23 t/s 1.747s
+1119 00:21:49 ds4-server: chat ctx=13958..13969:11 gen=111 decoding chunk=57.59 t/s avg=57.27 t/s 1.938s
+1119 00:21:49 ds4-server: chat ctx=0..13858:13858 gen=111 finish=stop 10.774s
+1119 00:21:49 ds4-server: shutdown requested, draining requests

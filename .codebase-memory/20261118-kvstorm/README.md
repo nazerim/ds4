@@ -21,6 +21,7 @@ the trail, quote nothing from below the rule.
 | **`PR-RANKING.md`** | **The deliverable: ranks the four open upstream evictor PRs in ~1 s each, and shows the pathology is timescale-dependent. Read its limits section first -- the dwell numbers are unvalidated** |
 | `cachediver_probe.py` + `run-cachediver.sh` | Cold-vs-disk-hit answer comparison on a live engine (needs a window; runner preflights that a disk hit really happened, then restores prod) |
 | `evict_prs.py` | The four PRs as selectable policies (+ combinations), with per-model size refit and a dwell-time knob |
+| **`verify_parity.sh` + `verify_prefix_equal.sh`** | **Fork-side fix verification: cache ON vs cache OFF vs parity-disabled chunk plans, and a pre-fix-vs-patched binary byte-comparison proving cache-on output is unchanged. Includes an explicit negative control, so a silently-vacuous pass is impossible** |
 | **`REPRO.md` / `ISSUE-POST-BODY.md` / `repro_curl_only.sh`** | **The publishable repro: two servers one flag apart, curl only, with the exact chunk-schedule log lines and a completion pair pinned by sha256. ISSUE-POST-BODY.md is what would go public (8.4 KB); the draft file keeps the drafting notes** |
 | **`chunkshape_probe.py` + `run-chunkshape.sh` / `run-shapereal.sh`** | **The decisive harness: same binary, same prompts, engine started with vs without `--kv-disk-dir` (real prose optional via `--corpus-file`, `MODE=upstream` for the b3f5018 build). No checkpoint read on one side, so it isolates chunk schedule from cache state** |
 | **`resume_depth_probe.py` + `run-resumedepth.sh`** | Forces deep vs shallow resume by deleting the checkpoint the last load named; classifies every request from the log |
@@ -34,6 +35,13 @@ the trail, quote nothing from below the rule.
 **Arm names:** `fork-g0,f2,u1,u2` = 6 GiB budget (compare at 561 requests). `f16a,f16b,u16a,u16b` =
 16 GiB; `u400` = upstream at 400 GiB (never evicts); `u16fix` = upstream + boost patch at 16 GiB;
 `g16` = fork with production's grace-3600. All comparisons at 430 requests.
+
+**The finding, in one line:** enabling `--kv-disk-dir` changes greedy answers, because writing the cold
+checkpoint inserts an extra prefill stop and reduction order follows the stop. Fork mitigation is committed
+(seek `git log --grep=cold-stop-parity`): the stop is now inserted with the cache off too, so the plan depends
+on the request alone. Cache-on output is provably unchanged (pre-fix vs patched binary, byte-identical), and
+`--disable-kv-cache-cold-stop-parity` is the runtime escape hatch. Still open after the fix: off-schedule
+resume depth, which the mitigation deliberately does not touch.
 
 **Method debt this folder paid three times.** (1) Attribution by +/-1 s windows double-counted lines because sequential
 requests are <2 s apart. (2) Live-reuse prefill was counted as zero. (3) Two cache-divergence runs were **silent no-ops that

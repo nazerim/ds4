@@ -1,0 +1,7 @@
+Stopping ds4-server (PID: 65259)...
+ds4-server stopped
+Rotated previous log to ./log/ds4-qwen.log.20261119-002536
+Starting ds4-server on port 8002 with model gguf/Qwen3.8-Flash-Next-Q4.gguf (ctx: 524288)...
+Logging to ./log/ds4-qwen.log
+Qwen3.8: vision encoder gguf/mmproj-Qwen3.8-Flash-Next-Q8_0.gguf, batched-session 2, mtp 1, mixed-prefill-quantum 512
+ds4-server started (PID: 65953)

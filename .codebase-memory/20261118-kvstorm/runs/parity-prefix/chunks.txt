@@ -1,0 +1,8 @@
+1119 00:25:11 ds4-server: chat ctx=0..13858:13858 prompt start
+1119 00:25:15 ds4-server: chat ctx=0..13858:13858 prefill chunk 8192/13858 (59.1%) chunk=0.00 t/s avg=1845.52 t/s 4.439s
+1119 00:25:18 ds4-server: chat ctx=0..13858:13858 prefill chunk 12288/13858 (88.7%) chunk=1690.67 t/s avg=1790.84 t/s 6.862s
+1119 00:25:19 ds4-server: chat ctx=0..13858:13858 prefill chunk 13858/13858 (100.0%) chunk=1213.44 t/s avg=1699.24 t/s 8.155s
+1119 00:25:21 ds4-server: chat ctx=0..13858:13858 prompt start
+1119 00:25:25 ds4-server: chat ctx=0..13858:13858 prefill chunk 8192/13858 (59.1%) chunk=0.00 t/s avg=1842.15 t/s 4.447s
+1119 00:25:28 ds4-server: chat ctx=0..13858:13858 prefill chunk 12288/13858 (88.7%) chunk=1659.30 t/s avg=1776.88 t/s 6.915s
+1119 00:25:29 ds4-server: chat ctx=0..13858:13858 prefill chunk 13858/13858 (100.0%) chunk=1171.36 t/s avg=1678.58 t/s 8.256s

@@ -1516,3 +1516,51 @@ pin). Decision + evidence: `.codebase-memory/PR1149-REVIEW-20261008.md`.
   any tensor byte), but the guarantee is the rule, not the code. Our
   merged binary reads all historical fork V1/V2 files permanently
   (triple-accept); new tail-carrying stores use V4 `0x51573804`.
+
+## Prefill-plan parity for the cold-anchor stop (20261119, fork-local, deliberately revertible)
+
+**The divergence.** `generate_job_inner` now computes the cold-checkpoint stop
+(`cold_store_len`) even when no disk cache is configured, and inserts the same intermediate
+`server_session_sync()` when `--kv-disk-dir` is absent, unless `--disable-kv-cache-cold-stop-parity`
+is passed. Upstream inserts that stop only when it is about to write a checkpoint there. The
+`prefill_chunk` alignment assignment moved out of the `if (cfg.kv_disk_dir)` branch, and when there
+is no directory the parsed thresholds are copied into `s.kv.opt` so the stop is computed from
+identical inputs in both modes. `kc.enabled` stays false, so nothing opens and every store path
+returns early; `ds4_kvstore_options` is all-`int`, so that copy owns no pointers.
+
+**Why.** That intermediate sync is what splits the prefill, and splitting changes floating-point
+reduction order (`ds4.c:1059` says so outright), which greedy decoding turns into a different
+answer. Measured on `b3f5018`: enabling `--kv-disk-dir` changed the completion for 6/6 realistic
+~12k-token prompts on this build and 4/6 on upstream, with **no checkpoint ever read** on the
+cache-off side. Filed upstream as **antirez/ds4#1359**; the fork carries the mitigation while we
+wait for a maintainer view, because "the plan must depend on the request alone" is the cheap
+direction and it is the one that cannot move production output.
+
+**Cost.** Cache-off runs get one extra chunk stop per cold request (prefill throughput only).
+Cache-on is byte-for-byte unchanged, so production - which always enables the cache - does not
+move. The store point is untouched: the cold checkpoint is still written at
+`tokens=12288 trimmed=1570` for a 13,858-token prompt, so reuse depth is not traded away.
+
+**Verified 2026-11-19** (`20261118-kvstorm/verify_parity.sh`, `verify_prefix_equal.sh`):
+
+| phase | chunk plan | answer vs cache-on |
+|---|---|---|
+| cache ON | `8192 -> 12288 -> 13858` | baseline |
+| cache OFF, parity on (default) | `8192 -> 12288 -> 13858` | **identical** (2/2 prompts) |
+| cache OFF, `--disable-kv-cache-cold-stop-parity` | `8192 -> 13858` | differs on 1/2 (similarity 0.42) |
+| pre-fix binary vs patched binary, both cache ON | `8192 -> 12288 -> 13858` both | **identical sha256, 2/2** |
+
+The negative control is what makes this mean anything: disabling the fix brings the divergence
+back. One prompt stayed identical even without parity, which is expected - a moved reduction order
+only flips the argmax where greedy decoding sits on a near-tie.
+
+**Not fixed by this, and still open:** resuming from an *off-schedule* checkpoint (a `reason=continued`
+store below the cold anchor) still merges the tail chunks and still changes the answer. This commit
+removes the cache-flag dependence; it does not make output invariant to which checkpoints survived.
+That needs either schedule-canonical resume selection or upstream's own fix, so it stays in #1359
+rather than being half-handled here.
+
+**Back out.** `git log --grep='cold-stop-parity'` finds the one code commit; `git revert` it and the
+tree is exactly upstream's behaviour again. `--disable-kv-cache-cold-stop-parity` is the no-rebuild
+escape hatch. If antirez fixes it upstream, drop this commit and take theirs - the fork carries no
+dependency on it anywhere else.
