@@ -34,5 +34,8 @@ scripts here; it reproduced every headline number and returned 4 corrections (li
 tie-break direction, u400-as-ceiling wording, and the 300 s half-life sitting at this workload's p90 revisit gap of ~315 s).
 All four are folded into `RESULTS.md`.
 
+**Read `PRIOR-ART-AND-CORRECTIONS.md` before doing anything upstream.** It records that #986/#1170 already report and fix this
+mechanism (so do not file), retracts the tie-break claim in RESULTS.md, and lists two errors in a review-drafted issue text.
+
 Worktrees still holding builds: `~/Projects/ds4-ab-upstream` (b3f5018), `~/Projects/ds4-ab-evictfix`
 (patched). Prod untouched throughout (cache 753 files; restore via `start-qwen` is in the chain trap).

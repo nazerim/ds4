@@ -505,9 +505,14 @@ A 20-line experimental recency boost (`~/Projects/ds4-ab-evictfix`, diff vs b3f5
 Earlier analysis bugs, all fixed and re-reviewed: overlapping +/-1 s attribution windows (now finish-line segmentation),
 live-reuse prefill counted as 0, prompt cross-check only covered cold requests.
 
-**What the RFC should now be:** a small, evidence-backed upstream issue/PR about never-hit entries being first victims -- NOT the
-fork's retirement ladder (upstream has no retirement class). It must carry the limits: synthetic workload, constants untuned,
-one budget, no production claim. NOT POSTED; needs the owner's go. INDEPENDENTLY VERIFIED after writing: an adversarial re-review on a different model re-derived every headline number
+**NOT to be filed -- prior art confirmed** (`gh` check 2026-11-18): **#1170** already states the mechanism, **#986** already implements the fix
+(age the score's constant `+1` with the existing 6 h hit decay), #444/#711/#814 cover density/cold-vs-live, #550 was a closed earlier attempt.
+Nothing merged, so it is real and unfixed but not novel: at most a corrected measured-evidence comment on #986/#1170, owner's call.
+My tie-break claim from an earlier pass is RETRACTED (exact-double ties are 0.14 % of zero-hit entries, measured on the live cache); the surviving
+claim is only "with hits==0 the score has no age term". See `20261118-kvstorm/PRIOR-ART-AND-CORRECTIONS.md`.
+**Cache-dependent outputs: benign FP numerics** (upstream's own comment `ds4.c:1052-1053` says chunk boundaries change reduction order; payload load is a
+raw byte dump; first divergence at request 53 with all 78 turn-1 replies agreeing). ONE real-bug risk left open: `ds4_kvstore.c:691-704` tokenises the
+suffix standalone vs the cold path's whole-prompt tokenisation -- needs the logprobs forced-hit vs forced-cold experiment in a stop window. INDEPENDENTLY VERIFIED after writing: an adversarial re-review on a different model re-derived every headline number
 from raw logs without reusing the scripts here (SURVIVES) and returned 4 corrections now folded into RESULTS.md -- lifetime percentages are
 match-order dependent (FIFO 75%<=10s vs LIFO 58%), zero-hit entries TIE so the `last_used` tiebreak picks the OLDER victim, u400 is a ceiling not an
 isolation, and the untuned 300 s half-life sits at this workload's p90 revisit gap (~315 s), so the remedy is validated at its fitness boundary.

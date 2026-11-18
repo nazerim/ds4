@@ -38,9 +38,12 @@ figure above exactly, including all rebuilt-token sums and reply agreements, and
   and lookup design is fine; the victims chosen are not.
 - **Mechanism (measured + code):** upstream's score is `(effective_hits + 1) * tokens / file_size`
   (`ds4_kvstore_entry_eviction_score`) with a 6 h hit half-life and no recency term for never-hit entries. Entries hit even
-  once keep ~2x a fresh entry's score for hours, so new checkpoints sit at the bottom of the ranking. Precisely: a fresh entry TIES with every other
-  zero-hit entry (the constant +1 carries no recency term), and ties fall to the `last_used` tiebreak at `ds4_kvstore.c:586-592`, which picks the OLDER
-  entry first -- i.e. it discards the checkpoint most likely to be revisited. Measured
+  once keep ~2x a fresh entry's score for roughly the first hour (exact `1+2^(-t/21600)`: 1.891 at 1 h, 1.500 at 6 h, 1.063 at 24 h, 1.000 at ~39.9 h),
+  so new checkpoints sit at the bottom of the ranking. Precisely: a fresh entry TIES with every other
+  zero-hit entry (the constant +1 carries no recency term). **The tiebreak extension is RETRACTED** (`PRIOR-ART-AND-CORRECTIONS.md` s2): exact-double
+  ties are a 0.14 % edge case -- I parsed the live cache: 753 files, 710 zero-hit, 709 distinct `tokens/file_size`, 1 tie pair, median age 51.5 h -- so
+  ordering among zero-hit entries is density-driven, not age-driven. What survives is only the code-level statement: with `hits == 0` the score has no
+  age term at all, so a checkpoint is a candidate the moment it lands. Measured
   (`lifetime.py`): 98-99 % of `disk-cache-full` victims had zero hits (u16a, u16b, u1), **median store->evict lifetime 5 s,
   evicted within 10 s of being written**; the cache freezes on old content (70 disk-hit events in u16a).
   **Precision on that 10 s figure (added by independent review):** stores are matched to evictions by `(tokens,size)` and up to 93 stores share some
@@ -79,6 +82,23 @@ figure above exactly, including all rebuilt-token sums and reply agreements, and
 - With grace 3600 at 16 GiB (g16, 130 req): evictions were only `frontier-superseded` (34), 57 grace-pin lines, 119 files left:
   the budget is advisory while every entry is younger than the grace. Prod at 256 GiB is evicting, so this is a configuration trap.
 - `prefill_t/s` includes cache-save stalls, so it slightly understates the fork; not used for any conclusion.
+
+**Status versus upstream -- NOT NOVEL** (verified with `gh` 2026-11-18). Open on `antirez/ds4` now: **#1170** states the same mechanism ("a fresh
+evict snapshot has zero hits, so its score is usually the lowest"); **#986** already implements the fix ("age the eviction score's initial `+1` using
+the existing six-hour hit decay"; `ds4_kvstore.c` + `ds4_server.c`); **#444/#711/#814** cover density and cold-vs-live bias; **#550** is a closed earlier
+attempt at freshness decay. Nothing merged (`origin/main` = `b3f5018`), so it is real and unfixed -- but **do NOT file a new issue**; at most a short
+measured-evidence comment on #986/#1170 with figures corrected per `PRIOR-ART-AND-CORRECTIONS.md` s4.
+
+**Cache-dependent outputs -- RESOLVED as benign FP numerics, one risk left open.** Independent investigation (`/tmp/cachediver/REPORT.md`) plus my own
+verification: upstream's own comment at `ds4.c:1052-1053` says *"changing chunk boundaries also changes floating-point reduction order"*; the f16<->f32
+payload converters are separate unused variants, so the span load is a raw byte dump with no requantisation; **first divergence is request 53 and all 78
+turn-1 requests agree** (my earlier "diverges from ~request 1" was wrong for this arm pair); `prompt_tokens` equal at 61/61 first divergences; and no prompt
+in either arm is a multiple of 8192, so the boundary variant is untestable with this data. Resume offsets are never 2048/8192-aligned (0/70, 0/291, 0/273, from
+the report, not verified by me). The engine contract asserts only `fabsf(dlogit) < 1e-5f` (`tests/ds4_test.c:379-387`), so bit-exactness across cache paths
+was never promised. **Still open, and a real bug if true:** `ds4_kvstore_build_prompt_from_exact_prefix_and_text_suffix` (`ds4_kvstore.c:691-704`) tokenises
+the suffix standalone while the cold path tokenises the whole prompt -- if BPE is not prefix-stable at that byte cut the model conditions on a DIFFERENT TOKEN
+SEQUENCE. Equal `prompt_tokens` argues against it but does not prove it, and no existing test covers it (`tests/test_prompt_prefix.c` tests a parser, not the
+tokenizer). Settled by the logprobs forced-hit vs forced-cold experiment, which needs a stop window.
 
 ---
 
