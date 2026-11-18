@@ -18,6 +18,8 @@ the trail, quote nothing from below the rule.
 | `evict-fresh-boost.patch` | the 20-line experimental fix (applies cleanly to `b3f5018`) |
 | `evict_replay.py`, `evict_policies.py` | **Offline replay of the recorded store/lookup stream: no model, no GPU, <1 s per policy.** Validated to the digit on 3 live arms; read its limits block first |
 | `check_marker_specials.py` | Reads a GGUF's `token_type`/vocab to say whether chat markers are registered special tokens |
+| **`PR-RANKING.md`** | **The deliverable: ranks the four open upstream evictor PRs in ~1 s each, and shows the pathology is timescale-dependent. Read its limits section first -- the dwell numbers are unvalidated** |
+| `evict_prs.py` | The four PRs as selectable policies (+ combinations), with per-model size refit and a dwell-time knob |
 | `runs/COMPARE-*.txt` | the three tables; re-derive with `python3 -I compare.py runs <N> <arms...>` |
 | `runs/<arm>/` | requests.jsonl + server.log.gz + meta.txt per arm |
 | `runs/chain*.log` | the operational record, including the killed-and-resumed chain |

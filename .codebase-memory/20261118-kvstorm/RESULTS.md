@@ -92,20 +92,21 @@ fires. Verified in the log: u16a wrote **309 `reason=cold` mid-prefill checkpoin
 `tokens % 2048 == 0`). "No age term" is the enabling condition; the active harm is a size bias anti-correlated with need.
 
 **Same-capacity policy comparison (offline replay of the recorded stream, 16 GiB, one binary, so no confound):**
+All on the **`u16a` schedule** (the arm whose 63.4 % is the headline), so it is directly comparable:
 | policy | cold % | rebuilt tok | zero-hit victims |
 |---|---|---|---|
 | **upstream b3f5018** | **63.4** | 2,459,409 | 98.6 % |
-| smallest-tokens-first | 59.7 | 2,053,672 | 89.4 % |
-| MRU (deliberately adversarial) | 44.9 | 1,890,122 | 79.6 % |
-| largest-first | 36.4 | 2,028,108 | 84.8 % |
-| random (3 seeds) | 11.9-13.6 | 696,871 | 57.1 % |
-| LRU | 15.9 | 762,165 | 53.2 % |
-| fresh-boost patch | 5.7 | 321,374 | 37.4 % |
+| smallest-tokens-first | 59.7 | 2,053,659 | 89.4 % |
+| MRU (deliberately adversarial) | 48.0 | 1,987,665 | 82.4 % |
+| largest-first | 36.4 | 2,028,128 | 84.8 % |
+| LRU | 15.9 | 762,185 | 53.2 % |
+| random (3 seeds) | 10.8-13.4 | 557,491 | 52.2 % |
+| fresh-boost patch | 5.4 | 317,667 | 37.0 % |
 
-At identical capacity upstream is the WORST of seven policies -- worse than random, worse than an intentionally adversarial MRU. Capacity's share
+At identical capacity upstream is the WORST of seven policies -- worse than random (10.8-13.4 %), worse than LRU (15.9 %), and worse than an intentionally adversarial MRU (48.0 %). Capacity's share
 is bounded at <=5.7 pts (boost at 16 GiB vs 0 % at 400 GiB), so ~58 of the 63.4 points are victim choice. This supplies the same-budget control
 that the "u400 is a ceiling, not an isolation" note above said was missing. Falsifier pre-stated: had upstream landed inside random's
-11.9-13.6 % band the claim dies; it did not (4.7x gap). Secondary: deleting the hit bonus entirely still gives 59.7 %, so the 6 h half-life is
+10.8-13.4 % band the claim dies; it did not (4.7x gap). Secondary: deleting the hit bonus entirely still gives 59.7 %, so the 6 h half-life is
 worth ~3.7 pts -- minor, and my earlier prose over-weighted it.
 
 **New durable artefact: `evict_replay.py` / `evict_policies.py`.** Offline discrete-event replay of the recorded store/lookup stream: no model, no
@@ -114,6 +115,18 @@ GPU, no prod window, <1 s per policy vs ~50 min live. **Validated to the digit o
 token count rather than SHA). Its docstring carries the limits, chiefly that the affine size fit is load-bearing (zero the intercept: 63.4 -> 52.3 %).
 Sweep bonus: the "300 s half-life sits at its fitness boundary" worry recorded above is overstated -- 60 s -> 4.8 %, 300 s -> 5.7 %, 600 s -> 9.4 %,
 and any boost magnitude > 1 flips the ordering, so the constants are unswept rather than delicate.
+
+**REMEDY SCOPE, corrected the same day by `evict_prs.py` (see `PR-RANKING.md`): the fresh-entry boost is a BURST fix, not
+a general one, and I over-claimed it.** With dwell time between requests stretched to realistic values, the boost decays to
+nothing before the next request (300 s half-life vs hour-scale gaps) and upstream converges on it: cold % is 5.4 at burst,
+33.5 at 600 s, 45.2 at 1800 s, **51.1 at 3600 s vs upstream's 57.7**. Meanwhile the two open PRs that looked weak in a burst
+are the ones that work at dwell: **#986 -> 15.9 %** and **#814 -> 11.9 %** (from 57.7). #986 appears inert in a burst purely
+because it ages the `+1` on the existing 6 h half-life, which cannot move over 50 minutes. #1170 helps least and its
+deliberate budget overflow never fired at 16 GiB or 6 GiB. Stacking is not monotonic: `#986+#711` at 6 GiB gives 75.7 %,
+worse than upstream's 71.1 %. So the defensible statement is "the pathology is timescale-dependent and the PRs address the
+long-dwell regime my synthetic burst does not resemble" -- not "the boost fixes it".
+**Caveat that bounds all of the above:** only the burst clock has live arms to validate against. The dwell columns are
+UNVALIDATED caricatures (uniform gaps) and are hypothesis, not measurement.
 
 **Revised recommendation.** The eviction FINDING is third-hand (see immediately below) and worth less than I argued; the METHOD is the contribution.
 Highest value now is the replay, which can rank the four competing open PRs against one recorded stream in seconds. One fact is also offerable on

@@ -116,7 +116,7 @@ class Store:
         return x["tok"]
 
 
-def replay(reqs, budget_mib, policy, clock="model"):
+def replay(reqs, budget_mib, policy, clock="model", stretch_s=None):
     st = Store(budget_mib, policy)
     t = 0.0
     out = []
@@ -132,7 +132,13 @@ def replay(reqs, budget_mib, policy, clock="model"):
             X = st.lookup(c, P, t)
             cls = "disk" if X > 0 else "cold"
         rebuilt = P - X
-        if clock == "model":                            # ~1340 tok/s prefill + decode
+        if stretch_s is not None:
+            # Artificial dwell time: emulates a long-lived cache where entries sit for
+            # hours between requests. Needed to judge time-dependent policies at all --
+            # on a 50 min burst the 6 h hit half-life barely moves, so a policy that only
+            # ages the +1 term is indistinguishable from upstream.
+            t += stretch_s
+        elif clock == "model":                          # ~1340 tok/s prefill + decode
             t += rebuilt / 1340.0 + C / 54.0 + 0.3
         else:
             t = q["t0"] - reqs[0]["t0"]
