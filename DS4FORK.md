@@ -1541,7 +1541,7 @@ Cache-on is byte-for-byte unchanged, so production - which always enables the ca
 move. The store point is untouched: the cold checkpoint is still written at
 `tokens=12288 trimmed=1570` for a 13,858-token prompt, so reuse depth is not traded away.
 
-**Verified 2026-11-19** (`20261118-kvstorm/verify_parity.sh`, `verify_prefix_equal.sh`):
+**Verified 2026-11-19** (`20261118-kvstorm/verify_parity.sh`, `20261118-kvstorm/verify_prefix_equal.sh`):
 
 | phase | chunk plan | answer vs cache-on |
 |---|---|---|
