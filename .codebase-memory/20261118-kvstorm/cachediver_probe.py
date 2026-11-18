@@ -72,6 +72,27 @@ def wait_ready(port, timeout=900):
     return False
 
 
+def run_multiturn(port, nturns, doc, max_tokens):
+    """Walk a conversation turn by turn, then replay it after the live slot is gone.
+
+    Pass 1 exercises the LIVE-SESSION path (each turn extends the resident session, so
+    almost nothing is re-read from disk). Pass 2, after fillers have evicted that session,
+    must resume from an on-disk checkpoint. So this compares exactly the two paths whose
+    outputs diverged between the eviction arms -- single-turn cold-vs-hit does not.
+    """
+    hist = [{"role": "system", "content": "Archive MT. %s" % doc}]
+    outs = []
+    for k in range(nturns):
+        hist.append({"role": "user", "content":
+                     "Follow-up %d: name the specific mechanism in this archive that would most "
+                     "change the outcome, and explain it in about sixty words." % (k + 1)})
+        reply, usage = chat(port, hist, max_tokens)
+        outs.append({"turn": k + 1, "prompt_tokens": usage.get("prompt_tokens"),
+                     "completion": usage.get("completion_tokens"), "text": reply})
+        hist.append({"role": "assistant", "content": reply})
+    return outs
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8003)
@@ -79,6 +100,8 @@ def main():
     ap.add_argument("--model", default="gguf/Qwen3.8-Flash-Next-Q4.gguf")
     ap.add_argument("--attach", action="store_true", help="server is already running")
     ap.add_argument("--out", default="/tmp/cachediver-results.jsonl")
+    ap.add_argument("--turns", type=int, default=0,
+                    help="if >0, run a multi-turn conversation twice (live-continue vs disk-resume)")
     ap.add_argument("--max-tokens", type=int, default=32,
                     help="continuation length; 32 is the weak case -- FP divergence amplifies with length")
     a = ap.parse_args()
@@ -89,6 +112,37 @@ def main():
 
     out = open(a.out, "w", encoding="utf-8")
     same = diff = unknown = 0
+
+    if a.turns > 0:
+        para = ("The catchment's baseflow is sustained by fractured bedrock rather than soil "
+                "moisture, which decouples stream response from rainfall intensity. ")
+        doc = (para * 900)[:16000]
+        total = bad = 0
+        for rep in range(3):                       # a few conversations is all this can afford
+            p1 = run_multiturn(a.port, a.turns, doc + " Variant %d." % rep, a.max_tokens)
+            for _ in range(3):
+                chat(a.port, FILLER)               # evict the live session slot
+            p2 = run_multiturn(a.port, a.turns, doc + " Variant %d." % rep, a.max_tokens)
+            for x, y in zip(p1, p2):
+                total += 1
+                eq = bool(x["text"]) and x["text"] == y["text"]
+                bad += (not eq)
+                out.write(json.dumps({"conv": rep, "turn": x["turn"], "equal": eq,
+                                      "prompt_tokens": x["prompt_tokens"],
+                                      "completion_cold": x["completion"],
+                                      "completion_hit": y["completion"],
+                                      "first_diff_char": next(
+                                          (k for k in range(min(len(x["text"]), len(y["text"])))
+                                           if x["text"][k] != y["text"][k]),
+                                          min(len(x["text"]), len(y["text"]))),
+                                      "cold": x["text"][:3000], "hit": y["text"][:3000]}) + "\n")
+                out.flush()
+                print("  conv=%d turn=%d P=%-6s %s" % (rep, x["turn"], x["prompt_tokens"],
+                                                       "SAME" if eq else "DIFFERENT"))
+        print("\nmulti-turn turns compared: %d   divergent: %d" % (total, bad))
+        return 0 if bad == 0 else 1
+
+
     for i in range(a.n):
         title, stem = DOCS[i % len(DOCS)]
         # Size the context to a target token count. This is the whole point of the harness:
@@ -101,7 +155,10 @@ def main():
                        "the neighbouring stations and the earlier returns. ")
         doc = (para * (1 + int(target * 3.4 // len(para)))).encode("utf-8")[:int(target * 3.4)].decode("utf-8", "ignore")
         msgs = [{"role": "system", "content": "Archive %d. %s" % (i, doc)},
-                {"role": "user", "content": "In one sentence, what governs the effect described?"}]
+                {"role": "user", "content":
+                    "Enumerate every causal factor implied by this archive. Number them 1 to 40 "
+                    "and give each a two-sentence explanation. Keep going until the list is "
+                    "complete; do not summarise and do not stop early."}]
         try:
             c1, u1 = chat(a.port, msgs, a.max_tokens)
             chat(a.port, FILLER)                       # evict this conversation's live slot
@@ -112,9 +169,13 @@ def main():
         equal = (c1 == c2) and bool(c1)
         same += equal
         diff += (not equal)
+        fd = next((k for k in range(min(len(c1), len(c2))) if c1[k] != c2[k]),
+                  min(len(c1), len(c2)))
         rec = {"i": i, "prompt_tokens": u1.get("prompt_tokens"), "equal": equal,
-               "max_tokens": a.max_tokens, "len_cold": len(c1), "len_hit": len(c2),
-               "cold": c1[:160], "hit": c2[:160]}
+               "max_tokens": a.max_tokens, "completion_cold": u1.get("completion_tokens"),
+               "completion_hit": u2.get("completion_tokens"),
+               "len_cold": len(c1), "len_hit": len(c2), "first_diff_char": fd,
+               "cold": c1[:4000], "hit": c2[:4000]}
         out.write(json.dumps(rec) + "\n")
         out.flush()
         print("  %-3d P=%-6s target=%-6d %s" % (i, u1.get("prompt_tokens"), target,
@@ -126,6 +187,14 @@ def main():
     n = same + diff
     print("\nprompts compared: %d   identical: %d (%.1f%%)   divergent: %d (%.1f%%)"
           % (n, same, 100.0 * same / n if n else 0, diff, 100.0 * diff / n if n else 0))
+    done = [json.loads(l) for l in open(a.out)]
+    comp = sorted(x.get("completion_cold") or 0 for x in done)
+    if comp:
+        med = comp[len(comp) // 2]
+        print("median completion_tokens=%d (max_tokens=%d)" % (med, a.max_tokens))
+        if med < 100:
+            print("  WARNING: replies stopped early, so long-generation divergence is NOT tested."
+                  " Make the prompt demand more output or raise the ceiling.", file=sys.stderr)
     print("results: %s  -- cross-check the server log for 'kv cache hit' on each pass-2 request" % a.out)
     return 0
 

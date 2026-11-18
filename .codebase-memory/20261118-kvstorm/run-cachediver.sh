@@ -8,6 +8,9 @@ HERE=$REPO/.codebase-memory/20261118-kvstorm
 PORT=8003
 KV=/Volumes/FireCuda520/ds4-ab-cdiv
 LOG=$HERE/runs/cdiv.log
+NPROMPT=${NPROMPT:-12}
+MAXTOK=${MAXTOK:-32}
+TURNS=${TURNS:-0}
 say() { echo "$(date '+%m-%d %H:%M:%S') $*" | tee -a $LOG; }
 
 restore_prod() {
@@ -32,6 +35,7 @@ sleep 4
 mkdir -p "$KV"
 unset DS4_API_KEY QWEN_API_KEY QWEN_SUBSCRIPTION_KEY
 
+if [ -e $HERE/runs/cdiv-server.log ]; then mv $HERE/runs/cdiv-server.log $HERE/runs/cdiv-server-prev.log; fi
 : > $HERE/runs/cdiv-server.log      # so the preflight hit counter starts from zero
 say "starting isolated engine on :$PORT"
 ./ds4-server --model gguf/Qwen3.8-Flash-Next-Q4.gguf --ctx 65536 --tokens 4096 \
@@ -60,13 +64,13 @@ if [ "$h1" -le "$h0" ]; then
   grep -a 'kv cache stored' $HERE/runs/cdiv-server.log | tail -3 | tee -a $LOG
   exit 4
 fi
-say "preflight ok (disk-hit lines $h0 -> $h1), running 12 prompts at 4k-16k tokens"
+say "preflight ok (disk-hit lines $h0 -> $h1): mode=$([ $TURNS -gt 0 ] && echo "multi-turn x$TURNS x3 convs" || echo "$NPROMPT single-turn"), max_tokens=$MAXTOK"
 
-python3 -I $HERE/cachediver_probe.py --port $PORT --n 12 --attach \
+python3 -I $HERE/cachediver_probe.py --port $PORT --n $NPROMPT --max-tokens $MAXTOK --turns $TURNS --attach \
   --out $HERE/runs/cachediver-results.jsonl >> $LOG 2>&1
 say "probe exit=$?"
 
 hits=$(grep -ac 'kv cache hit' $HERE/runs/cdiv-server.log)
 cold=$(grep -ac 'live kv cache miss' $HERE/runs/cdiv-server.log)
-say "server-side: disk-hit lines=$hits  live-miss lines=$cold (hits should be >= ~24)"
+say "server-side: disk-hit lines=$hits  live-miss lines=$cold (hits should be >= $NPROMPT)"
 say "done"

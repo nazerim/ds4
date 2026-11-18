@@ -19,6 +19,7 @@ the trail, quote nothing from below the rule.
 | `evict_replay.py`, `evict_policies.py` | **Offline replay of the recorded store/lookup stream: no model, no GPU, <1 s per policy.** Validated to the digit on 3 live arms; read its limits block first |
 | `check_marker_specials.py` | Reads a GGUF's `token_type`/vocab to say whether chat markers are registered special tokens |
 | **`PR-RANKING.md`** | **The deliverable: ranks the four open upstream evictor PRs in ~1 s each, and shows the pathology is timescale-dependent. Read its limits section first -- the dwell numbers are unvalidated** |
+| `cachediver_probe.py` + `run-cachediver.sh` | Cold-vs-disk-hit answer comparison on a live engine (needs a window; runner preflights that a disk hit really happened, then restores prod) |
 | `evict_prs.py` | The four PRs as selectable policies (+ combinations), with per-model size refit and a dwell-time knob |
 | `runs/COMPARE-*.txt` | the three tables; re-derive with `python3 -I compare.py runs <N> <arms...>` |
 | `runs/<arm>/` | requests.jsonl + server.log.gz + meta.txt per arm |
@@ -27,6 +28,15 @@ the trail, quote nothing from below the rule.
 **Arm names:** `fork-g0,f2,u1,u2` = 6 GiB budget (compare at 561 requests). `f16a,f16b,u16a,u16b` =
 16 GiB; `u400` = upstream at 400 GiB (never evicts); `u16fix` = upstream + boost patch at 16 GiB;
 `g16` = fork with production's grace-3600. All comparisons at 430 requests.
+
+**Method debt this folder paid three times.** (1) Attribution by +/-1 s windows double-counted lines because sequential
+requests are <2 s apart. (2) Live-reuse prefill was counted as zero. (3) Two cache-divergence runs were **silent no-ops that
+reported success**: first the prompts were under the 2048-token store step so nothing was ever cached (cold compared against
+cold, 100% agreement in 34 s); then `max_tokens=256` never bound because the question asked for one sentence, so replies stopped
+at ~17 tokens and the long-generation case went untested. Every one was caught by an independent counter -- server-side `kv cache
+hit` lines, `finish=stop` tallies, reply character lengths -- never by the pass/fail summary. **The lesson: an experiment that
+finishes fast and reports perfect agreement is a prompt to verify the mechanism fired, not to celebrate.** Harnesses in this
+folder now assert their own precondition (see the preflight gate in `run-cachediver.sh`).
 
 **Method debt this folder paid twice (do not repeat):** (1) attribution by +/-1 s windows
 double-counted lines because sequential requests are <2 s apart; (2) live-reuse prefill was
