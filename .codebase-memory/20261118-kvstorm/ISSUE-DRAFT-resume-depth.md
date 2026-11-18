@@ -1,4 +1,6 @@
-# Draft issue — NOT POSTED
+# Issue — POSTED as [antirez/ds4#1359](https://github.com/antirez/ds4/issues/1359) on 2026-11-19
+
+> Status: **public.** Two artefacts exist: this file keeps the drafting notes and the pre-post checklist; `ISSUE-POST-BODY.md` is exactly what was posted (verified byte-identical to the live body after posting). The #711 evidence comment is separate and predates this: https://github.com/antirez/ds4/pull/711#issuecomment-6983638516
 
 Drafted 2026-11-18, **substantially rewritten the same night after the mechanism test refuted my first
 framing.** Posting to `antirez/ds4` requires the owner's explicit go.
@@ -161,4 +163,4 @@ I would not attempt (2) without your view on the cost.
 
 ---
 
-*Pre-post checklist: (1) realistic prose - done, the effect holds (6/6 fork, 4/6 upstream, plus the curl-only pair above). (2) repro verified from a pristine `b3f5018` `make` build using only curl plus an inline python generator, with concrete prompt/completion sha256s - done. (3) the owner's decision to post - **open**.*
+*Pre-post checklist: (1) realistic prose - done, the effect holds (6/6 fork, 4/6 upstream, plus the curl-only pair above). (2) repro verified from a pristine `b3f5018` `make` build using only curl plus an inline python generator, with concrete prompt/completion sha256s - done. (3) owner gave the go and it is **posted**: https://github.com/antirez/ds4/issues/1359 (body verified identical after posting).*

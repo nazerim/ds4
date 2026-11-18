@@ -553,8 +553,8 @@ The u16a-vs-u400 divergence is now explained: different surviving checkpoints =>
 different chunk schedule => different answer.
 
 Prior art searched (read-only): #1266/#1186/#174 concern continued checkpoints being EVICTED; nothing found on
-output changing between chunk schedules. Draft issue rewritten (it no longer accuses the checkpoint) and still
-NOT POSTED -- `20261118-kvstorm/ISSUE-DRAFT-resume-depth.md` needs the owner's go. Full study:
+output changing between chunk schedules. Issue **POSTED** as antirez/ds4#1359 (2026-11-19): `20261118-kvstorm/ISSUE-POST-BODY.md` is the
+public text (verified byte-identical after posting); the draft file keeps the rejected framings. Separate evidence comment already on #711. Full study:
 `20261118-kvstorm/CACHE-DIVERGENCE.md`.
 
 MECHANISM, corrected same day by an independent Opus pass I then verified myself: the harm is the DENSITY term, not the missing age term.

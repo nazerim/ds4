@@ -247,7 +247,7 @@ output", "checkpoint different result", "resumed session differs". Nothing addre
 checkpoint kinds — the closest, #1266, #1186 and closed #174, are all about continued checkpoints being
 *evicted*. So the correctness aspect appears unreported, though I did not read every issue in the repo.
 
-**Not posted. Drafting and posting need the owner's go.** See `ISSUE-DRAFT-resume-depth.md`.
+**POSTED:** [antirez/ds4#1359](https://github.com/antirez/ds4/issues/1359). Text in `ISSUE-POST-BODY.md`; drafting notes and the rejected framings stay in `ISSUE-DRAFT-resume-depth.md`.
 
 ## How this harness failed twice, and what each failure would have hidden
 
