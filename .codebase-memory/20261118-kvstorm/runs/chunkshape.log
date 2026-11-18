@@ -1,0 +1,5 @@
+11-18 23:18:28 stopping production; chunk-shape experiment (reps=6 target=12000 uniq=SHAPE-TEST)
+Stopping ds4-server (PID: 30451)...
+ds4-server stopped
+11-18 23:18:33 phase 1: disk ON (cold store splits the prefill)
+measured 6.42 chars/token

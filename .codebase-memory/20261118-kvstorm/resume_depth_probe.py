@@ -34,6 +34,28 @@ START_RE = re.compile(r"chat ctx=(\d+)\.\.(\d+):\d+ prompt start")
 HIT_RE = re.compile(r"kv cache hit text tokens=(\d+).*?file=(\S+)")
 
 
+QUESTION = ("Enumerate every causal factor implied here. Number them "
+            "1 to 30, two sentences each, do not stop early.")
+
+
+def calibrate_chat(port, probe_text):
+    """One short request to measure chars/token for THIS corpus (never assume a constant)."""
+    _, u = chat(port, [{"role": "system", "content": "Cal. " + probe_text},
+                       {"role": "user", "content": "Reply: ok"}], 8)
+    pt = u.get("prompt_tokens") or 0
+    return (len(probe_text) / float(pt)) if pt > 0 else None
+
+
+def build_prompt(i, uniq, target_tokens, cpt):
+    """Byte-exact prompt. Shared with chunkshape_probe.py via import, because the two
+    harnesses must generate the SAME prompt across engine configs or the comparison
+    is meaningless. Keep this the single source of truth."""
+    doc = ("case %d uniq %s. " % (i, uniq)) + \
+          (PARA * (1 + int(target_tokens * cpt // len(PARA))))[:int(target_tokens * cpt)]
+    return [{"role": "system", "content": doc},
+            {"role": "user", "content": QUESTION}]
+
+
 def chat(port, msgs, max_tokens):
     body = json.dumps({"model": "default", "messages": msgs, "temperature": 0,
                        "max_tokens": max_tokens, "stream": False,
@@ -65,6 +87,9 @@ def main():
                     help="chars/token; 0 = measure once from the engine")
     ap.add_argument("--max-tokens", type=int, default=256)
     ap.add_argument("--out", default="/tmp/resumedepth.jsonl")
+    ap.add_argument("--cpt-file", default=None,
+                    help="write the measured chars/token here so a second engine phase can "
+                         "reuse the EXACT same prompt sizing instead of re-estimating it")
     a = ap.parse_args()
 
     pos = os.path.getsize(a.log)
@@ -88,17 +113,16 @@ def main():
             return 1
         cpt = len(probe) / float(pt)
         print("measured %.2f chars/token" % cpt, file=sys.stderr)
+        if a.cpt_file:
+            with open(a.cpt_file, "w") as fh:
+                fh.write("%.6f\n" % cpt)
     else:
         cpt = a.cpt
 
     out = open(a.out, "w", encoding="utf-8")
     ab_same = ab_diff = bc_same = bc_diff = skipped = 0
     for i in range(a.reps):
-        doc = ("case %d uniq %s. " % (i, os.environ.get("UNIQ", "x"))) + \
-              (PARA * (1 + int(a.target_tokens * cpt // len(PARA))))[:int(a.target_tokens * cpt)]
-        msgs = [{"role": "system", "content": doc},
-                {"role": "user", "content": "Enumerate every causal factor implied here. Number them "
-                                            "1 to 30, two sentences each, do not stop early."}]
+        msgs = build_prompt(i, os.environ.get("UNIQ", "x"), a.target_tokens, cpt)
         rec = {"i": i}
 
         # A: cold

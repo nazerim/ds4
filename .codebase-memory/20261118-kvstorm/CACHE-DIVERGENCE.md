@@ -5,6 +5,13 @@
 > upstream `b3f5018`.** See "REPRODUCED DELIBERATELY" below. That is the finding; the earlier
 > "0 divergences" results are real but narrower than they look, because they only ever tested the
 > checkpoint the engine picks when nothing has been evicted.
+>
+> **Mechanism, now verified from the engine's own logs and a static read:** the divergence tracks the
+> **prefill chunk schedule**, not checkpoint corruption. Cold prefill with the disk cache enabled stops at
+> `cold_store_len` so it can write the checkpoint, so an 11,699-token prompt runs `8192 + 2048 + 1459`.
+> A resume at `10240` then runs `1459` — the same final chunk, hence byte-identical. A resume at `8192` runs
+> `3507` as one chunk — a different reduction order, hence a different answer. See
+> "WHY 10240 MATCHES AND 8192 DOES NOT" below.
 
 Controlled measurements, 2026-11-18 afternoon. Question raised by the eviction A/B: arms `u16a` and
 `u400` ran the **same binary and same schedule** yet agreed on only 247 of 440 replies, so cache state
@@ -36,11 +43,22 @@ one of them is separately cited below as evidence).
 | **two separate engine processes vs each other** | fork | 2.3k–10.4k | 12 | 0 |
 
 **161 comparisons, 1 divergence** — and that single divergence is the checkpoint-depth case below, not a
-cold-vs-resume failure. In the clean arms-scale test (16 prompts at 11,646–20,329 tokens, generations up
-to 512 tokens, resume offsets `8192`/`10240`/`16384`/`18432`) the fork resumes up to 91 % of the prompt from
-disk — `ctx=18432..20324` loads 18,432 of 20,324 tokens and re-prefills 1,892 — and reproduces the cold
-answer exactly. So cold-rebuild vs checkpoint-resume does **not** change the answer on either build, and the
-engine is deterministic across processes (recomputed from `runs/crossproc-round{1,2}.jsonl`, 12/12).
+cold-vs-resume failure. Prompt sizes reach 20,329 tokens (the arms peaked at 20,502) with completions up to
+512 tokens, and resume offsets were `10240`/`16384`/`18432`, e.g. `ctx=18432..20324` loads 91 % of the prompt
+from disk and re-prefills 1,892 tokens. So cold-rebuild vs checkpoint-resume does **not** change the answer on
+either build, and the engine is deterministic across processes (recomputed from `runs/crossproc-round{1,2}.jsonl`,
+12/12).
+
+> **CORRECTION, and it hollows out the result above.** An earlier version of this line claimed resume offsets
+> `8192`/`10240`/`16384`/`18432`. `8192` never appears in the clean 16-prompt run — it came from a different,
+> earlier log (`runs/cdiv-server-prev.log`). Checking the actual schedules (`runs/cdiv-server.log`) shows why
+> that matters: cold prefill runs cumulative boundaries `8192 → 10240 → P`, `8192 → 16384 → P`, or
+> `8192 → 16384 → 18432 → P`, and **all 17 resumes in that run landed exactly on one of those boundaries**
+> (off-boundary: 0). A resume on the last cold boundary re-runs the identical final chunk, so bit-identity was
+> structurally guaranteed: that test could not have failed. It is not evidence that resume is faithful in
+> general, only that resume is faithful when it lands where cold already stopped — which is what the engine's
+> own longest-prefix choice does whenever the deepest checkpoint still exists.
+
 
 ## The one real anomaly: checkpoint DEPTH changes the answer
 
