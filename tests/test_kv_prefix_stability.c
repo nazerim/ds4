@@ -107,6 +107,17 @@
  * tests/tokenizer_fp_probe.c, whose list is stale -- without it the link fails on
  * _ds4_engram_hash / _ds4_engram_history_reset / _ds4_engram_layout_valid (referenced from ds4.o).
  *
+ * exit codes (each outcome distinct, so an operational failure is never read as a verdict):
+ *   0 PASS           all cases had a valid boundary and identical ids
+ *   1 FAIL           a valid-boundary case produced different ids
+ *   3 INVALID        a case had an invalid boundary (answers no question)
+ *   4 usage error    bad arguments
+ *   5 could not run  model/vocab/corpus unavailable -- NOT a probe result
+ *   2                RESERVED: libds4 calls exit(2) directly on startup failure
+ *                    (instance lock held by a running server, bad model path), so
+ *                    2 is deliberately unused here -- seeing 2 means the engine
+ *                    aborted and NO case ran. Verified: a bad model path exits 2.
+ *
  * usage:
  *   ./kv_prefix_stability <model.gguf> [--corpus <file>] [--cpu | --backend metal|cpu|cuda]
  *
@@ -503,7 +514,7 @@ int main(int argc, char **argv) {
             else {
                 fprintf(stderr, "invalid --backend value: %s\n", b);
                 usage(argv[0]);
-                return 2;
+                return 4;   /* usage error, not a verdict */
             }
         } else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
             usage(argv[0]);
@@ -513,12 +524,12 @@ int main(int argc, char **argv) {
         } else {
             fprintf(stderr, "unknown argument: %s\n", argv[i]);
             usage(argv[0]);
-            return 2;
+            return 4;   /* usage error, not a verdict */
         }
     }
     if (!model_path) {
         usage(argv[0]);
-        return 2;
+        return 4;   /* usage error, not a verdict */
     }
 
     fprintf(stderr, "kv_prefix_stability: model=%s backend=%s\n",
@@ -534,13 +545,13 @@ int main(int argc, char **argv) {
     ds4_engine *e = NULL;
     if (ds4_engine_open(&e, &opt) != 0) {
         fprintf(stderr, "engine open failed\n");
-        return 2;
+        return 5;   /* could not load a model: no verdict was produced */
     }
     int v = ds4_engine_vocab_size(e);
     if (v <= 0) {
         fprintf(stderr, "tokenizer not loaded (vocab=%d)\n", v);
         ds4_engine_close(e);
-        return 3;
+        return 5;   /* could not run: an empty vocab is not a verdict */
     }
     fprintf(stderr, "engine open: vocab=%d model=%s\n",
             v, ds4_engine_model_name(e));
@@ -550,7 +561,7 @@ int main(int argc, char **argv) {
     if (corpus_path) {
         if (run_corpus(e, corpus_path, &fail_count, &invalid_count) < 0) {
             ds4_engine_close(e);
-            return 2;
+            return 5;   /* could not read the corpus: no verdict was produced */
         }
     } else {
         run_builtin_cases(e, &fail_count, &invalid_count);
@@ -565,7 +576,7 @@ int main(int argc, char **argv) {
         else
             printf("PREFIX_STABILITY: INVALID b=%d\n", invalid_count);
         ds4_engine_close(e);
-        return 2;
+        return 3;   /* INVALID -- 2 belongs to the engine */
     }
     if (fail_count == 0) {
         printf("PREFIX_STABILITY: PASS\n");

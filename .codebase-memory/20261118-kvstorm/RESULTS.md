@@ -124,6 +124,26 @@ model `Qwen3.8-Flash-Next-Q4.gguf`; `vocab=248320` in stderr confirms a genuine 
   8 cases. Extending the case table needs no prod window (rebuild takes seconds), so this gap is my omission, not a constraint.
 - **Not obtained:** the GGUF `tokenizer.ggml.added_tokens` / special-token metadata. My reader hit MemoryError on a large array and I
   stopped to restore prod rather than debug it. Marked unresolved, not disproved.
+
+**RESOLVED next day, without a window** (`check_marker_specials.py`, uses `tests/gguf_tokenizer.py`'s verified reader -- my own parser was
+wrong twice: GGUF `version` is `uint32`, not `uint64`, which desynchronises the whole header):
+- `Qwen3.8-Flash-Next-Q4.gguf` = v3, 1256 tensors, 58 KV, vocab 248320; **no `tokenizer.ggml.added_tokens` key at all**; 27 CONTROL tokens
+  by `token_type`. `< |im_end| >` -> id 248046 CONTROL, `< |im_start| >` -> 248045 CONTROL.
+- **The SPACED forms the Qwen error builder emits (`< |im_end| >`) are NOT in the vocab** => they tokenise as ordinary text. So the merge
+  hazard on that path was genuinely live, and the probe still measured A=B. The earlier "corroborating, not proof" note is now direct evidence.
+- The DSML marker strings are absent from THIS file's vocab, as expected: that is the DeepSeek vocabulary. Do not read those rows as findings.
+
+**BLAST RADIUS, verified: the standalone-suffix helper has exactly ONE caller.** In the fork, `append_rendered_suffix_to_live_session`
+(`ds4_server.c:14825`) is called only from `continue_after_invalid_dsml` (`:14990`), itself reached from two decode sites (`:17141`, `:17259`).
+Normal conversation continuation never uses this helper, so the 'normal continuation' gap above is NOT a live untested path -- the malformed
+tool-call recovery, which the probe covers exactly, is. Upstream has the same single caller (`b3f5018:ds4_server.c:12594`).
+
+**Probe exit-code contract, tested not assumed:** a bad model path exits **2**, because libds4 calls `exit(2)` directly on startup failure
+(instance lock held by a running server, bad path) rather than returning. So 2 is RESERVED for 'engine aborted, no case ran'; the probe now
+uses 0 PASS / 1 FAIL / 3 INVALID / 4 usage / 5 could-not-run. Verified: no-args -> 4, --help -> 0, bad model -> 2 with prod up.
+Also re-confirmed the probe needs a window: with prod running it refuses (`another ds4 process is already running (pid 5253)`) -- the lock is
+global and `DS4_LOCK_FILE` bypass was NOT used, since mapping this 165 GB model beside prod's ~31 GiB against a 122 GiB wired limit is exactly
+the OOM the lock exists to prevent, and that is not an unattended risk.
 Status: harness `tests/test_kv_prefix_stability.c` drafted and being revised to test these real shapes; NOT built, NOT run. Whether `< |im_end| >` is a
 registered special in `gguf/Qwen3.8-Flash-Next-Q4.gguf` is **UNVERIFIED** -- it decides whether this is a bug or a non-issue.
 
