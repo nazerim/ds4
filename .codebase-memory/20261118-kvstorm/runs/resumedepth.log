@@ -1,0 +1,119 @@
+11-18 17:47:25 stopping production; resume-depth experiment (reps=12 target=12000 maxtok=256)
+Stopping ds4-server (PID: 26212)...
+ds4-server stopped
+11-18 17:47:35 engine up; every request is classified from the log, not assumed
+measured 6.42 chars/token
+Traceback (most recent call last):
+  File "/Users/naz/Projects/ds4/.codebase-memory/20261118-kvstorm/resume_depth_probe.py", line 171, in <module>
+    sys.exit(main())
+             ~~~~^^
+  File "/Users/naz/Projects/ds4/.codebase-memory/20261118-kvstorm/resume_depth_probe.py", line 104, in main
+    logA, pos = tail_from(a.log, pos)
+                ~~~~~~~~~^^^^^^^^^^^^
+  File "/Users/naz/Projects/ds4/.codebase-memory/20261118-kvstorm/resume_depth_probe.py", line 52, in tail_from
+    return data, fh.tell()
+                 ~~~~~~~^^
+ValueError: I/O operation on closed file.
+11-18 17:47:48 probe exit=1
+11-18 17:47:48 done
+11-18 17:47:53 restoring production
+Rotated previous log to ./log/ds4-qwen.log.20261118-174753
+Starting ds4-server on port 8002 with model gguf/Qwen3.8-Flash-Next-Q4.gguf (ctx: 524288)...
+Logging to ./log/ds4-qwen.log
+Qwen3.8: vision encoder gguf/mmproj-Qwen3.8-Flash-Next-Q8_0.gguf, batched-session 2, mtp 1, mixed-prefill-quantum 512
+ds4-server started (PID: 27637)
+11-18 17:47:59 prod answering on :8002
+11-18 17:48:30 stopping production; resume-depth experiment (reps=12 target=12000 maxtok=256)
+Stopping ds4-server (PID: 27637)...
+ds4-server stopped
+11-18 17:48:40 engine up; every request is classified from the log, not assumed
+measured 6.42 chars/token
+  i=0  P=11699  A(ctx0=True) B@10240 C@8192  A==B:True  B==C:False
+  i=1  P=11699  A(ctx0=True) B@10240 C@8192  A==B:True  B==C:False
+  i=2  P=11699  A(ctx0=True) B@10240 C@8192  A==B:True  B==C:False
+  i=3  P=11699  A(ctx0=True) B@10240 C@8192  A==B:True  B==C:False
+  i=4  P=11699  A(ctx0=True) B@10240 C@8192  A==B:True  B==C:False
+  i=5  P=11699  A(ctx0=True) B@10240 C@8192  A==B:True  B==C:True 
+  i=6  P=11699  A(ctx0=True) B@10240 C@8192  A==B:True  B==C:False
+  i=7  P=11699  A(ctx0=True) B@10240 C@8192  A==B:True  B==C:False
+  i=8  P=11699  A(ctx0=True) B@10240 C@8192  A==B:True  B==C:True 
+  i=9  P=11699  A(ctx0=True) B@10240 C@8192  A==B:True  B==C:False
+  i=10 P=11700  A(ctx0=True) B@10240 C@8192  A==B:True  B==C:False
+  i=11 P=11700  A(ctx0=True) B@10240 C@8192  A==B:True  B==C:False
+
+RESULT
+  A vs B (cold vs deep resume):   same=12 differ=0
+  B vs C (deep vs shallow resume): same=2 differ=10  -> divergence rate 83%
+  uninformative (no shallower resume achieved): 0
+  detail: /Users/naz/Projects/ds4/.codebase-memory/20261118-kvstorm/runs/resume-depth.jsonl
+11-18 17:54:10 probe exit=0
+11-18 17:54:10 done
+11-18 17:54:15 restoring production
+Rotated previous log to ./log/ds4-qwen.log.20261118-175415
+Starting ds4-server on port 8002 with model gguf/Qwen3.8-Flash-Next-Q4.gguf (ctx: 524288)...
+Logging to ./log/ds4-qwen.log
+Qwen3.8: vision encoder gguf/mmproj-Qwen3.8-Flash-Next-Q8_0.gguf, batched-session 2, mtp 1, mixed-prefill-quantum 512
+ds4-server started (PID: 29117)
+11-18 17:54:22 prod answering on :8002
+11-18 17:56:02 stopping production; resume-depth experiment (reps=8 target=12000 maxtok=256)
+Stopping ds4-server (PID: 29117)...
+ds4-server stopped
+11-18 17:56:12 engine up; every request is classified from the log, not assumed
+measured 6.42 chars/token
+  i=0  P=11699  A(ctx0=True) B@10240 C@8192  A==B:True  B==C:False
+  i=1  P=11699  A(ctx0=True) B@10240 C@8192  A==B:True  B==C:False
+  i=2  P=11699  A(ctx0=True) B@10240 C@8192  A==B:True  B==C:False
+  i=3  P=11699  A(ctx0=True) B@10240 C@8192  A==B:True  B==C:False
+  i=4  P=11699  A(ctx0=True) B@10240 C@8192  A==B:True  B==C:False
+  i=5  P=11699  A(ctx0=True) B@10240 C@8192  A==B:True  B==C:False
+  i=6  P=11699  A(ctx0=True) B@10240 C@8192  A==B:True  B==C:False
+  i=7  P=11699  A(ctx0=True) B@10240 C@8192  A==B:True  B==C:False
+
+RESULT
+  A vs B (cold vs deep resume):   same=8 differ=0
+  B vs C (deep vs shallow resume): same=0 differ=8  -> divergence rate 100%
+  uninformative (no shallower resume achieved): 0
+  A vs C (cold vs shallow resume):  same=0 differ=8   <- the case that matters for production
+  where deep vs shallow first part (chars): median=227 min=73 max=520
+  similarity of deep vs shallow replies: median=0.243 min=0.095
+  detail: /Users/naz/Projects/ds4/.codebase-memory/20261118-kvstorm/runs/resume-depth.jsonl
+11-18 17:59:40 probe exit=0
+11-18 17:59:40 done
+11-18 17:59:45 restoring production
+Rotated previous log to ./log/ds4-qwen.log.20261118-175946
+Starting ds4-server on port 8002 with model gguf/Qwen3.8-Flash-Next-Q4.gguf (ctx: 524288)...
+Logging to ./log/ds4-qwen.log
+Qwen3.8: vision encoder gguf/mmproj-Qwen3.8-Flash-Next-Q8_0.gguf, batched-session 2, mtp 1, mixed-prefill-quantum 512
+ds4-server started (PID: 30225)
+11-18 17:59:52 prod answering on :8002
+11-18 18:01:28 stopping production; resume-depth experiment (reps=8 target=12000 maxtok=256)
+Stopping ds4-server (PID: 30225)...
+ds4-server stopped
+11-18 18:01:38 engine up; every request is classified from the log, not assumed
+measured 6.42 chars/token
+  i=0  P=11699  A(ctx0=True) B@10240 C@8192  A==B:True  B==C:False
+  i=1  P=11699  A(ctx0=True) B@10240 C@8192  A==B:True  B==C:False
+  i=2  P=11699  A(ctx0=True) B@10240 C@8192  A==B:True  B==C:True 
+  i=3  P=11699  A(ctx0=True) B@10240 C@8192  A==B:True  B==C:False
+  i=4  P=11699  A(ctx0=True) B@10240 C@8192  A==B:True  B==C:False
+  i=5  P=11699  A(ctx0=True) B@10240 C@8192  A==B:True  B==C:False
+  i=6  P=11699  A(ctx0=True) B@10240 C@8192  A==B:True  B==C:False
+  i=7  P=11699  A(ctx0=True) B@10240 C@8192  A==B:True  B==C:False
+
+RESULT
+  A vs B (cold vs deep resume):   same=8 differ=0
+  B vs C (deep vs shallow resume): same=1 differ=7  -> divergence rate 88%
+  uninformative (no shallower resume achieved): 0
+  A vs C (cold vs shallow resume):  same=1 differ=7   <- the case that matters for production
+  where deep vs shallow first part (chars): median=166 min=73 max=1076
+  similarity of deep vs shallow replies: median=0.250 min=0.091
+  detail: /Users/naz/Projects/ds4/.codebase-memory/20261118-kvstorm/runs/resume-depth.jsonl
+11-18 18:05:11 probe exit=0
+11-18 18:05:11 done
+11-18 18:05:16 restoring production
+Rotated previous log to ./log/ds4-qwen.log.20261118-180516
+Starting ds4-server on port 8002 with model gguf/Qwen3.8-Flash-Next-Q4.gguf (ctx: 524288)...
+Logging to ./log/ds4-qwen.log
+Qwen3.8: vision encoder gguf/mmproj-Qwen3.8-Flash-Next-Q8_0.gguf, batched-session 2, mtp 1, mixed-prefill-quantum 512
+ds4-server started (PID: 30451)
+11-18 18:05:22 prod answering on :8002

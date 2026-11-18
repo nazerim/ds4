@@ -1,5 +1,11 @@
 # Does the disk-KV path change the model's answer?
 
+> **Short answer: the engine's own choice of checkpoint is bit-faithful, but a mid-prefill `continued`
+> checkpoint is NOT — resuming from it changes the answer ~90 % of the time, on both the fork and
+> upstream `b3f5018`.** See "REPRODUCED DELIBERATELY" below. That is the finding; the earlier
+> "0 divergences" results are real but narrower than they look, because they only ever tested the
+> checkpoint the engine picks when nothing has been evicted.
+
 Controlled measurements, 2026-11-18 afternoon. Question raised by the eviction A/B: arms `u16a` and
 `u400` ran the **same binary and same schedule** yet agreed on only 247 of 440 replies, so cache state
 appeared to influence output. That would be a correctness problem, not a performance one.
@@ -74,7 +80,64 @@ scratch KV dir, then repeat — and compare. Repeat 20× to get a rate. If shall
 percent, that plus the cascade explains the arms, and the residual risk to production is "answers depend
 on which checkpoint survived", which is a reportable behaviour rather than a silent numeric curiosity.
 
+## REPRODUCED DELIBERATELY: mid-prefill (`continued`) checkpoints change the answer
+
+`resume_depth_probe.py` + `run-resumedepth.sh` test this on purpose. Per prompt: **A** cold prefill,
+**B** resume from the deep checkpoint, then **delete exactly the file the log named for B** and
+**C** resume again from the next-shortest checkpoint. Every request is classified from the engine's own
+`chat ctx=X..P prompt start` line, and a C that lands on `ctx=0` is scored uninformative rather than
+counted as a shallow resume.
+
+| build | A vs B — cold vs **deep** (`cold` store) | A vs C — cold vs **shallow** (`continued` store) | reply similarity B vs C |
+|---|---|---|---|
+| fork (production build) | **0 / 20 differ** | **8 / 8 differ** | median 0.243, min 0.095 |
+| upstream `b3f5018` | **0 / 8 differ** | **7 / 8 differ** | median 0.250, min 0.091 |
+
+Both builds resume from `ctx=8192` against an 11,699-token prompt, and pin
+`--kv-cache-continued-interval-tokens 8192`. (The earlier fork 8/8 figure ran on the fork's default
+interval, so it is not perfectly like-for-like with the upstream run; the effect is unchanged.)
+
+**Which checkpoint is at fault is named by the log, not inferred.** During one cold prefill the server writes:
+
+```
+tokens=8192   trimmed=0    reason=continued   size=359.73 MiB   <-- resuming from this changes the answer
+tokens=10240  trimmed=1459 reason=cold        size=421.28 MiB   <-- resuming from this matches cold exactly
+```
+
+Both are valid text prefixes of the same prompt (SHA-matched, `key=token-text`), both load in ~20-30 ms,
+and both are considered usable by the lookup. But only the `cold` one reproduces full prefill. The
+divergence appears early — median first difference 166-227 characters in — and the replies are not
+paraphrases of each other: median character-level similarity ~0.25, i.e. a substantively different answer.
+
+### Why this is the significant result of the whole session
+
+Everything else measured here was benign: the cache does not change answers when the engine picks its own
+checkpoint, and the process is deterministic. This says the engine will return a **different answer for the
+same prompt depending on which checkpoint survived**, and the eviction findings say survival is decided by
+a fixed 113.5 MiB payload cost rather than by usefulness. Performance and correctness are therefore the
+same defect chain, not two separate issues.
+
+It also explains the observation that started this: `u16a` and `u400` shared a binary and a schedule yet
+agreed on only 247 of 440 replies — they had different checkpoints available, hence different resume depths.
+
+**Mechanism: NOT established.** The discriminator is that the `continued` store happens mid-prefill, at a
+chunk boundary, while the `cold` store is written at the trimmed boundary. A candidate is state that is only
+complete once the prefill finishes, or per-layer compression ratios (`compress_ratios` has 0-ratio layers
+and 4:1 layers) that do not agree on an 8192 boundary. Both builds show it, so it is not fork-specific.
+Naming the cause needs a code-level read of what the continued payload captures versus the cold payload.
+
+### Status versus upstream
+
+Searched `antirez/ds4` (read-only) for "continued checkpoint", "mid-prefill checkpoint", "cache hit wrong
+output", "checkpoint different result", "resumed session differs". Nothing addresses output changing between
+checkpoint kinds — the closest, #1266, #1186 and closed #174, are all about continued checkpoints being
+*evicted*. So the correctness aspect appears unreported, though I did not read every issue in the repo.
+
+**Not posted. Drafting and posting need the owner's go.** See `ISSUE-DRAFT-resume-depth.md`.
+
 ## How this harness failed twice, and what each failure would have hidden
+
+
 
 Both failures produced **100 % agreement**, which is the flattering result — the mechanism, not the summary
 line, is what caught them.

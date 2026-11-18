@@ -21,7 +21,9 @@ the trail, quote nothing from below the rule.
 | **`PR-RANKING.md`** | **The deliverable: ranks the four open upstream evictor PRs in ~1 s each, and shows the pathology is timescale-dependent. Read its limits section first -- the dwell numbers are unvalidated** |
 | `cachediver_probe.py` + `run-cachediver.sh` | Cold-vs-disk-hit answer comparison on a live engine (needs a window; runner preflights that a disk hit really happened, then restores prod) |
 | `evict_prs.py` | The four PRs as selectable policies (+ combinations), with per-model size refit and a dwell-time knob |
-| **`CACHE-DIVERGENCE.md`** | **Does the disk-KV path change the answer? 161 comparisons: no -- cold==resume on both builds, deterministic across processes. One unreproduced anomaly: checkpoint DEPTH changes it. Read its two harness-failure notes before trusting any "0 divergence" line here** |
+| **`resume_depth_probe.py` + `run-resumedepth.sh`** | Forces deep vs shallow resume by deleting the checkpoint the last load named; classifies every request from the log |
+| **`ISSUE-DRAFT-resume-depth.md`** | **DRAFT, NOT POSTED** -- the `continued`-checkpoint correctness finding, with repro steps and explicit non-claims. Owner's go required |
+| **`CACHE-DIVERGENCE.md`** | **Does the disk-KV path change the answer? cold==resume when the engine picks, and deterministic across processes -- BUT resuming from a mid-prefill `continued` checkpoint changes the answer ~90% of the time, on the fork AND upstream. That is the finding. Read its two harness-failure notes before trusting any "0 divergence" line here** |
 | `runs/COMPARE-*.txt` | the three tables; re-derive with `python3 -I compare.py runs <N> <arms...>` |
 | `runs/<arm>/` | requests.jsonl + server.log.gz + meta.txt per arm |
 | `runs/chain*.log` | the operational record, including the killed-and-resumed chain |

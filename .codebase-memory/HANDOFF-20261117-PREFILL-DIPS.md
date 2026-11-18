@@ -486,11 +486,11 @@ tokenizer fingerprints is true here and false upstream, and the port nearly ship
 ### Addendum 2026-11-18 (overnight A/B run) -- first pass; its capacity conclusion is REFUTED by Addendum 2 below
 
 The "record a new workload" blocker is **done**: `20261118-kvstorm/` holds the generator, protocol (pre-registered),
-four arms (A/B/B/A) and `RESULTS.md`. Verdict by the pre-registered rule: **inconclusive for the RFC premise.**
+four arms (A/B/B/A) and `20261118-kvstorm/RESULTS.md`. Verdict by the pre-registered rule: **inconclusive for the RFC premise.**
 Upstream returned 76.5 % cold rebuilds vs the fork's 23.5 % at a 6 GiB budget (same-arm spread <= 0.2 pts), but upstream
 evicted only as `disk-cache-full` (no retirement class) and the 6 GiB budget held 29 fork files vs 11 upstream, so
 **capacity (delta chains vs full checkpoints), not eviction order, is the leading explanation.** The RFC stays unposted.
-Next experiment: rerun at a budget both trees can fit (~16 GiB) -- see `RESULTS.md`. Also found: with production's
+Next experiment: rerun at a budget both trees can fit (~16 GiB) -- see `20261118-kvstorm/RESULTS.md`. Also found: with production's
 `--kv-cache-retire-grace-seconds 3600` the budget is advisory (0 evictions, 35 GB in a 6 GiB budget over 129 requests).
 Production was stopped 02:26-06:23 for this and restored via `start-qwen` (PID 92879), cache untouched at 753 files.
 `~/Projects/ds4-ab-upstream` (b3f5018, built) is kept for the follow-up.
@@ -528,8 +528,17 @@ CACHE-PATH OUTPUT DIVERGENCE -- measured; see `20261118-kvstorm/CACHE-DIVERGENCE
 engine is deterministic across processes (12/12). The single anomaly: the same prompt resumed at checkpoint depth
 10240 vs 8192 matched for 298 chars then diverged (difflib 0.633) -- found by accident, never deliberately
 reproduced. That is the live lead: if checkpoint survival (arbitrary, per the density finding) picks resume depth,
-then eviction can change answers, rarely. Decisive test is written in that doc -- force deep vs shallow resume on
-one prompt, 20 repeats, ~1 window.
+then eviction can change answers, rarely.
+
+DECISIVE TEST RUN, same evening, on PURPOSE (`20261118-kvstorm/resume_depth_probe.py`): resuming an 11,699-token prompt from the mid-prefill
+`reason=continued` checkpoint at ctx=8192 changes the completion vs cold prefill -- fork 8/8 differ, upstream b3f5018 7/8
+differ (median similarity ~0.25, first difference ~170-230 chars in) -- while resuming from the aligned `reason=cold`
+checkpoint at ctx=10240 is byte-identical to cold in 28/28 comparisons. So: a checkpoint the engine treats as a valid
+SHA-matched prefix does not restore equivalent state. Both builds => NOT a fork regression. Mechanism NOT established
+(candidate: state that completes only at end-of-prefill, or per-layer KV compression ratios disagreeing on an 8192
+boundary). This also explains the u16a-vs-u400 reply divergence that the earlier cache-stability results could not.
+Prior art searched (read-only): #1266/#1186/#174 are about continued checkpoints being EVICTED; nothing on output
+changing. Draft issue written but NOT POSTED -- `20261118-kvstorm/ISSUE-DRAFT-resume-depth.md` needs owner's go.
 
 MECHANISM, corrected same day by an independent Opus pass I then verified myself: the harm is the DENSITY term, not the missing age term.
 `size(MiB)=113.518+0.0300516*tokens` (max residual 0.0073 over 1342 lines, re-fit by me), so a positive fixed payload intercept makes

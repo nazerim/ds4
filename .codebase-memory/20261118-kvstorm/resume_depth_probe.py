@@ -20,6 +20,7 @@ genuinely resumed at a shallower X.
 Needs the engine on --port and its KV dir at --kvdir; run with production stopped.
 """
 import argparse
+import difflib
 import json
 import os
 import re
@@ -153,6 +154,16 @@ def main():
             ab_same += (tA == tB)
             ab_diff += (tA != tB)
 
+        # Capture the texts and where they part: "differs" without magnitude is not evidence,
+        # and A==C is what turns "deep != shallow" into "shallow != cold".
+        def fd(x, y):
+            return next((k for k in range(min(len(x), len(y))) if x[k] != y[k]),
+                        min(len(x), len(y)))
+        rec["textA"], rec["textB"], rec["textC"] = tA[:3000], tB[:3000], tC[:3000]
+        rec["first_diff_AB"], rec["first_diff_BC"] = fd(tA, tB), fd(tB, tC)
+        rec["similarity_BC"] = round(difflib.SequenceMatcher(None, tB, tC).ratio(), 3)
+        rec["same_AC"] = (tA == tC)
+
         out.write(json.dumps(rec) + "\n"); out.flush()
         print("  i=%-2d P=%-6s A(ctx0=%s) B@%s C@%s  A==B:%-5s B==C:%-5s%s"
               % (i, PA, xA == 0, xB, xC, tA == tB, tB == tC,
@@ -164,6 +175,18 @@ def main():
           % (bc_same, bc_diff, ("%.0f%%" % (100.0 * bc_diff / (bc_same + bc_diff)))
              if (bc_same + bc_diff) else "n/a"))
     print("  uninformative (no shallower resume achieved): %d" % skipped)
+    ac = [json.loads(l) for l in open(a.out)]
+    ac = [r for r in ac if r.get("same_AC") is not None]
+    print("  A vs C (cold vs shallow resume):  same=%d differ=%d   <- the case that matters for production"
+          % (sum(1 for r in ac if r["same_AC"]), sum(1 for r in ac if not r["same_AC"])))
+    fdb = [r["first_diff_BC"] for r in ac if r.get("first_diff_BC") is not None and not r.get("same_AC", True)]
+    if fdb:
+        print("  where deep vs shallow first part (chars): median=%d min=%d max=%d"
+              % (sorted(fdb)[len(fdb) // 2], min(fdb), max(fdb)))
+    sims = [r.get("similarity_BC") for r in ac if r.get("similarity_BC") is not None]
+    if sims:
+        print("  similarity of deep vs shallow replies: median=%.3f min=%.3f"
+              % (sorted(sims)[len(sims) // 2], min(sims)))
     print("  detail: %s" % a.out)
     return 0
 
