@@ -42,12 +42,15 @@ Back out: `git revert 7d2a4ec && make ds4-server && ./ds4-server.sh restart-qwen
 
 ## 3. Public artefacts
 
-- **antirez/ds4#1359** (open) — the filed finding. `20261118-kvstorm/ISSUE-POST-BODY.md` is the
-  exact posted text; the draft file keeps the framings I tested and rejected.
+- **antirez/ds4#1359** (open) — the filed finding: <https://github.com/antirez/ds4/issues/1359>.
+  `20261118-kvstorm/ISSUE-POST-BODY.md` is the exact posted text (verified byte-identical after
+  posting); the draft file keeps the framings I tested and rejected.
 - **antirez/ds4#711** — evidence comment: measured fixed cost, offered as a cross-check for
-  `ds4_engine_checkpoint_fixed_overhead_bytes()`.
-- **antirez/ds4#1358** (ours, open, mergeable) — durability barrier. `origin/main` has not moved
-  off `b3f5018`, so there is nothing to rebase.
+  `ds4_engine_checkpoint_fixed_overhead_bytes()`:
+  <https://github.com/antirez/ds4/pull/711#issuecomment-6983638516> (read back verbatim after posting).
+- **antirez/ds4#1358** (ours, open, mergeable) — durability barrier:
+  <https://github.com/antirez/ds4/pull/1358>. `origin/main` has not moved off `b3f5018`, so there is
+  nothing to rebase.
 
 ## 4. Eviction side (settled, third-hand — do not re-file)
 
@@ -110,10 +113,12 @@ suite that compiles `ds4_server.c` is `make test-server-logic` → `ds4_server_t
 No window needed for any of these — run from `.codebase-memory/` (paths below are relative to it):
 
 ```sh
-python3 20261118-kvstorm/evict_policies.py runs/u16a/requests.jsonl 430 16384   # same-capacity controls, ~1 s
-python3 20261118-kvstorm/evict_prs.py     runs/u16a/requests.jsonl 430 16384    # ranks the four open PRs
-python3 20261118-kvstorm/evict_prs.py     runs/u16a/requests.jsonl 430 16384 1800   # + dwell (unvalidated)
-gh api repos/antirez/ds4/issues/1359 --jq '.state, .comments' # upstream response?
+# from .codebase-memory/ -- every path below is relative to it, including the data files
+python3 20261118-kvstorm/evict_policies.py 20261118-kvstorm/runs/u16a/requests.jsonl 430 16384   # controls, ~1 s
+python3 20261118-kvstorm/evict_prs.py 20261118-kvstorm/runs/u16a/requests.jsonl 430 16384         # ranks 4 PRs
+python3 20261118-kvstorm/evict_prs.py 20261118-kvstorm/runs/u16a/requests.jsonl 430 16384 1800    # + dwell (unvalidated)
+gh api repos/antirez/ds4/issues/1359 --jq '"1359: \(.state), \(.comments) comment(s)"'   # upstream reply?
+gh api repos/antirez/ds4/pulls/1358  --jq '"1358: \(.state), mergeable=\(.mergeable)"'
 ```
 
 Read order: this file → `20261118-kvstorm/README.md` → `20261118-kvstorm/CACHE-DIVERGENCE.md` → `20261118-kvstorm/PR-RANKING.md` →
