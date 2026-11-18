@@ -1,0 +1,95 @@
+ds4: Qwen BF16 n-grams: 95.37 GiB, disk reads only
+ds4: Metal device Apple M5 Max, 128.00 GiB RAM
+ds4: Metal 4 tensor API enabled for Tensor kernels
+ds4: drift-patch flags hc_stable=on norm_unify=on kv_raw_f32=off rope_exp2_log2=off math_safe=off tensor_matmul=on
+ds4: Metal model views created in 1.933 ms, residency requested in 500.476 ms, warmup 3.629 ms (mapped 71400.44 MiB from offset 10.51 MiB)
+ds4: Metal mapped mmaped model as 1 overlapping shared buffers
+ds4: metal backend initialized for graph diagnostics
+ds4: memory: KV 2.08 GiB (raw 1.63 + compressed 0.46) + buffers 8.68 GiB + resident model 69.73 GiB = 80.49 GiB planned
+ds4: memory detail: ctx=65536 prefill_cap=8192 raw_kv_rows=65536 compressed_kv_rows=16385 backend=metal
+1118 23:29:48 ds4-server: context buffers 11024.12 MiB (ctx=65536, backend=metal, prefill_chunk=8192, raw_kv_rows=65536, compressed_kv_rows=16385)
+1118 23:29:48 ds4-server: listening on http://127.0.0.1:8003
+1118 23:29:52 ds4-server: chat ctx=0..12555:12555 prompt start
+1118 23:29:57 ds4-server: chat ctx=0..12555:12555 prefill chunk 8192/12555 (65.2%) chunk=0.00 t/s avg=1603.42 t/s 5.109s
+1118 23:30:01 ds4-server: chat ctx=0..12555:12555 prefill chunk 12555/12555 (100.0%) chunk=1350.86 t/s avg=1505.60 t/s 8.339s
+1118 23:30:01 ds4-server: prefill hold slot=0 8.34s tokens=0..12555 remaining=0 quantum=0 (holds=1 total=8.3s max=8.34s)
+1118 23:30:01 ds4-server: chat ctx=0..12555:12555 prompt done 8.339s
+1118 23:30:01 ds4-server: DSML token not found in vocab; suppression disabled
+1118 23:30:01 ds4-server: chat ctx=12555..12605:50 gen=50 decoding chunk=53.15 t/s avg=53.15 t/s 0.941s
+1118 23:30:02 ds4-server: chat ctx=12605..12655:50 gen=100 decoding chunk=55.01 t/s avg=54.06 t/s 1.850s
+1118 23:30:03 ds4-server: chat ctx=12655..12705:50 gen=150 decoding chunk=54.29 t/s avg=54.14 t/s 2.771s
+1118 23:30:04 ds4-server: chat ctx=12705..12755:50 gen=200 decoding chunk=51.33 t/s avg=53.41 t/s 3.745s
+1118 23:30:05 ds4-server: chat ctx=12755..12805:50 gen=250 decoding chunk=50.96 t/s avg=52.90 t/s 4.726s
+1118 23:30:05 ds4-server: chat ctx=12805..12811:6 gen=256 decoding chunk=54.15 t/s avg=52.93 t/s 4.837s
+1118 23:30:05 ds4-server: chat ctx=0..12555:12555 gen=256 finish=length 13.176s
+1118 23:30:05 ds4-server: live kv cache miss live=12811 prompt=11600 common=13 vision=match reason=token-mismatch
+1118 23:30:05 ds4-server: chat ctx=0..11600:11600 prompt start
+1118 23:30:11 ds4-server: chat ctx=0..11600:11600 prefill chunk 8192/11600 (70.6%) chunk=0.00 t/s avg=1338.96 t/s 6.118s
+1118 23:30:14 ds4-server: chat ctx=0..11600:11600 prefill chunk 11600/11600 (100.0%) chunk=1234.43 t/s avg=1306.46 t/s 8.879s
+1118 23:30:14 ds4-server: prefill hold slot=0 8.88s tokens=0..11600 remaining=0 quantum=0 (holds=2 total=17.2s max=8.88s)
+1118 23:30:14 ds4-server: chat ctx=0..11600:11600 prompt done 8.879s
+1118 23:30:14 ds4-server: DSML token not found in vocab; suppression disabled
+1118 23:30:15 ds4-server: chat ctx=11600..11650:50 gen=50 decoding chunk=54.13 t/s avg=54.13 t/s 0.924s
+1118 23:30:16 ds4-server: chat ctx=11650..11700:50 gen=100 decoding chunk=54.82 t/s avg=54.47 t/s 1.836s
+1118 23:30:17 ds4-server: chat ctx=11700..11750:50 gen=150 decoding chunk=53.09 t/s avg=54.00 t/s 2.778s
+1118 23:30:18 ds4-server: chat ctx=11750..11800:50 gen=200 decoding chunk=48.43 t/s avg=52.49 t/s 3.810s
+1118 23:30:19 ds4-server: chat ctx=11800..11850:50 gen=250 decoding chunk=50.11 t/s avg=52.00 t/s 4.808s
+1118 23:30:19 ds4-server: chat ctx=11850..11856:6 gen=256 decoding chunk=50.38 t/s avg=51.96 t/s 4.927s
+1118 23:30:19 ds4-server: chat ctx=0..11600:11600 gen=256 finish=length 13.806s
+1118 23:30:19 ds4-server: live kv cache miss live=11856 prompt=12230 common=13 vision=match reason=token-mismatch
+1118 23:30:19 ds4-server: chat ctx=0..12230:12230 prompt start
+1118 23:30:25 ds4-server: chat ctx=0..12230:12230 prefill chunk 8192/12230 (67.0%) chunk=0.00 t/s avg=1344.18 t/s 6.094s
+1118 23:30:29 ds4-server: chat ctx=0..12230:12230 prefill chunk 12230/12230 (100.0%) chunk=1233.90 t/s avg=1305.65 t/s 9.367s
+1118 23:30:29 ds4-server: prefill hold slot=0 9.37s tokens=0..12230 remaining=0 quantum=0 (holds=3 total=26.6s max=9.37s)
+1118 23:30:29 ds4-server: chat ctx=0..12230:12230 prompt done 9.367s
+1118 23:30:29 ds4-server: DSML token not found in vocab; suppression disabled
+1118 23:30:29 ds4-server: chat ctx=12230..12280:50 gen=50 decoding chunk=53.52 t/s avg=53.52 t/s 0.934s
+1118 23:30:30 ds4-server: chat ctx=12280..12330:50 gen=100 decoding chunk=56.34 t/s avg=54.89 t/s 1.822s
+1118 23:30:31 ds4-server: chat ctx=12330..12380:50 gen=150 decoding chunk=53.43 t/s avg=54.40 t/s 2.757s
+1118 23:30:32 ds4-server: chat ctx=12380..12430:50 gen=200 decoding chunk=51.87 t/s avg=53.74 t/s 3.721s
+1118 23:30:33 ds4-server: chat ctx=12430..12480:50 gen=250 decoding chunk=53.39 t/s avg=53.67 t/s 4.658s
+1118 23:30:33 ds4-server: chat ctx=12480..12486:6 gen=256 decoding chunk=53.25 t/s avg=53.66 t/s 4.771s
+1118 23:30:33 ds4-server: chat ctx=0..12230:12230 gen=256 finish=length 14.138s
+1118 23:30:33 ds4-server: live kv cache miss live=12486 prompt=11685 common=13 vision=match reason=token-mismatch
+1118 23:30:33 ds4-server: chat ctx=0..11685:11685 prompt start
+1118 23:30:39 ds4-server: chat ctx=0..11685:11685 prefill chunk 8192/11685 (70.1%) chunk=0.00 t/s avg=1353.99 t/s 6.050s
+1118 23:30:42 ds4-server: chat ctx=0..11685:11685 prefill chunk 11685/11685 (100.0%) chunk=1189.55 t/s avg=1300.26 t/s 8.987s
+1118 23:30:42 ds4-server: prefill hold slot=0 8.99s tokens=0..11685 remaining=0 quantum=0 (holds=4 total=35.6s max=9.37s)
+1118 23:30:42 ds4-server: chat ctx=0..11685:11685 prompt done 8.987s
+1118 23:30:42 ds4-server: DSML token not found in vocab; suppression disabled
+1118 23:30:43 ds4-server: chat ctx=11685..11735:50 gen=50 decoding chunk=51.27 t/s avg=51.27 t/s 0.975s
+1118 23:30:44 ds4-server: chat ctx=11735..11785:50 gen=100 decoding chunk=52.20 t/s avg=51.73 t/s 1.933s
+1118 23:30:45 ds4-server: chat ctx=11785..11835:50 gen=150 decoding chunk=51.10 t/s avg=51.52 t/s 2.912s
+1118 23:30:46 ds4-server: chat ctx=11835..11885:50 gen=200 decoding chunk=51.22 t/s avg=51.44 t/s 3.888s
+1118 23:30:47 ds4-server: chat ctx=11885..11935:50 gen=250 decoding chunk=50.66 t/s avg=51.28 t/s 4.875s
+1118 23:30:47 ds4-server: chat ctx=11935..11941:6 gen=256 decoding chunk=51.01 t/s avg=51.28 t/s 4.992s
+1118 23:30:47 ds4-server: chat ctx=0..11685:11685 gen=256 finish=length 13.979s
+1118 23:30:47 ds4-server: live kv cache miss live=11941 prompt=12624 common=13 vision=match reason=token-mismatch
+1118 23:30:47 ds4-server: chat ctx=0..12624:12624 prompt start
+1118 23:30:54 ds4-server: chat ctx=0..12624:12624 prefill chunk 8192/12624 (64.9%) chunk=0.00 t/s avg=1313.11 t/s 6.239s
+1118 23:30:57 ds4-server: chat ctx=0..12624:12624 prefill chunk 12624/12624 (100.0%) chunk=1303.02 t/s avg=1309.55 t/s 9.640s
+1118 23:30:57 ds4-server: prefill hold slot=0 9.64s tokens=0..12624 remaining=0 quantum=0 (holds=5 total=45.2s max=9.64s)
+1118 23:30:57 ds4-server: chat ctx=0..12624:12624 prompt done 9.640s
+1118 23:30:57 ds4-server: DSML token not found in vocab; suppression disabled
+1118 23:30:58 ds4-server: chat ctx=12624..12674:50 gen=50 decoding chunk=54.10 t/s avg=54.10 t/s 0.924s
+1118 23:30:59 ds4-server: chat ctx=12674..12724:50 gen=100 decoding chunk=53.72 t/s avg=53.91 t/s 1.855s
+1118 23:31:00 ds4-server: chat ctx=12724..12774:50 gen=150 decoding chunk=51.58 t/s avg=53.11 t/s 2.824s
+1118 23:31:01 ds4-server: chat ctx=12774..12824:50 gen=200 decoding chunk=51.52 t/s avg=52.70 t/s 3.795s
+1118 23:31:02 ds4-server: chat ctx=12824..12874:50 gen=250 decoding chunk=50.36 t/s avg=52.22 t/s 4.788s
+1118 23:31:02 ds4-server: chat ctx=12874..12880:6 gen=256 decoding chunk=50.40 t/s avg=52.17 t/s 4.907s
+1118 23:31:02 ds4-server: chat ctx=0..12624:12624 gen=256 finish=length 14.547s
+1118 23:31:02 ds4-server: live kv cache miss live=12880 prompt=12345 common=13 vision=match reason=token-mismatch
+1118 23:31:02 ds4-server: chat ctx=0..12345:12345 prompt start
+1118 23:31:08 ds4-server: chat ctx=0..12345:12345 prefill chunk 8192/12345 (66.4%) chunk=0.00 t/s avg=1366.94 t/s 5.993s
+1118 23:31:11 ds4-server: chat ctx=0..12345:12345 prefill chunk 12345/12345 (100.0%) chunk=1254.55 t/s avg=1326.95 t/s 9.303s
+1118 23:31:11 ds4-server: prefill hold slot=0 9.30s tokens=0..12345 remaining=0 quantum=0 (holds=6 total=54.5s max=9.64s)
+1118 23:31:11 ds4-server: chat ctx=0..12345:12345 prompt done 9.303s
+1118 23:31:11 ds4-server: DSML token not found in vocab; suppression disabled
+1118 23:31:12 ds4-server: chat ctx=12345..12395:50 gen=50 decoding chunk=55.95 t/s avg=55.95 t/s 0.894s
+1118 23:31:13 ds4-server: chat ctx=12395..12445:50 gen=100 decoding chunk=56.79 t/s avg=56.37 t/s 1.774s
+1118 23:31:14 ds4-server: chat ctx=12445..12495:50 gen=150 decoding chunk=53.66 t/s avg=55.43 t/s 2.706s
+1118 23:31:15 ds4-server: chat ctx=12495..12545:50 gen=200 decoding chunk=52.15 t/s avg=54.58 t/s 3.665s
+1118 23:31:16 ds4-server: chat ctx=12545..12595:50 gen=250 decoding chunk=51.30 t/s avg=53.89 t/s 4.639s
+1118 23:31:16 ds4-server: chat ctx=12595..12601:6 gen=256 decoding chunk=50.01 t/s avg=53.79 t/s 4.759s
+1118 23:31:16 ds4-server: chat ctx=0..12345:12345 gen=256 finish=length 14.063s
+1118 23:31:16 ds4-server: shutdown requested, draining requests

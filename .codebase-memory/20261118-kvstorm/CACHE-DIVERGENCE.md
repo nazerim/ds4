@@ -6,6 +6,10 @@
 > `disk ON` vs `disk OFF` test below: identical prompts, same binary, 6/6 differ, with no checkpoint involved
 > on one side.
 >
+> **The synthetic-corpus objection was tested and does not hold:** on real varied prose the same comparison
+> still diverges 6/6 (median similarity ~0.36). Production is in the split-schedule regime for every prompt
+> between 512 and 30k tokens, because `ds4-server.sh` passes `--kv-disk-dir`.
+>
 > The earlier framing of this finding ("a `continued` checkpoint restores bad state") is **refuted** by the
 > `C == D` cell below — the checkpoint is faithful; it just sits on a different chunk boundary. See
 > "MECHANISM ESTABLISHED". The "0 divergences" results further up are real but narrow: every resume in them
@@ -179,6 +183,38 @@ means the answer depends on server config and on which checkpoints survived.
 **Scope limit that matters:** every comparison here uses a deliberately repetitive synthetic corpus, which is
 where near-ties are most likely to be amplified. The rate on realistic prose is **unmeasured**, so the correct
 claim is "reproducibly sensitive", not "unreliable in production".
+
+### Realistic prose diverges at the same rate — the corpus excuse is gone
+
+That scope limit has now been closed. `run-shapereal.sh` repeats the ON/OFF comparison using real, varied
+prose (repo documentation, type-token ratio 0.253 versus the synthetic corpus's ~0.02), with chars/token
+measured from that corpus (3.06 — another reason not to hard-code it: the synthetic corpus measured 6.37).
+
+| prompt | tokens | cold disk ON | cold disk OFF | result | similarity |
+|---|---|---|---|---|---|
+| i=0 | 12,555 | 8192+4096+267 | 8192+4363 | DIFFER | 0.683 |
+| i=1 | 11,600 | 8192+2048+1360 | 8192+3408 | DIFFER | 0.059 |
+| i=2 | 12,230 | 8192+2048+1990 | 8192+4038 | DIFFER | 0.407 |
+| i=3 | 11,685 | 8192+2048+1445 | 8192+3493 | DIFFER | 0.305 |
+| i=4 | 12,624 | 8192+4096+336 | 8192+4432 | DIFFER | 0.477 |
+| i=5 | 12,345 | 8192+4096+57 | 8192+4153 | DIFFER | 0.251 |
+
+**6 / 6 diverge on realistic prose as well** (median similarity ~0.36, range 0.059–0.683), and the merged tail
+chunk is always exactly the sum of the split tail (e.g. 4096+267 = 4363), confirming the mechanism is the
+boundary itself rather than anything prompt-specific. The divergences are substantive, not one-word: i=1 at
+0.059 is a different answer.
+
+Two caveats that survive this. Six prompts is a small sample, and all are ~12k tokens. Whether short prompts
+diverge at the same rate is unmeasured — at 12k the tail chunk is small relative to the 8192 prefix, which may
+be exactly when the boundary matters most, so the rate for short prompts could be lower. And a 100 % divergence
+*rate* is not the same as a 100 % "wrong answer" rate: both completions are fluent and plausible, and nothing
+here shows one is worse.
+
+**Practical consequence for production.** `ds4-server.sh` starts the engine with `--kv-disk-dir`, and
+`KV_CACHE_DEFAULT_COLD_MAX_TOKENS` is 30,000 with `min_tokens` 512, so **every production prompt between 512
+and 30k tokens is in the split-schedule regime** — production is serving the "disk ON" answers by construction,
+and those differ from what the same binary says with the cache off. This is not a regression introduced by the
+fork: it comes from the cold-checkpoint write path that upstream shares.
 
 ### Status versus upstream
 

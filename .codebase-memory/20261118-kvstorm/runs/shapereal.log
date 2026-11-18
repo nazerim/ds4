@@ -1,0 +1,35 @@
+11-18 23:28:13 stopping production; realistic-prose chunk-shape test (reps=6 target=11700 uniq=REAL-28839)
+Stopping ds4-server (PID: 42350)...
+ds4-server stopped
+11-18 23:28:18 phase 1: disk ON
+measured 3.06 chars/token from real corpus
+  i=0  P=12555  ctx=0      chunks=8192+4096+267          chars=1284
+  i=1  P=11600  ctx=0      chunks=8192+2048+1360         chars=1213
+  i=2  P=12230  ctx=0      chunks=8192+2048+1990         chars=1408
+  i=3  P=11685  ctx=0      chunks=8192+2048+1445         chars=1177
+  i=4  P=12624  ctx=0      chunks=8192+4096+336          chars=1322
+  i=5  P=12345  ctx=0      chunks=8192+4096+57           chars=1473
+  schedules confirmed for expect_disk=on: [(8192, 2048, 1360), (8192, 2048, 1445), (8192, 2048, 1990), (8192, 4096, 57), (8192, 4096, 267), (8192, 4096, 336)]
+11-18 23:29:47 phase 1 exit=0 cpt=3.063960
+11-18 23:29:47 phase 2: disk OFF
+  i=0  P=12555  ctx=0      chunks=8192+4363              chars=1258
+  i=1  P=11600  ctx=0      chunks=8192+3408              chars=1387
+  i=2  P=12230  ctx=0      chunks=8192+4038              chars=1311
+  i=3  P=11685  ctx=0      chunks=8192+3493              chars=1136
+  i=4  P=12624  ctx=0      chunks=8192+4432              chars=1330
+  i=5  P=12345  ctx=0      chunks=8192+4153              chars=1552
+  schedules confirmed for expect_disk=off: [(8192, 3408), (8192, 3493), (8192, 4038), (8192, 4153), (8192, 4363), (8192, 4432)]
+11-18 23:31:19 phase 2 exit=0
+11-18 23:31:19 done
+11-18 23:31:24 restoring production
+Rotated previous log to ./log/ds4-qwen.log.20261118-233124
+Starting ds4-server on port 8002 with model gguf/Qwen3.8-Flash-Next-Q4.gguf (ctx: 524288)...
+Logging to ./log/ds4-qwen.log
+Qwen3.8: vision encoder gguf/mmproj-Qwen3.8-Flash-Next-Q8_0.gguf, batched-session 2, mtp 1, mixed-prefill-quantum 512
+ds4-server started (PID: 44093)
+11-18 23:31:30 prod answering on :8002
+11-18 23:32:23 stopping production; realistic-prose chunk-shape test (MODE=upstream reps=6 target=11700 uniq=REAL-30003)
+Stopping ds4-server (PID: 44093)...
+ds4-server stopped
+11-18 23:32:28 phase 1: disk ON
+measured 3.06 chars/token from real corpus

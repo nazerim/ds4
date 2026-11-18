@@ -19,6 +19,8 @@ MAXTOK=${MAXTOK:-256}
 UNIQ=REAL-$RANDOM
 CPTF=$HERE/runs/real-cpt-$UNIQ.txt
 CORPUS=${CORPUS:-/tmp/realcorpus.txt}
+MODE=${MODE:-fork}      # fork = production build; upstream = b3f5018 build (older flag dialect)
+WT=${WT:-$REPO}
 say() { echo "$(date '+%m-%d %H:%M:%S') $*" | tee -a $LOG; }
 
 restore_prod() {
@@ -38,13 +40,20 @@ trap restore_prod EXIT
 start_engine() {   # $1 = on|off, $2 = logfile
   local slog=$2
   : > $slog
-  local extra=()
+  local extra=() kvextra=()
   [ "$1" = "on" ] && extra=(--kv-disk-dir "$KV")
   [ "$1" = "on" ] && { rm -rf "$KV"; mkdir -p "$KV"; }
+  # b3f5018 has neither --kv-cache-small-dense nor divergence anchors; passing them makes it
+  # exit on an unknown argument, so the two builds cannot share one argv.
+  if [ "$MODE" = "upstream" ]; then
+    kvextra=(--kv-cache-continued-interval-tokens 8192)
+  else
+    kvextra=(--kv-cache-small-dense 49152 --kv-cache-max-divergence-anchors 8
+             --kv-cache-continued-interval-tokens 8192)
+  fi
+  cd $WT || exit 2
   ./ds4-server --model gguf/Qwen3.8-Flash-Next-Q4.gguf --ctx 65536 --tokens 4096 \
-    --host 127.0.0.1 --port $PORT --kv-disk-space-mb 32768 \
-    --kv-cache-small-dense 49152 --kv-cache-max-divergence-anchors 8 \
-    --kv-cache-continued-interval-tokens 8192 $extra >> $slog 2>&1 &
+    --host 127.0.0.1 --port $PORT --kv-disk-space-mb 32768 $kvextra $extra >> $slog 2>&1 &
   ENGINE_PID=$!
   for i in {1..120}; do
     curl -s -m 5 -o /dev/null http://127.0.0.1:$PORT/v1/models && return 0
@@ -71,7 +80,7 @@ if [ ! -s "$CORPUS" ]; then
   say "corpus built: $(wc -c < $CORPUS | tr -d ' ') chars from repo docs"
 fi
 [ -s "$CORPUS" ] || { say "no corpus at $CORPUS"; exit 2; }
-say "stopping production; realistic-prose chunk-shape test (reps=$REPS target=$TARGET uniq=$UNIQ)"
+say "stopping production; realistic-prose chunk-shape test (MODE=$MODE reps=$REPS target=$TARGET uniq=$UNIQ)"
 ./ds4-server.sh stop >> $LOG 2>&1
 sleep 4
 unset DS4_API_KEY QWEN_API_KEY QWEN_SUBSCRIPTION_KEY
