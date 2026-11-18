@@ -1,0 +1,5 @@
+u16a server pid=95226 args: --ctx 65536 --kv-disk-space-mb 16384 
+ready after ~10s
+generator exit=0
+ 16G	/Volumes/FireCuda520/ds4-ab-u16a
+kv files left: 34

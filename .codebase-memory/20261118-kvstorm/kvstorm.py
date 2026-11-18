@@ -123,6 +123,7 @@ def main():
             reply = msg.get("content") or ""
             rec["empty"] = not reply.strip()
             rec["reply_sha"] = hashlib.sha1(reply.encode()).hexdigest()[:10]
+            rec["reply_head"] = reply[:80]
             u = d.get("usage", {})
             rec["prompt_tokens"] = u.get("prompt_tokens")
             rec["completion_tokens"] = u.get("completion_tokens")

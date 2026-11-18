@@ -483,7 +483,7 @@ is one block (this deleted five entries from the trust table). And porting a pat
 another tree requires re-verifying every noun in its *prose*: the fork's comment about
 tokenizer fingerprints is true here and false upstream, and the port nearly shipped it.
 
-### Addendum 2026-11-18 (overnight A/B run) -- supersedes the RFC-blocker paragraph above
+### Addendum 2026-11-18 (overnight A/B run) -- first pass; its capacity conclusion is REFUTED by Addendum 2 below
 
 The "record a new workload" blocker is **done**: `20261118-kvstorm/` holds the generator, protocol (pre-registered),
 four arms (A/B/B/A) and `RESULTS.md`. Verdict by the pre-registered rule: **inconclusive for the RFC premise.**
@@ -494,3 +494,23 @@ Next experiment: rerun at a budget both trees can fit (~16 GiB) -- see `RESULTS.
 `--kv-cache-retire-grace-seconds 3600` the budget is advisory (0 evictions, 35 GB in a 6 GiB budget over 129 requests).
 Production was stopped 02:26-06:23 for this and restored via `start-qwen` (PID 92879), cache untouched at 753 files.
 `~/Projects/ds4-ab-upstream` (b3f5018, built) is kept for the follow-up.
+
+### Addendum 2 -- 2026-11-18 14:30 (follow-up arms; this is the current state of the RFC question)
+
+Read `20261118-kvstorm/RESULTS.md` section FINAL. Short form: the 6 GiB result was NOT capacity. Upstream stays at 63 % cold
+rebuilds with 2.7x the budget (16 GiB), but with eviction removed (u400, 400 GiB) it is **0 % cold** -- so eviction is the whole
+explanation. Mechanism, measured and read in code (`ds4_kvstore_entry_eviction_score`, score `(hits+1)*tokens/size`, 6 h hit
+half-life, no recency term for zero-hit entries): 98-99 % of upstream's victims had zero hits, median store->evict lifetime 5 s.
+A 20-line experimental recency boost (`~/Projects/ds4-ab-evictfix`, diff vs b3f5018) takes it to 5.1 % cold (rebuilt tokens -87 %).
+Earlier analysis bugs, all fixed and re-reviewed: overlapping +/-1 s attribution windows (now finish-line segmentation),
+live-reuse prefill counted as 0, prompt cross-check only covered cold requests.
+
+**What the RFC should now be:** a small, evidence-backed upstream issue/PR about never-hit entries being first victims -- NOT the
+fork's retirement ladder (upstream has no retirement class). It must carry the limits: synthetic workload, constants untuned,
+one budget, no production claim. NOT POSTED; needs the independent review below and the owner's go.
+
+**Open:** replies differ between arms with different cache behaviour even on the SAME binary (u16a vs u400 agree 247/430) --
+recomputed vs loaded prefix state gives different temperature-0 output; unexplained and correctness-relevant. Boost constants
+(8.0 / 300 s) are guesses; sweep needed before proposing numbers. Prod was stopped 02:26-06:23, 10:36-11:15(killed by a shell
+kill; chain resumed), 11:16-13:36 and 13:38-14:17; each time restored by `start-qwen`, cache untouched at 753 files.
+Worktrees kept: `ds4-ab-upstream` (b3f5018 built), `ds4-ab-evictfix` (patched, built).

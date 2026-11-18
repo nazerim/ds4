@@ -1,0 +1,5 @@
+f16b server pid=97605 args: --ctx 65536 --kv-disk-space-mb 16384 --kv-cache-small-dense 49152 --kv-cache-retire-grace-seconds 0 --kv-cache-max-divergence-anchors 8
+ready after ~10s
+generator exit=0
+ 15G	/Volumes/FireCuda520/ds4-ab-f16b
+kv files left: 76

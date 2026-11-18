@@ -1,0 +1,22 @@
+common prefix = first 430 requests of each arm (log lines attributed by finish-line segmentation)
+
+arm        ret  mean_s  med_s  p90_s  cold% rebuilt_tok  rebuilt% prefill_t/s*  evict wall_min
+f16a       352    1.57   1.01   1.17    7.7      422844      11.2        1326    453     18.7
+u16a       352    6.52   6.64  13.95   63.4     2459409      65.4        1196    635     49.1
+u400       352    1.22   1.19   1.54    0.0      145836       3.9         nan      0     17.6
+u16fix     352    1.62   1.21   1.63    5.1      313784       8.3        1154    430     20.7
+
+f16a: returning classes {'disk': 264, 'live': 61, 'cold': 27}  evictions {'frontier-superseded': 124, 'conversation-retired': 329}  first-turn disk hits 0  returning prompt tokens 3760467
+u16a: returning classes {'disk': 68, 'live': 61, 'cold': 223}  evictions {'disk-cache-full': 635}  first-turn disk hits 0  returning prompt tokens 3760396
+u400: returning classes {'disk': 291, 'live': 61}  evictions {}  first-turn disk hits 0  returning prompt tokens 3760362
+u16fix: returning classes {'disk': 273, 'live': 61, 'cold': 18}  evictions {'disk-cache-full': 430}  first-turn disk hits 0  returning prompt tokens 3760380
+
+reply_sha agreement f16a vs u16a: 137/430
+reply_sha agreement f16a vs u400: 138/430
+reply_sha agreement f16a vs u16fix: 145/430
+reply_sha agreement u16a vs u400: 247/430
+reply_sha agreement u16a vs u16fix: 256/430
+reply_sha agreement u400 vs u16fix: 401/430
+
+* prefill_t/s = rebuilt tokens / log 'prompt done' seconds over cold requests; includes cache-save stalls (the fork saves more often), so it slightly UNDERSTATES fork speed.
+attribution warnings: 0

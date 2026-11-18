@@ -1,0 +1,10 @@
+common prefix = first 700 requests of each arm (log lines attributed by finish-line segmentation)
+
+arm        ret  mean_s  med_s  p90_s  cold% rebuilt_tok  rebuilt% prefill_t/s*  evict wall_min
+f16b       576    1.64   1.13   1.32    6.6      617160      10.1        1186    778     33.0
+
+f16b: returning classes {'disk': 448, 'live': 90, 'cold': 38}  evictions {'frontier-superseded': 211, 'conversation-retired': 567}  first-turn disk hits 0  returning prompt tokens 6112658
+
+
+* prefill_t/s = rebuilt tokens / log 'prompt done' seconds over cold requests; includes cache-save stalls (the fork saves more often), so it slightly UNDERSTATES fork speed.
+attribution warnings: 0

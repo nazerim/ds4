@@ -1,15 +1,15 @@
-common prefix = first 561 requests of each arm
+common prefix = first 561 requests of each arm (log lines attributed by finish-line segmentation)
 
-arm         ret  mean_s  med_s  p90_s  cold% rebuilt_tok  rebuilt% cold_tok/s  evict wall_min
-fork-g0     460    3.55   1.08   9.80   23.5     1513597      31.3       1757    833     40.0
-f2          460    3.35   1.06   9.22   23.3     1505662      31.1       1840    833     37.7
-u1          460    6.16   6.47  12.04   76.5     3619676      74.8       1449    903     60.0
-u2          460    6.16   6.57  12.09   76.5     3612888      74.7       1446    903     60.0
+arm        ret  mean_s  med_s  p90_s  cold% rebuilt_tok  rebuilt% prefill_t/s*  evict wall_min
+fork-g0    460    3.55   1.08   9.79   32.8     1776856      36.7        1314    832     40.0
+f2         460    3.35   1.06   9.20   32.8     1776856      36.7        1411    832     37.7
+u1         460    6.16   6.47  11.89   71.1     3390964      70.1        1342    902     60.0
+u2         460    6.16   6.57  11.88   71.1     3390964      70.1        1343    902     60.0
 
-fork-g0 {'disk': 349, 'cold': 108, 'live': 3} {'conversation-retired': 749, 'frontier-superseded': 84}
-f2 {'disk': 350, 'cold': 107, 'live': 3} {'conversation-retired': 749, 'frontier-superseded': 84}
-u1 {'disk': 103, 'cold': 352, 'live': 5} {'disk-cache-full': 903}
-u2 {'disk': 105, 'cold': 352, 'live': 3} {'disk-cache-full': 903}
+fork-g0: returning classes {'disk': 234, 'live': 75, 'cold': 151}  evictions {'conversation-retired': 749, 'frontier-superseded': 83}  first-turn disk hits 0  returning prompt tokens 4839773
+f2: returning classes {'disk': 234, 'live': 75, 'cold': 151}  evictions {'conversation-retired': 749, 'frontier-superseded': 83}  first-turn disk hits 0  returning prompt tokens 4839773
+u1: returning classes {'disk': 58, 'live': 75, 'cold': 327}  evictions {'disk-cache-full': 902}  first-turn disk hits 0  returning prompt tokens 4839615
+u2: returning classes {'disk': 58, 'live': 75, 'cold': 327}  evictions {'disk-cache-full': 902}  first-turn disk hits 0  returning prompt tokens 4839615
 
 reply_sha agreement fork-g0 vs f2: 561/561
 reply_sha agreement fork-g0 vs u1: 161/561
@@ -17,3 +17,6 @@ reply_sha agreement fork-g0 vs u2: 161/561
 reply_sha agreement f2 vs u1: 161/561
 reply_sha agreement f2 vs u2: 161/561
 reply_sha agreement u1 vs u2: 561/561
+
+* prefill_t/s = rebuilt tokens / log 'prompt done' seconds over cold requests; includes cache-save stalls (the fork saves more often), so it slightly UNDERSTATES fork speed.
+attribution warnings: 0

@@ -1,0 +1,79 @@
+11-18 11:16:10 chain3 start (budget 16384 MiB)
+11-18 11:16:10 arm u16a
+u16a server pid=95226 args: --ctx 65536 --kv-disk-space-mb 16384 
+ready after ~10s
+stopping at step 440: --max-minutes reached
+generator exit=0
+ 16G	/Volumes/FireCuda520/ds4-ab-u16a
+kv files left: 34
+common prefix = first 440 requests of each arm (log lines attributed by finish-line segmentation)
+
+arm        ret  mean_s  med_s  p90_s  cold% rebuilt_tok  rebuilt% prefill_t/s*  evict wall_min
+u16a       360    6.53   6.60  13.95   63.6     2516386      65.6        1195    653     50.3
+
+u16a: returning classes {'disk': 70, 'live': 61, 'cold': 229}  evictions {'disk-cache-full': 653}  first-turn disk hits 0  returning prompt tokens 3837270
+
+
+* prefill_t/s = rebuilt tokens / log 'prompt done' seconds over cold requests; includes cache-save stalls (the fork saves more often), so it slightly UNDERSTATES fork speed.
+attribution warnings: 0
+11-18 12:06:32 u16a exit=0
+11-18 12:06:32 arm u16b
+u16b server pid=96706 args: --ctx 65536 --kv-disk-space-mb 16384 
+ready after ~10s
+stopping at step 430: --max-minutes reached
+generator exit=0
+ 16G	/Volumes/FireCuda520/ds4-ab-u16b
+kv files left: 34
+common prefix = first 430 requests of each arm (log lines attributed by finish-line segmentation)
+
+arm        ret  mean_s  med_s  p90_s  cold% rebuilt_tok  rebuilt% prefill_t/s*  evict wall_min
+u16b       352    6.67   6.83  14.33   63.4     2459409      65.4        1170    635     50.2
+
+u16b: returning classes {'disk': 68, 'live': 61, 'cold': 223}  evictions {'disk-cache-full': 635}  first-turn disk hits 0  returning prompt tokens 3760396
+
+
+* prefill_t/s = rebuilt tokens / log 'prompt done' seconds over cold requests; includes cache-save stalls (the fork saves more often), so it slightly UNDERSTATES fork speed.
+attribution warnings: 0
+11-18 12:56:51 u16b exit=0
+11-18 12:56:51 arm f16b
+f16b server pid=97605 args: --ctx 65536 --kv-disk-space-mb 16384 --kv-cache-small-dense 49152 --kv-cache-retire-grace-seconds 0 --kv-cache-max-divergence-anchors 8
+ready after ~10s
+generator exit=0
+ 15G	/Volumes/FireCuda520/ds4-ab-f16b
+kv files left: 76
+common prefix = first 700 requests of each arm (log lines attributed by finish-line segmentation)
+
+arm        ret  mean_s  med_s  p90_s  cold% rebuilt_tok  rebuilt% prefill_t/s*  evict wall_min
+f16b       576    1.64   1.13   1.32    6.6      617160      10.1        1186    778     33.0
+
+f16b: returning classes {'disk': 448, 'live': 90, 'cold': 38}  evictions {'frontier-superseded': 211, 'conversation-retired': 567}  first-turn disk hits 0  returning prompt tokens 6112658
+
+
+* prefill_t/s = rebuilt tokens / log 'prompt done' seconds over cold requests; includes cache-save stalls (the fork saves more often), so it slightly UNDERSTATES fork speed.
+attribution warnings: 0
+11-18 13:29:59 f16b exit=0
+11-18 13:29:59 arm g16
+g16 server pid=98280 args: --ctx 65536 --kv-disk-space-mb 16384 --kv-cache-small-dense 49152 --kv-cache-retire-grace-seconds 3600 --kv-cache-max-divergence-anchors 8
+ready after ~10s
+generator exit=0
+ 23G	/Volumes/FireCuda520/ds4-ab-g16
+kv files left: 119
+common prefix = first 130 requests of each arm (log lines attributed by finish-line segmentation)
+
+arm        ret  mean_s  med_s  p90_s  cold% rebuilt_tok  rebuilt% prefill_t/s*  evict wall_min
+g16        101    1.11   1.13   1.29    0.0       41729       3.9         nan     34      5.9
+
+g16: returning classes {'disk': 82, 'live': 19}  evictions {'frontier-superseded': 34}  first-turn disk hits 0  returning prompt tokens 1075828
+
+
+* prefill_t/s = rebuilt tokens / log 'prompt done' seconds over cold requests; includes cache-save stalls (the fork saves more often), so it slightly UNDERSTATES fork speed.
+attribution warnings: 0
+11-18 13:35:57 g16 exit=0
+11-18 13:35:57 chain3 done
+11-18 13:36:02 restoring production via ./ds4-server.sh start-qwen
+Rotated previous log to ./log/ds4-qwen.log.20261118-133602
+Starting ds4-server on port 8002 with model gguf/Qwen3.8-Flash-Next-Q4.gguf (ctx: 524288)...
+Logging to ./log/ds4-qwen.log
+Qwen3.8: vision encoder gguf/mmproj-Qwen3.8-Flash-Next-Q8_0.gguf, batched-session 2, mtp 1, mixed-prefill-quantum 512
+ds4-server started (PID: 98669)
+11-18 13:36:08 prod answering on :8002

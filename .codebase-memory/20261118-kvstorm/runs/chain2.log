@@ -1,0 +1,20 @@
+11-18 10:36:39 chain2 start (budget 16384 MiB)
+11-18 10:36:39 arm f16a
+f16a server pid=94557 args: --ctx 65536 --kv-disk-space-mb 16384 --kv-cache-small-dense 49152 --kv-cache-retire-grace-seconds 0 --kv-cache-max-divergence-anchors 8
+ready after ~10s
+generator exit=0
+ 15G	/Volumes/FireCuda520/ds4-ab-f16a
+kv files left: 76
+common prefix = first 700 requests of each arm (log lines attributed by finish-line segmentation)
+
+arm        ret  mean_s  med_s  p90_s  cold% rebuilt_tok  rebuilt% prefill_t/s  evict wall_min
+f16a       576    1.51   1.03   1.23    6.6      578824       9.5        1300    778     30.1
+
+f16a: returning classes {'disk': 448, 'live': 90, 'cold': 38}  evictions {'frontier-superseded': 211, 'conversation-retired': 567}  first-turn disk hits 0  returning prompt tokens 6112658
+
+
+attribution warnings: 0
+11-18 11:06:50 f16a exit=0
+11-18 11:06:50 arm u16a
+u16a server pid=95038 args: --ctx 65536 --kv-disk-space-mb 16384 
+ready after ~10s

@@ -1,0 +1,43 @@
+11-18 13:38:34 chain4 start
+11-18 13:38:34 arm u400
+u400 server pid=99081 args: --ctx 65536 --kv-disk-space-mb 409600 
+ready after ~10s
+generator exit=0
+183G	/Volumes/FireCuda520/ds4-ab-u400
+kv files left: 447
+common prefix = first 430 requests of each arm (log lines attributed by finish-line segmentation)
+
+arm        ret  mean_s  med_s  p90_s  cold% rebuilt_tok  rebuilt% prefill_t/s*  evict wall_min
+u400       352    1.22   1.19   1.54    0.0      145836       3.9         nan      0     17.6
+
+u400: returning classes {'disk': 291, 'live': 61}  evictions {}  first-turn disk hits 0  returning prompt tokens 3760362
+
+
+* prefill_t/s = rebuilt tokens / log 'prompt done' seconds over cold requests; includes cache-save stalls (the fork saves more often), so it slightly UNDERSTATES fork speed.
+attribution warnings: 0
+11-18 13:56:17 u400 exit=0
+11-18 13:56:17 arm u16fix
+u16fix server pid=441 args: --ctx 65536 --kv-disk-space-mb 16384 
+ready after ~10s
+generator exit=0
+ 15G	/Volumes/FireCuda520/ds4-ab-u16fix
+kv files left: 34
+common prefix = first 430 requests of each arm (log lines attributed by finish-line segmentation)
+
+arm        ret  mean_s  med_s  p90_s  cold% rebuilt_tok  rebuilt% prefill_t/s*  evict wall_min
+u16fix     352    1.62   1.21   1.63    5.1      313784       8.3        1154    430     20.7
+
+u16fix: returning classes {'disk': 273, 'live': 61, 'cold': 18}  evictions {'disk-cache-full': 430}  first-turn disk hits 0  returning prompt tokens 3760380
+
+
+* prefill_t/s = rebuilt tokens / log 'prompt done' seconds over cold requests; includes cache-save stalls (the fork saves more often), so it slightly UNDERSTATES fork speed.
+attribution warnings: 0
+11-18 14:17:05 u16fix exit=0
+11-18 14:17:05 chain4 done
+11-18 14:17:10 restoring production via ./ds4-server.sh start-qwen
+Rotated previous log to ./log/ds4-qwen.log.20261118-141710
+Starting ds4-server on port 8002 with model gguf/Qwen3.8-Flash-Next-Q4.gguf (ctx: 524288)...
+Logging to ./log/ds4-qwen.log
+Qwen3.8: vision encoder gguf/mmproj-Qwen3.8-Flash-Next-Q8_0.gguf, batched-session 2, mtp 1, mixed-prefill-quantum 512
+ds4-server started (PID: 849)
+11-18 14:17:16 prod answering on :8002
