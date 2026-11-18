@@ -27,25 +27,76 @@ The same mechanism makes completions depend on **which checkpoint survived evict
 checkpoint that sits on the cold schedule's own boundary reproduces the cold answer exactly, while resuming
 from a shallower mid-prefill (`reason=continued`) checkpoint merges the last two chunks and changes the answer.
 
-## Reproduction (no harness needed beyond an HTTP client)
+## Reproduction
 
-Model: Qwen3.8 Flash Next Q4, Metal, macOS, `--ctx 65536`.
+Verified on a clean `b3f5018` checkout built with `make`, `Qwen3.8-Flash-Next-Q4.gguf`, macOS/Metal, shell with
+`DS4_API_KEY` unset. Two servers, **one flag apart**, driven by `curl`. Nothing is read from disk on the second
+server: its log contains zero `kv cache hit` and zero `kv cache stored` lines, while the first logs 2 hits and 4
+stores.
 
-1. Start the server **without** `--kv-disk-dir`. POST an ~11.7k-token prompt at `temperature 0`,
-   `max_tokens 256`, thinking disabled. Note the completion. Log shows prefill chunks `8192 + 3505`.
-2. Restart the same binary **with** `--kv-disk-dir <fresh dir> --kv-cache-continued-interval-tokens 8192`.
-   POST the identical prompt. Log now shows prefill chunks `8192 + 2048 + 1457`. **Completion differs.**
+Prompt, deterministic and corpus-free (76,011 chars, sha256 prefix `9dc9f22c81921e73`, `prompt_tokens = 13858`):
 
-Then the cache-history half:
+```sh
+python3 - <<'PY'
+import json
+SENT = ("The catchment's baseflow is sustained by fractured bedrock rather than soil moisture, "
+        "which decouples stream response from rainfall intensity. ")
+doc = "Archive 0. " + (SENT * (76000 // len(SENT) + 1))[:76000]
+open("prompt.json", "w").write(json.dumps({
+    "model": "default",
+    "messages": [
+        {"role": "system", "content": doc},
+        {"role": "user", "content": "In one paragraph, what single factor governs the effect described above, and why?"}],
+    "temperature": 0, "max_tokens": 256, "stream": False,
+    "chat_template_kwargs": {"enable_thinking": False}}))
+PY
 
-3. With the cache enabled, let the prompt be served again after the live slot is released: it resumes
-   `ctx=10240..11697` (chunk `1457`) → **byte-identical** to step 2.
-4. Delete only the `.kv` file step 3 loaded (the log names it), release the live slot, resend: it falls back to
-   the mid-prefill checkpoint, `ctx=8192..11697` (chunk `3505`) → **differs**, and matches step 1's output.
+# A: disk KV on
+mkdir -p /tmp/kva
+./ds4-server --model MODEL.gguf --ctx 65536 --port 8079 --kv-disk-dir /tmp/kva &
 
-Step 4 matching step 1 is the point: two routes with no shared state, one via disk and one with the cache
-switched off, agree with each other and disagree with step 2 whenever the chunk schedule agrees. Output
-follows the schedule, not the route.
+# B: identical, minus --kv-disk-dir
+./ds4-server --model MODEL.gguf --ctx 65536 --port 8079 &
+```
+
+Then POST `prompt.json` to each. The difference is visible in the logs without comparing any prose:
+
+```
+A:  chat ctx=0..13858:13858 prompt start
+    prefill chunk 8192/13858 (59.1%)
+    prefill chunk 12288/13858 (88.7%)        <-- cold-checkpoint sync; exists only with the cache
+    prefill chunk 13858/13858 (100.0%)
+    kv cache stored tokens=12288 trimmed=1570 reason=cold key=token-text size=482.82 MiB
+
+B:  chat ctx=0..13858:13858 prompt start
+    prefill chunk 8192/13858 (59.1%)
+    prefill chunk 13858/13858 (100.0%)
+```
+
+The completions:
+
+```
+A  609 chars  sha256 9ecec8d5303ae277d66e1707231ae51e813748c8bfba3d3b70fac3bf9c8397a4
+   "The single governing factor is the **geological structure of the bedrock**, specifically its fractured
+    nature. This is because the fractured bedrock acts as the primary reservoir and conduit ..."
+
+B  754 chars  sha256 417a4130d5e43f1536abcc9a1201e4452ae637c7e4881450f4986b7d430e8faa
+   "The single governing factor is the **geological structure of the catchment**, specifically the presence
+    of **fractured bedrock**. This factor dictates the hydrological pathway because it shifts ..."
+```
+
+A second prompt (`"Archive 1. "`) behaves the same way: **A** 707 chars `1be64c1daffd...`, **B** 615 chars `225c29c7f71b...`.
+
+**Determinism is asserted, not assumed.** Each config was requested twice and the two replies within a config
+were byte-identical. That is what rules out run order and noise, so it is worth repeating if you try this.
+
+One extra observation from those repeats: in server A the second request did not re-run the prefill - it logged
+`kv cache hit text tokens=12288` then `chat ctx=12288..13858:1570 prompt start`, a real disk resume - and produced
+a completion **identical to the cold one**. The checkpoint is therefore fine; resuming at the cold boundary is
+faithful. What changes the answer is the chunk schedule, however you arrive at it.
+
+Any prompt where the cold boundary lands strictly inside the prompt reproduces this; the defaults
+(`cold_max_tokens` 30000, `min_tokens` 512) already bracket 13,858 tokens, so no cache tuning is involved.
 
 ## Measured
 
@@ -57,8 +108,8 @@ follows the schedule, not the route.
 | resume@8192 vs cold disk OFF (same merged tail chunk) | 6 / 6 **identical** | not run |
 
 The top row is the headline and needs no checkpoint read at all: same prompt, same binary, one flag different.
-Median character-level similarity where they differ is ~0.2-0.4 (range 0.059-0.757), and the first difference
-is typically ~100-230 characters in: substantively different answers, not different wording.
+Across the ten divergent pairs, median character-level similarity is **0.30** (range 0.059-0.757) and the
+first difference appears ~100-230 characters in: substantively different answers, not different wording.
 
 The fork/upstream 6-vs-4 difference on the top row is **not** a claim that the fork is worse. At n=6 the
 Fisher exact two-sided p is 0.455; what is claimed is only that both builds change answers when the boundary
@@ -75,6 +126,8 @@ why the `resume@8192 == cold-disk-off` cell is the load-bearing one for "the che
   the `resume@8192 == cold-disk-off` result is what establishes that, and I checked the checkpoint inventory
   (per-layer GDN recurrent and conv state, attention K/V and index keys, PLE history, mRoPE delta, position
   rows) before concluding it.
+* **macOS/Metal only.** Every number here was measured on that backend; no claim is made about CUDA, ROCm
+  or Linux, and no measurement was attempted there.
 * **No claim that either completion is worse.** Both are fluent; the complaint is that output is a function of
   cache configuration and cache history, not quality.
 * **Sample size is small and the prompt range narrow.** Twelve realistic prompts in total across both builds,
@@ -84,12 +137,15 @@ why the `resume@8192 == cold-disk-off` cell is the load-bearing one for "the che
 
 ## Why it matters
 
-`--kv-disk-dir` is meant to be a transparent latency optimisation. A/B measurements over the disk cache are
+`--kv-disk-dir` is meant to be a transparent latency optimisation, so any deployment that enables it is
+serving the split-schedule answers, for every prompt where the cold boundary lands inside the prompt
+(with the defaults, 512-30000 tokens). A/B measurements over the disk cache are
 also not comparable across cache states, which is how I found this: two runs with identical binaries and
 identical schedules agreed on only 247 of 440 replies, because eviction left them different checkpoints and
 therefore different resume depths. The eviction score is dominated by a per-checkpoint fixed payload cost
-rather than by usefulness, so the surviving set — and hence the chunk schedule, and hence the answer — is
-close to arbitrary under pressure.
+rather than by usefulness (for zero-hit entries it reduces to "evict the fewest-token file"), so which
+checkpoints survive, and therefore which chunk schedule a later request runs, is decided by size rather
+than by reuse value.
 
 ## Possible directions to discuss
 
@@ -104,7 +160,4 @@ I would not attempt (2) without your view on the cost.
 
 ---
 
-*Pre-post checklist: (1) realistic prose - **done**, the effect holds (6/6 fork, 4/6 upstream).
-Still open: (2) confirm the repro works from a plain `git clone` + `make` without the scripts in this repo,
-and add one concrete prompt+completion pair to the repro so a maintainer can copy-paste it; (3) the owner's
-decision to post.*
+*Pre-post checklist: (1) realistic prose - done, the effect holds (6/6 fork, 4/6 upstream, plus the curl-only pair above). (2) repro verified from a pristine `b3f5018` `make` build using only curl plus an inline python generator, with concrete prompt/completion sha256s - done. (3) the owner's decision to post - **open**.*

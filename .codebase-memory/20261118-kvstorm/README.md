@@ -21,6 +21,7 @@ the trail, quote nothing from below the rule.
 | **`PR-RANKING.md`** | **The deliverable: ranks the four open upstream evictor PRs in ~1 s each, and shows the pathology is timescale-dependent. Read its limits section first -- the dwell numbers are unvalidated** |
 | `cachediver_probe.py` + `run-cachediver.sh` | Cold-vs-disk-hit answer comparison on a live engine (needs a window; runner preflights that a disk hit really happened, then restores prod) |
 | `evict_prs.py` | The four PRs as selectable policies (+ combinations), with per-model size refit and a dwell-time knob |
+| **`REPRO.md` / `ISSUE-POST-BODY.md` / `repro_curl_only.sh`** | **The publishable repro: two servers one flag apart, curl only, with the exact chunk-schedule log lines and a completion pair pinned by sha256. ISSUE-POST-BODY.md is what would go public (8.4 KB); the draft file keeps the drafting notes** |
 | **`chunkshape_probe.py` + `run-chunkshape.sh` / `run-shapereal.sh`** | **The decisive harness: same binary, same prompts, engine started with vs without `--kv-disk-dir` (real prose optional via `--corpus-file`, `MODE=upstream` for the b3f5018 build). No checkpoint read on one side, so it isolates chunk schedule from cache state** |
 | **`resume_depth_probe.py` + `run-resumedepth.sh`** | Forces deep vs shallow resume by deleting the checkpoint the last load named; classifies every request from the log |
 | **`ISSUE-DRAFT-resume-depth.md`** | **DRAFT, NOT POSTED** -- the `continued`-checkpoint correctness finding, with repro steps and explicit non-claims. Owner's go required |
