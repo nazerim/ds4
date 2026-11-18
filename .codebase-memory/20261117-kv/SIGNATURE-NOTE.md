@@ -22,9 +22,13 @@
 >   --jq '.[] | "\(.sha[0:8]) verified=\(.commit.verification.verified) \(.commit.verification.reason // "-")"'
 > # control: same call against repos/antirez/ds4/commits returns verified=false
 > ```
+>
 > The note's other claim is false too: the head commits of #1020 (9cbf7e59), #1331 (f1a1aa68),
 > #1022 (8da90edc) and #1358 (dcf77c4c) all return `verified=true reason=valid` -- so it was never
 > "every open PR from this account" either.
+>
+> Host inventory, the working config, and add-a-host steps: `../SIGNING-HOSTS.md` (the second
+> host was configured and cross-verified the same night).
 > Nothing was ever wrong with the key, the config, or `allowed_signers`. No operator action is
 > required. Original text retained below as the trail.
 

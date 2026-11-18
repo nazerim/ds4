@@ -90,6 +90,7 @@ it was over-claimed in an earlier draft.
 | Cache-off throughput cost of parity | one window, trivial to add if anyone cares |
 | `ds4-ab-upstream` worktree (b3f5018, built) | drop whenever; findings already reproduced |
 | ~~Commit signing badge~~ | **NOT an open item** -- measured `verified=true reason=valid` on 11 commits (2026-08-31..HEAD) incl. `dcf77c4`; the earlier "unregistered" claim came from reading `commits[].status` (CI contexts) and from a scope-gated 404. See `20261117-kv/SIGNATURE-NOTE.md` |
+| Signing on a second host (`naz@nazryzen.lan`) | **DONE 2026-11-19**, both directions proven. Keys, config, correct probe, add-a-host steps and the gotchas are in `SIGNING-HOSTS.md` -- do not re-derive them |
 
 ## 7. Method debt — read before building any probe here
 
@@ -123,6 +124,7 @@ date in its name (`doc-rot-scan.py`). Three entries are benign and share one cau
 writes `prompt.json` in its own working directory two lines above citing it, so it is a
 generated artefact, not a dead reference.
 
-State at hand-off: `dirty=0`, `unpushed=0`, remote `nazerim` only; written at `4a6b202`, so the commit that adds this file is `HEAD` from a clean `main`. Prod PID 65953
+State at hand-off: `dirty=0`, `unpushed=0`, remote `nazerim` only; this file landed at `38bae71` and
+`SIGNING-HOSTS.md` right after it, so any clean-`main` HEAD from here on contains both. Prod PID 65953
 on the patched binary, port 8002, KV cache untouched at **753 files**. Two worktrees: main +
 `ds4-ab-upstream`. Scratch KV dirs deleted; cache volume 806 GiB free.
