@@ -60,6 +60,22 @@ def schedule(text):
     return int(last.group(1)), int(last.group(2)), sizes
 
 
+def build_real_prompt(i, uniq, target_tokens, cpt, corpus):
+    """A slice of REAL prose, not repeated synthetic sentences.
+
+    The synthetic corpus is heavily repetitive, which is the most favourable case for amplifying a
+    near-tie, so every divergence measured with it overstates real-world sensitivity. Non-overlapping
+    slices per rep keep the samples independent.
+    """
+    n = int(target_tokens * cpt)
+    start = i * n
+    if start + n > len(corpus):
+        start = (start % max(1, len(corpus) - n)) if len(corpus) > n else 0
+    doc = "[%s case %d] " % (uniq, i) + corpus[start:start + n]
+    return [{"role": "system", "content": doc},
+            {"role": "user", "content": rdp.QUESTION}]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8003)
@@ -74,15 +90,39 @@ def main():
                     help="asserts the expected cold chunk shape, so a misconfigured engine "
                          "is reported instead of silently producing a comparison of nothing")
     ap.add_argument("--out", default="/tmp/chunkshape.jsonl")
+    ap.add_argument("--corpus-file", default=None,
+                    help="real prose to build prompts from; omit to use the repetitive synthetic corpus")
     a = ap.parse_args()
 
-    cpt = float(open(a.cpt_file).read().strip())
+    corpus = None
+    if a.corpus_file:
+        corpus = open(a.corpus_file, encoding="utf-8", errors="replace").read()
+        if len(corpus) < a.reps * int(a.target_tokens * 3.0):
+            print("CONFIG ERROR: corpus file too short for %d independent slices" % a.reps,
+                  file=sys.stderr)
+            return 4
+    if os.path.exists(a.cpt_file) and open(a.cpt_file).read().strip():
+        cpt = float(open(a.cpt_file).read().strip())
+    else:
+        # First phase measures chars/token against the corpus it is about to use. Real prose
+        # sits near 4.0 chars/token; the synthetic corpus measured 6.37. Reusing one file's
+        # value for the other would silently resize every prompt.
+        probe_src = (corpus[:16000] if corpus else rdp.PARA * 40)
+        cpt = rdp.calibrate_chat(a.port, probe_src)
+        if not cpt:
+            print("calibration failed", file=sys.stderr)
+            return 5
+        with open(a.cpt_file, "w") as fh:
+            fh.write("%.6f\n" % cpt)
+        print("measured %.2f chars/token from %s" % (cpt, "real corpus" if corpus else "synthetic"),
+              file=sys.stderr)
     pos = os.path.getsize(a.log)
     out = open(a.out, "w", encoding="utf-8")
 
     rows = []
     for i in range(a.reps):
-        msgs = rdp.build_prompt(i, a.uniq, a.target_tokens, cpt)
+        msgs = (build_real_prompt(i, a.uniq, a.target_tokens, cpt, corpus) if corpus
+                else rdp.build_prompt(i, a.uniq, a.target_tokens, cpt))
         text, usage = rdp.chat(a.port, msgs, a.max_tokens)
         slice_, pos = rdp.tail_from(a.log, pos)
         x_from, P, sizes = schedule(slice_)

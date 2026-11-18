@@ -3,3 +3,36 @@ Stopping ds4-server (PID: 30451)...
 ds4-server stopped
 11-18 23:18:33 phase 1: disk ON (cold store splits the prefill)
 measured 6.42 chars/token
+  i=0  P=11697  A(ctx0=True) B@10240 C@8192  A==B:True  B==C:False
+  i=1  P=11697  A(ctx0=True) B@10240 C@8192  A==B:True  B==C:False
+  i=2  P=11697  A(ctx0=True) B@10240 C@8192  A==B:True  B==C:False
+  i=3  P=11697  A(ctx0=True) B@10240 C@8192  A==B:True  B==C:False
+  i=4  P=11697  A(ctx0=True) B@10240 C@8192  A==B:True  B==C:False
+  i=5  P=11697  A(ctx0=True) B@10240 C@8192  A==B:True  B==C:False
+
+RESULT
+  A vs B (cold vs deep resume):   same=6 differ=0
+  B vs C (deep vs shallow resume): same=0 differ=6  -> divergence rate 100%
+  uninformative (no shallower resume achieved): 0
+  A vs C (cold vs shallow resume):  same=0 differ=6   <- the case that matters for production
+  where deep vs shallow first part (chars): median=100 min=44 max=711
+  similarity of deep vs shallow replies: median=0.156 min=0.055
+  detail: /Users/naz/Projects/ds4/.codebase-memory/20261118-kvstorm/runs/shape-on-depth.jsonl
+11-18 23:21:12 phase 1 probe exit=0 cpt=6.415094
+11-18 23:21:15 phase 2: disk OFF (no cold store, so no split)
+  i=0  P=11697  ctx=0      chunks=8192+3505              chars=1380
+  i=1  P=11697  ctx=0      chunks=8192+3505              chars=1335
+  i=2  P=11697  ctx=0      chunks=8192+3505              chars=1390
+  i=3  P=11697  ctx=0      chunks=8192+3505              chars=1332
+  i=4  P=11697  ctx=0      chunks=8192+3505              chars=1273
+  i=5  P=11697  ctx=0      chunks=8192+3505              chars=1349
+  schedules confirmed for expect_disk=off: [(8192, 3505)]
+11-18 23:22:34 phase 2 probe exit=0
+11-18 23:22:37 done
+11-18 23:22:42 restoring production
+Rotated previous log to ./log/ds4-qwen.log.20261118-232242
+Starting ds4-server on port 8002 with model gguf/Qwen3.8-Flash-Next-Q4.gguf (ctx: 524288)...
+Logging to ./log/ds4-qwen.log
+Qwen3.8: vision encoder gguf/mmproj-Qwen3.8-Flash-Next-Q8_0.gguf, batched-session 2, mtp 1, mixed-prefill-quantum 512
+ds4-server started (PID: 42350)
+11-18 23:22:48 prod answering on :8002

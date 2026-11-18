@@ -1,17 +1,15 @@
 # Does the disk-KV path change the model's answer?
 
-> **Short answer: the engine's own choice of checkpoint is bit-faithful, but a mid-prefill `continued`
-> checkpoint is NOT — resuming from it changes the answer ~90 % of the time, on both the fork and
-> upstream `b3f5018`.** See "REPRODUCED DELIBERATELY" below. That is the finding; the earlier
-> "0 divergences" results are real but narrower than they look, because they only ever tested the
-> checkpoint the engine picks when nothing has been evicted.
+> **Short answer: nothing is corrupting your checkpoints. But greedy completions are NOT invariant to prefill
+> chunk schedule, and the KV cache's own bookkeeping decides that schedule — so the same prompt can return
+> different answers depending on server config and on which checkpoints survived.** Established by the
+> `disk ON` vs `disk OFF` test below: identical prompts, same binary, 6/6 differ, with no checkpoint involved
+> on one side.
 >
-> **Mechanism, now verified from the engine's own logs and a static read:** the divergence tracks the
-> **prefill chunk schedule**, not checkpoint corruption. Cold prefill with the disk cache enabled stops at
-> `cold_store_len` so it can write the checkpoint, so an 11,699-token prompt runs `8192 + 2048 + 1459`.
-> A resume at `10240` then runs `1459` — the same final chunk, hence byte-identical. A resume at `8192` runs
-> `3507` as one chunk — a different reduction order, hence a different answer. See
-> "WHY 10240 MATCHES AND 8192 DOES NOT" below.
+> The earlier framing of this finding ("a `continued` checkpoint restores bad state") is **refuted** by the
+> `C == D` cell below — the checkpoint is faithful; it just sits on a different chunk boundary. See
+> "MECHANISM ESTABLISHED". The "0 divergences" results further up are real but narrow: every resume in them
+> landed on a cold chunk boundary, where the final chunk is unchanged by construction.
 
 Controlled measurements, 2026-11-18 afternoon. Question raised by the eviction A/B: arms `u16a` and
 `u400` ran the **same binary and same schedule** yet agreed on only 247 of 440 replies, so cache state
@@ -143,6 +141,44 @@ chunk boundary, while the `cold` store is written at the trimmed boundary. A can
 complete once the prefill finishes, or per-layer compression ratios (`compress_ratios` has 0-ratio layers
 and 4:1 layers) that do not agree on an 8192 boundary. Both builds show it, so it is not fork-specific.
 Naming the cause needs a code-level read of what the continued payload captures versus the cold payload.
+
+### MECHANISM ESTABLISHED: completions are not invariant to prefill chunk schedule
+
+`chunkshape_probe.py` + `run-chunkshape.sh` settled H1 vs H2 without touching the engine's source. The lever:
+the mid-prefill cold-store sync is gated on `s->kv.enabled` (`ds4_server.c:16207-16274`), which is set only when
+`--kv-disk-dir` is passed (`ds4_server.c:18931`, `ds4_kvstore.c:2419`). So **removing that one flag removes the
+chunk split and nothing else** — cold prefill then runs the shallow resume's shape with no checkpoint involved
+at all. Byte-identical prompts across the two phases come from a shared `build_prompt()` and a pinned
+`--cpt-file`, and the runner refuses any prompt whose token count differs between phases.
+
+Same 11,697-token prompt, same fork binary, temperature 0, 6 prompts:
+
+| schedule | route | result |
+|---|---|---|
+| `8192 + 2048 + 1457` | **A** cold, disk ON | baseline |
+| `1457` | **B** resume@10240 | == A (matches cold exactly) |
+| `3505` | **C** resume@8192 (`continued` checkpoint) | **A vs C: 6 / 6 differ** (median similarity 0.156, first difference ~100 chars) |
+| `8192 + 3505` | **D** cold, **disk OFF** — no checkpoint anywhere | **A vs D: 6 / 6 differ**, **C vs D: 6 / 6 identical** |
+
+`C == D` is the decisive cell. Two completely different routes — restoring a mid-prefill checkpoint versus a
+plain cold prefill on a server with no disk cache — reach the same chunk schedule and produce the **same
+completion every time**. Therefore:
+
+- **H1 is refuted for this repro.** The `continued` checkpoint is a faithful snapshot of engine state at 8192;
+  it is not losing recurrent/conv/position state. The static audit agreed (it found every buffer present).
+- **H2 is confirmed.** The output depends on the **prefill chunk schedule**, exactly as upstream's own comment
+  says it does (`ds4.c:1059`: *"changing chunk boundaries also changes floating-point reduction order"*).
+- **The disk cache changes cold answers.** A vs D is not about resume at all: the same request to the same
+  binary differs 6/6 depending on whether `--kv-disk-dir` was passed, because storing the checkpoint forces an
+  extra sync boundary at `cold_store_len`.
+
+So the honest title for the finding is not "a checkpoint is corrupt" but **"greedy completions are not
+invariant to prefill chunking, and the KV cache's own bookkeeping picks the chunking"** — for a client that
+means the answer depends on server config and on which checkpoints survived.
+
+**Scope limit that matters:** every comparison here uses a deliberately repetitive synthetic corpus, which is
+where near-ties are most likely to be amplified. The rate on realistic prose is **unmeasured**, so the correct
+claim is "reproducibly sensitive", not "unreliable in production".
 
 ### Status versus upstream
 
