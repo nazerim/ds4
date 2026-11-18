@@ -210,3 +210,129 @@ Stopping ds4-server (PID: 19924)...
 ds4-server stopped
 11-18 17:16:17 starting isolated engine on :8003
 11-18 17:16:22 preflight: one prompt, expecting a store and a disk hit
+  WARNING: replies stopped early, so long-generation divergence is NOT tested. Make the prompt demand more output or raise the ceiling.
+  0   P=10460  target=16384  SAME
+
+prompts compared: 1   identical: 1 (100.0%)   divergent: 0 (0.0%)
+median completion_tokens=32 (max_tokens=32)
+results: /Users/naz/Projects/ds4/.codebase-memory/20261118-kvstorm/runs/cdiv-preflight.jsonl  -- cross-check the server log for 'kv cache hit' on each pass-2 request
+11-18 17:16:30 preflight ok (disk-hit lines 0 -> 1): mode=9 single-turn, max_tokens=512
+  0   P=10460  target=16384  SAME
+  1   P=11851  target=20480  SAME
+  2   P=14264  target=24576  SAME
+  3   P=8681   target=16384  SAME
+  4   P=11207  target=20480  SAME
+  5   P=13642  target=24576  SAME
+  6   P=8833   target=16384  SAME
+  7   P=11179  target=20480  SAME
+  8   P=14272  target=24576  SAME
+
+prompts compared: 9   identical: 9 (100.0%)   divergent: 0 (0.0%)
+median completion_tokens=362 (max_tokens=512)
+results: /Users/naz/Projects/ds4/.codebase-memory/20261118-kvstorm/runs/cachediver-single.jsonl  -- cross-check the server log for 'kv cache hit' on each pass-2 request
+11-18 17:19:31 single-turn probe exit=0
+11-18 17:19:31 server-side: disk-hit lines=12  live-miss lines=29 (hits should be >= 9)
+11-18 17:19:31 done
+11-18 17:19:36 restoring production
+Rotated previous log to ./log/ds4-qwen.log.20261118-171936
+Starting ds4-server on port 8002 with model gguf/Qwen3.8-Flash-Next-Q4.gguf (ctx: 524288)...
+Logging to ./log/ds4-qwen.log
+Qwen3.8: vision encoder gguf/mmproj-Qwen3.8-Flash-Next-Q8_0.gguf, batched-session 2, mtp 1, mixed-prefill-quantum 512
+ds4-server started (PID: 20229)
+11-18 17:19:42 prod answering on :8002
+11-18 17:21:09 stopping production (idle-verified first) MODE=fork wt=/Users/naz/Projects/ds4
+Stopping ds4-server (PID: 20229)...
+ds4-server stopped
+11-18 17:21:14 starting isolated engine on :8003
+11-18 17:21:19 preflight: one prompt, expecting a store and a disk hit
+      SIZING WARNING: targeted 12000 tokens, got 4542 (chars/token assumption is off)
+  WARNING: replies stopped early, so long-generation divergence is NOT tested. Make the prompt demand more output or raise the ceiling.
+  0   P=4542   target=12000  SAME
+
+prompts compared: 1   identical: 1 (100.0%)   divergent: 0 (0.0%)
+median completion_tokens=32 (max_tokens=32)
+results: /Users/naz/Projects/ds4/.codebase-memory/20261118-kvstorm/runs/cdiv-preflight.jsonl  -- cross-check the server log for 'kv cache hit' on each pass-2 request
+11-18 17:21:24 preflight ok (disk-hit lines 0 -> 1): mode=9 single-turn, max_tokens=512
+      SIZING WARNING: targeted 12000 tokens, got 4542 (chars/token assumption is off)
+      SIZING WARNING: targeted 18000 tokens, got 6159 (chars/token assumption is off)
+      SIZING WARNING: targeted 21000 tokens, got 7202 (chars/token assumption is off)
+      SIZING WARNING: targeted 12000 tokens, got 3778 (chars/token assumption is off)
+      SIZING WARNING: targeted 18000 tokens, got 5826 (chars/token assumption is off)
+      SIZING WARNING: targeted 21000 tokens, got 6890 (chars/token assumption is off)
+      SIZING WARNING: targeted 12000 tokens, got 3842 (chars/token assumption is off)
+      SIZING WARNING: targeted 18000 tokens, got 5811 (chars/token assumption is off)
+      SIZING WARNING: targeted 21000 tokens, got 7206 (chars/token assumption is off)
+  0   P=4542   target=12000  SAME
+  1   P=6159   target=18000  SAME
+  2   P=7202   target=21000  SAME
+  3   P=3778   target=12000  SAME
+  4   P=5826   target=18000  SAME
+  5   P=6890   target=21000  SAME
+  6   P=3842   target=12000  SAME
+  7   P=5811   target=18000  SAME
+  8   P=7206   target=21000  SAME
+
+prompts compared: 9   identical: 9 (100.0%)   divergent: 0 (0.0%)
+median completion_tokens=277 (max_tokens=512)
+results: /Users/naz/Projects/ds4/.codebase-memory/20261118-kvstorm/runs/cachediver-single.jsonl  -- cross-check the server log for 'kv cache hit' on each pass-2 request
+11-18 17:23:30 single-turn probe exit=0
+11-18 17:23:30 server-side: disk-hit lines=11  live-miss lines=29 (hits should be >= 9)
+11-18 17:23:30 done
+11-18 17:23:35 restoring production
+Rotated previous log to ./log/ds4-qwen.log.20261118-172335
+Starting ds4-server on port 8002 with model gguf/Qwen3.8-Flash-Next-Q4.gguf (ctx: 524288)...
+Logging to ./log/ds4-qwen.log
+Qwen3.8: vision encoder gguf/mmproj-Qwen3.8-Flash-Next-Q8_0.gguf, batched-session 2, mtp 1, mixed-prefill-quantum 512
+ds4-server started (PID: 20444)
+11-18 17:23:41 prod answering on :8002
+11-18 17:25:11 stopping production (idle-verified first) MODE=fork wt=/Users/naz/Projects/ds4
+Stopping ds4-server (PID: 20444)...
+ds4-server stopped
+11-18 17:25:16 starting isolated engine on :8003
+11-18 17:25:21 preflight: one prompt, expecting a store and a disk hit
+measured corpus ratio: 6.37 chars/token
+  WARNING: replies stopped early, so long-generation divergence is NOT tested. Make the prompt demand more output or raise the ceiling.
+  0   P=11650  target=12000  SAME
+
+prompts compared: 1   identical: 1 (100.0%)   divergent: 0 (0.0%)
+median completion_tokens=32 (max_tokens=32)
+results: /Users/naz/Projects/ds4/.codebase-memory/20261118-kvstorm/runs/cdiv-preflight.jsonl  -- cross-check the server log for 'kv cache hit' on each pass-2 request
+11-18 17:25:31 preflight ok (disk-hit lines 0 -> 1): mode=9 single-turn, max_tokens=512
+measured corpus ratio: 6.37 chars/token
+  0   P=11650  target=12000  DIFFERENT
+  1   P=17430  target=18000  SAME
+  2   P=20324  target=21000  SAME
+  3   P=11644  target=12000  SAME
+  4   P=17429  target=18000  SAME
+  5   P=20321  target=21000  SAME
+  6   P=11645  target=12000  SAME
+  7   P=17427  target=18000  SAME
+  8   P=20323  target=21000  SAME
+
+prompts compared: 9   identical: 8 (88.9%)   divergent: 1 (11.1%)
+median completion_tokens=172 (max_tokens=512)
+results: /Users/naz/Projects/ds4/.codebase-memory/20261118-kvstorm/runs/cachediver-single.jsonl  -- cross-check the server log for 'kv cache hit' on each pass-2 request
+11-18 17:28:16 single-turn probe exit=0
+11-18 17:28:16 server-side: disk-hit lines=13  live-miss lines=31 (hits should be >= 9)
+11-18 17:28:16 done
+11-18 17:28:21 restoring production
+Rotated previous log to ./log/ds4-qwen.log.20261118-172821
+Starting ds4-server on port 8002 with model gguf/Qwen3.8-Flash-Next-Q4.gguf (ctx: 524288)...
+Logging to ./log/ds4-qwen.log
+Qwen3.8: vision encoder gguf/mmproj-Qwen3.8-Flash-Next-Q8_0.gguf, batched-session 2, mtp 1, mixed-prefill-quantum 512
+ds4-server started (PID: 20769)
+11-18 17:28:27 prod answering on :8002
+11-18 17:31:58 stopping production (idle-verified first) MODE=fork wt=/Users/naz/Projects/ds4
+Stopping ds4-server (PID: 20769)...
+ds4-server stopped
+11-18 17:32:04 starting isolated engine on :8003
+11-18 17:32:09 preflight: one prompt, expecting a store and a disk hit
+measured corpus ratio: 6.37 chars/token
+  WARNING: replies stopped early, so long-generation divergence is NOT tested. Make the prompt demand more output or raise the ceiling.
+  0   P=11661  target=12000  SAME
+
+prompts compared: 1   identical: 1 (100.0%)   divergent: 0 (0.0%)
+median completion_tokens=32 (max_tokens=32)
+results: /Users/naz/Projects/ds4/.codebase-memory/20261118-kvstorm/runs/cdiv-preflight.jsonl  -- cross-check the server log for 'kv cache hit' on each pass-2 request
+11-18 17:32:19 preflight ok (disk-hit lines 0 -> 1): mode=16 single-turn, max_tokens=512
+measured corpus ratio: 6.37 chars/token

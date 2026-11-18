@@ -27,6 +27,9 @@ import sys
 import time
 import urllib.request
 
+PARA = ("recorded observations from the survey season, cross-checked against the neighbouring "
+        "stations and the earlier returns. ")
+
 DOCS = [
     ("Renzo and Lucia", "The two families had been sworn enemies since the market dispute of 1628, "),
     ("Semiconductor fab", "Yield loss in the back-end-of-line is dominated by via resistance variance, "),
@@ -47,9 +50,29 @@ DOCS = [
 import os as _os
 # Overridable so the same harness can be pushed to the prompt sizes where the eviction arms
 # actually diverged (they ran to 30k+ tokens; the default tops out at 16k).
+CPT = None   # chars per token; MEASURED at startup, never assumed (see calibrate)
+UNIQ = ["baseline"]
 TARGETS = [int(x) for x in _os.environ.get("CACHEDIVER_TARGETS", "4096,6144,8192,12288,16384").split(",")]
 
 FILLER = [{"role": "user", "content": "Name a random colour and one number, nothing else."}]
+
+
+
+def calibrate(port, max_tokens=8):
+    """Measure chars/token for THIS corpus instead of assuming a language-modeling average.
+
+    Two earlier versions of this harness hard-coded 3.4 and then 2.0 and silently tested
+    roughly half and a quarter of the intended prompt size; this corpus is heavily repeated
+    prose, which BPE compresses to ~6 chars/token, so no generic constant is safe.
+    """
+    probe_text = PARA * 40                      # ~16k chars
+    msgs = [{"role": "system", "content": "Calibration. " + probe_text},
+            {"role": "user", "content": "Reply with the single word: ok"}]
+    _, usage = chat(port, msgs, max_tokens)
+    pt = usage.get("prompt_tokens") or 0
+    if pt <= 0:
+        raise SystemExit("calibration failed: no prompt_tokens returned")
+    return len(probe_text) / float(pt)
 
 
 def chat(port, messages, max_tokens=32):
@@ -82,8 +105,11 @@ def run_multiturn(port, nturns, doc, max_tokens):
     almost nothing is re-read from disk). Pass 2, after fillers have evicted that session,
     must resume from an on-disk checkpoint. So this compares exactly the two paths whose
     outputs diverged between the eviction arms -- single-turn cold-vs-hit does not.
+
+    UNIQ[0] tags the system message so a preflight run sharing this engine cannot seed
+    checkpoints that the measured run would then load.
     """
-    hist = [{"role": "system", "content": "Archive MT. %s" % doc}]
+    hist = [{"role": "system", "content": "[%s] Archive MT. %s" % (UNIQ[0], doc)}]
     outs = []
     for k in range(nturns):
         hist.append({"role": "user", "content":
@@ -103,6 +129,12 @@ def main():
     ap.add_argument("--model", default="gguf/Qwen3.8-Flash-Next-Q4.gguf")
     ap.add_argument("--attach", action="store_true", help="server is already running")
     ap.add_argument("--out", default="/tmp/cachediver-results.jsonl")
+    ap.add_argument("--unique-prefix", default="baseline",
+                    help="tag embedded in every system message. A preflight run and the real "
+                         "run share one engine and one KV dir, so without distinct tags the "
+                         "preflight stores checkpoints the real run then loads -- which made an "
+                         "earlier version of this harness compare resume-at-depth-10240 against "
+                         "resume-at-depth-8192 while believing pass 1 was cold.")
     ap.add_argument("--turns", type=int, default=0,
                     help="if >0, run a multi-turn conversation twice (live-continue vs disk-resume)")
     ap.add_argument("--max-tokens", type=int, default=32,
@@ -113,12 +145,19 @@ def main():
         print("server not reachable on port %d" % a.port)
         return 1
 
+    global CPT, UNIQ
+    UNIQ[0] = a.unique_prefix
+    if CPT is None:
+        CPT = calibrate(a.port)
+        print("measured corpus ratio: %.2f chars/token" % CPT, file=sys.stderr)
+    else:
+        CPT = float(CPT)
+
     out = open(a.out, "w", encoding="utf-8")
     same = diff = unknown = 0
 
     if a.turns > 0:
-        para = ("The catchment's baseflow is sustained by fractured bedrock rather than soil "
-                "moisture, which decouples stream response from rainfall intensity. ")
+        para = PARA
         doc = (para * 900)[:16000]
         total = bad = 0
         for rep in range(3):                       # a few conversations is all this can afford
@@ -154,10 +193,12 @@ def main():
         # an earlier version of this file used 70-390 token prompts and silently compared
         # cold against cold. ~3.4 chars/token for this prose.
         target = TARGETS[i % len(TARGETS)]
-        para = stem + ("recorded observations from the survey season, cross-checked against "
-                       "the neighbouring stations and the earlier returns. ")
-        doc = (para * (1 + int(target * 3.4 // len(para)))).encode("utf-8")[:int(target * 3.4)].decode("utf-8", "ignore")
-        msgs = [{"role": "system", "content": "Archive %d. %s" % (i, doc)},
+        cpt = CPT            # measured, not assumed
+        # Repeat exactly the unit that calibrate() measured, so the chars/token ratio applies;
+        # the topic stem is prepended once rather than folded into the repeated block.
+        doc = stem + (PARA * (1 + int(target * cpt // len(PARA)))).encode("utf-8")[:int(target * cpt)].decode("utf-8", "ignore")
+        # ^ length derived from the measured ratio, so "target tokens" means what it says
+        msgs = [{"role": "system", "content": "[%s] Archive %d. %s" % (a.unique_prefix, i, doc)},
                 {"role": "user", "content":
                     "Enumerate every causal factor implied by this archive. Number them 1 to 40 "
                     "and give each a two-sentence explanation. Keep going until the list is "
@@ -183,6 +224,9 @@ def main():
         out.flush()
         print("  %-3d P=%-6s target=%-6d %s" % (i, u1.get("prompt_tokens"), target,
                                                  "SAME" if equal else "DIFFERENT"))
+        if target and abs((u1.get("prompt_tokens") or 0) - target) > 0.25 * target:
+            print("      SIZING WARNING: targeted %d tokens, got %s (chars/token assumption is off)"
+                  % (target, u1.get("prompt_tokens")), file=sys.stderr)
         if (u1.get("prompt_tokens") or 0) < 2048:
             print("      ^ below the 2048-token store step: this prompt cannot produce a "
                   "checkpoint, so the comparison is vacuous", file=sys.stderr)

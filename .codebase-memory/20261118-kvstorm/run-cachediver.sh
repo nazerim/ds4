@@ -65,7 +65,10 @@ done
 # fine because nobody checked the hit counter. Do not repeat that.
 h0=$(grep -ac 'kv cache hit' $HERE/runs/cdiv-server.log)
 say "preflight: one prompt, expecting a store and a disk hit"
-python3 -I $HERE/cachediver_probe.py --port $PORT --n 1 --attach --out $HERE/runs/cdiv-preflight.jsonl >> $LOG 2>&1
+# The preflight must NOT reuse a corpus prompt: it shares this engine and this KV dir with
+# the measured run, so a repeated prompt would already be cached and pass 1 would not be cold.
+python3 -I $HERE/cachediver_probe.py --port $PORT --n 1 --attach \
+  --unique-prefix PREFLIGHT-DO-NOT-REUSE --out $HERE/runs/cdiv-preflight.jsonl >> $LOG 2>&1
 h1=$(grep -ac 'kv cache hit' $HERE/runs/cdiv-server.log)
 if [ "$h1" -le "$h0" ]; then
   say "PREFLIGHT FAILED: no disk hit; nothing was storable or loadable. Aborting, prod restored by trap."
@@ -77,7 +80,7 @@ say "preflight ok (disk-hit lines $h0 -> $h1): mode=$([ $TURNS -gt 0 ] && echo "
 rc=0
 if [ "$NPROMPT" -gt 0 ]; then
   python3 -I $HERE/cachediver_probe.py --port $PORT --n $NPROMPT --max-tokens $MAXTOK --attach \
-    --out $HERE/runs/cachediver-single.jsonl >> $LOG 2>&1
+    --unique-prefix ${UNIQ_TAG:-main} --out $HERE/runs/cachediver-single.jsonl >> $LOG 2>&1
   say "single-turn probe exit=$?"; rc=$?
 fi
 if [ "$TURNS" -gt 0 ]; then
