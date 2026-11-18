@@ -1,5 +1,9 @@
 # 20261118-kvstorm -- KV eviction under storm density
 
+**Start with `../HANDOFF-20261119-KV-CHUNKSCHEDULE.md`** -- the compact handover for a
+new session (finding, what is live in prod, how to back it out, what is parked and why).
+This README is the file index; the files themselves are the detail.
+
 One question: does the disk-KV evictor choose badly, and can it be shown on upstream's own code?
 Started as the evidence hunt for the held ladder RFC; ended with a different, measured mechanism.
 

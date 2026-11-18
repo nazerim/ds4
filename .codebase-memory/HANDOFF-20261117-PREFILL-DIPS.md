@@ -1,5 +1,13 @@
 # HANDOFF 2026-11-17 — what actually causes the 3-4 tok/s decode dips
 
+> **SUPERSEDED for the disk-KV / eviction lane by `HANDOFF-20261119-KV-CHUNKSCHEDULE.md` --
+> read that first.** This file stays as the trail for the 2026-11-17 prefill-dips
+> investigation. Its addenda after the 11-18 01:20 close-out contain claims the newer file
+> retracts: the checkpoint is faithful (not "bad state"), the "161 comparisons" headline
+> was structurally guaranteed to pass, and the harm is the density term, not the age term.
+> Section order also drifted (10, 11 before 8, 9) -- trust the newer file, not headings here.
+
+
 Status: investigation complete, cause identified with a base-rate-controlled
 measurement. One safe change shipped (observability). The fix itself is **not**
 implemented — deliberately, see §6.

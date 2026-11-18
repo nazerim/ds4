@@ -13,39 +13,36 @@ inference engine in C with Metal, CUDA, and ROCm backends. See `AGENT.md`
 ## Build & test
 
 - `make` — build all binaries (ds4, ds4-server, ds4-bench, ds4-eval, ds4-agent)
-- `make test` / bare `./ds4_test` (needs a model + Metal on macOS) require the
-  engine STOPPED — it holds a process lock and the tests refuse mid-suite with
-  "another ds4 process is already running" (Error 2). Runbook:
-  `./ds4-server.sh stop` → tests → `./ds4-server.sh start-qwen` (also
-  `restart-qwen` to swap in a fresh binary, `status` to check). `--server` and
-  `--mtp-slice` subsets DO coexist with a running engine.
+- `make test` / bare `./ds4_test` (needs a model + Metal) require the engine
+  STOPPED — it holds a process lock, tests refuse mid-suite (Error 2). Runbook:
+  `./ds4-server.sh stop` → tests → `start-qwen` (`restart-qwen` = fresh binary).
+  `--server` and `--mtp-slice` subsets coexist with a running engine, but
+  `ds4_test --server` does NOT cover server code (it links `ds4.c`); for
+  `ds4_server.c` use `make test-server-logic` → `ds4_server_test`.
 - `make clean` — remove build artifacts
-- `make strix-halo` / `make cuda` / `make rocm` — platform-specific builds
-- `make dspark-acceptance`, `make dspark-verify-depth`, `make mtp-verify-depth` —
-  specialized verification targets
+- `make strix-halo` / `make cuda` / `make rocm` — platform builds; `make
+  dspark-acceptance`, `dspark-verify-depth`, `mtp-verify-depth` — verification
 - Live API-surface tests in `tests/` (e.g. `kv_cache_integration.py`) are only for intentional API testing.
 
 ## Workstreams
 
-- KV cache v2 rewrite: `PLAN-KV-REWRITE.md`, `PLAN-KV-LINEAGE.md`,
-  `.codebase-memory/adr.md` (2026-11-17 ADRs: store length = live session length,
-  write barrier before rename, holds-are-compute),
-  `HANDOFF-20261117-PREFILL-DIPS.md`
+- KV cache: v2 rewrite `PLAN-KV-REWRITE.md`, `PLAN-KV-LINEAGE.md`, `.codebase-memory/adr.md`
+  (2026-11-17 ADRs), `HANDOFF-20261117-PREFILL-DIPS.md`; disk-KV chunk schedule + eviction
+  density (2026-11-19) → `HANDOFF-20261119-KV-CHUNKSCHEDULE.md`, `.codebase-memory/20261118-kvstorm/`
 - Checkpoint self-healing + session handoff: `.codebase-memory/adr.md`
   (ADR 2026-09-06) and `.codebase-memory/TODO-20260906.md` (PR states,
   pending #984 port, open questions, proven diagnostics).
-- Vision cache (thinking bridge, multimodal disk KV; embed cache=KEEP budget
-  since F1 11-10: `.codebase-memory/adr.md` Sep-3 ADRs + amendment, HANDOFF-
-  DECODE-FIX §5; script serves Vision-Exp default, TRACE_PATH=./log/ds4.trace)
+- Vision cache (thinking bridge, multimodal disk KV; embed cache=KEEP since F1 11-10 —
+  `.codebase-memory/adr.md` Sep-3 ADRs + amendment, HANDOFF-DECODE-FIX §5; Vision-Exp default, TRACE_PATH=./log/ds4.trace)
 - DSpark: `PLAN-DSPARK-PERF.md`, `PLAN-DSPARK-TEMP-SPEC.md`
-- V4.1 decode degeneration — SOLVED 2026-11-08 (transient-reap leak; PR #1331;
-  `PLAN-DECODE-DEGRADE-20261108.md` + `HANDOFF-DECODE-FIX-DSPARK-20261108.md`);
-  lane FINALIZED 11-09: 512k all-spec dspark = script default, validated 319k.
+- V4.1 decode degeneration — SOLVED 2026-11-08, lane FINALIZED 11-09 (512k all-spec
+  dspark = script default, validated 319k): `PLAN-DECODE-DEGRADE-20261108.md`,
+  `HANDOFF-DECODE-FIX-DSPARK-20261108.md`.
 - Qwen3.8 PLE n-gram preload/cache: `PLAN-PLE-PRELOAD.md`
 - Qwen3.8 prefill/decode optimization: `PLAN-PREFILL-M5.md`, `PLAN-INT8-MOE.md` (closed),
   `PLAN-GATED-SCAN.md` (closed), `.codebase-memory/QSA-ATTRIBUTION-20261004.md`
-- Live-state + handoffs: `.codebase-memory/RESUME-MERGE-CLOSEOUT-20261106.md`;
-  stall fix lane it supersedes: `PLAN-DSML-REWIND.md` (closed, defaults now on).
+- Live-state + handoffs: `.codebase-memory/RESUME-MERGE-CLOSEOUT-20261106.md` (supersedes
+  the closed `PLAN-DSML-REWIND.md` stall lane, defaults now on).
 - Fork divergence notes: `DS4FORK.md`
 
 ## Conventions
@@ -62,6 +59,6 @@ inference engine in C with Metal, CUDA, and ROCm backends. See `AGENT.md`
   decoding superseded the fork's rejection-sampling verifier — so if it ever
   reappears, delete it rather than trying to rebuild it.
 - Dated docs rot: before following a file path in a workstream doc, check
-  `.codebase-memory/DOC-ROT-20261117.md` (regenerate: `doc-rot-scan.py`).
+  `.codebase-memory/DOC-ROT-20261117.md` (name is stale; regenerate via `doc-rot-scan.py`).
 - Do not commit secrets (see `auth_proxy.py` usage docs; credentials go in
   environment variables only).
