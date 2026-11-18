@@ -89,7 +89,7 @@ it was over-claimed in an earlier draft.
 | Short-prompt divergence rate | a ~10-min window; may well be lower than ~12k-token rate |
 | Cache-off throughput cost of parity | one window, trivial to add if anyone cares |
 | `ds4-ab-upstream` worktree (b3f5018, built) | drop whenever; findings already reproduced |
-| Commit signing badge | operator: `gh auth refresh -h github.com -s admin:ssh_signing_key` then `gh ssh-key add ~/.ssh/github_signing.pub --type signing` |
+| ~~Commit signing badge~~ | **NOT an open item** -- measured `verified=true reason=valid` on 11 commits (2026-08-31..HEAD) incl. `dcf77c4`; the earlier "unregistered" claim came from reading `commits[].status` (CI contexts) and from a scope-gated 404. See `20261117-kv/SIGNATURE-NOTE.md` |
 
 ## 7. Method debt — read before building any probe here
 
