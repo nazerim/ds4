@@ -1,0 +1,35 @@
+11-18 16:47:51 stopping production (idle-verified first)
+Stopping ds4-server (PID: 13586)...
+ds4-server stopped
+11-18 16:47:56 starting isolated engine on :8003
+11-18 16:48:01 preflight: one prompt, expecting a store and a disk hit
+  0   P=2631   target=4096   SAME
+
+prompts compared: 1   identical: 1 (100.0%)   divergent: 0 (0.0%)
+results: /Users/naz/Projects/ds4/.codebase-memory/20261118-kvstorm/runs/cdiv-preflight.jsonl  -- cross-check the server log for 'kv cache hit' on each pass-2 request
+11-18 16:48:05 preflight ok (disk-hit lines 0 -> 1), running 12 prompts at 4k-16k tokens
+  0   P=2631   target=4096   SAME
+  1   P=3569   target=6144   SAME
+  2   P=4766   target=8192   SAME
+  3   P=6494   target=12288  SAME
+  4   P=8945   target=16384  SAME
+  5   P=2296   target=4096   SAME
+  6   P=3320   target=6144   SAME
+  7   P=4478   target=8192   SAME
+  8   P=7134   target=12288  SAME
+  9   P=8580   target=16384  SAME
+  10  P=2426   target=4096   SAME
+  11  P=3179   target=6144   SAME
+
+prompts compared: 12   identical: 12 (100.0%)   divergent: 0 (0.0%)
+results: /Users/naz/Projects/ds4/.codebase-memory/20261118-kvstorm/runs/cachediver-results.jsonl  -- cross-check the server log for 'kv cache hit' on each pass-2 request
+11-18 16:49:03 probe exit=0
+11-18 16:49:03 server-side: disk-hit lines=14  live-miss lines=38 (hits should be >= ~24)
+11-18 16:49:03 done
+11-18 16:49:08 restoring production
+Rotated previous log to ./log/ds4-qwen.log.20261118-164908
+Starting ds4-server on port 8002 with model gguf/Qwen3.8-Flash-Next-Q4.gguf (ctx: 524288)...
+Logging to ./log/ds4-qwen.log
+Qwen3.8: vision encoder gguf/mmproj-Qwen3.8-Flash-Next-Q8_0.gguf, batched-session 2, mtp 1, mixed-prefill-quantum 512
+ds4-server started (PID: 13948)
+11-18 16:49:14 prod answering on :8002

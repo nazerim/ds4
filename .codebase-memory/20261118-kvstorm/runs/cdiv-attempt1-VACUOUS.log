@@ -1,0 +1,42 @@
+11-18 16:44:49 stopping production (idle-verified first)
+Stopping ds4-server (PID: 5253)...
+ds4-server stopped
+11-18 16:44:54 starting isolated engine on :8003
+11-18 16:44:59 engine up, running probe (24 prompts, cold then disk-hit)
+  0   P=82     SAME
+  1   P=142    SAME
+  2   P=224    SAME
+  3   P=241    SAME
+  4   P=326    SAME
+  5   P=389    SAME
+  6   P=72     SAME
+  7   P=127    SAME
+  8   P=216    SAME
+  9   P=230    SAME
+  10  P=355    SAME
+  11  P=322    SAME
+  12  P=87     SAME
+  13  P=103    SAME
+  14  P=233    SAME
+  15  P=275    SAME
+  16  P=369    SAME
+  17  P=356    SAME
+  18  P=75     SAME
+  19  P=138    SAME
+  20  P=193    SAME
+  21  P=242    SAME
+  22  P=355    SAME
+  23  P=339    SAME
+
+prompts compared: 24   identical: 24 (100.0%)   divergent: 0 (0.0%)
+results: /Users/naz/Projects/ds4/.codebase-memory/20261118-kvstorm/runs/cachediver-results.jsonl  -- cross-check the server log for 'kv cache hit' on each pass-2 request
+11-18 16:45:33 probe exit=0
+11-18 16:45:33 server-side: disk-hit lines=0  live-miss lines=71 (hits should be >= ~24)
+11-18 16:45:33 done
+11-18 16:45:38 restoring production
+Rotated previous log to ./log/ds4-qwen.log.20261118-164538
+Starting ds4-server on port 8002 with model gguf/Qwen3.8-Flash-Next-Q4.gguf (ctx: 524288)...
+Logging to ./log/ds4-qwen.log
+Qwen3.8: vision encoder gguf/mmproj-Qwen3.8-Flash-Next-Q8_0.gguf, batched-session 2, mtp 1, mixed-prefill-quantum 512
+ds4-server started (PID: 13586)
+11-18 16:45:44 prod answering on :8002

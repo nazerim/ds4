@@ -1,0 +1,517 @@
+ds4: Qwen BF16 n-grams: 95.37 GiB, disk reads only
+ds4: Metal device Apple M5 Max, 128.00 GiB RAM
+ds4: Metal 4 tensor API enabled for Tensor kernels
+ds4: drift-patch flags hc_stable=on norm_unify=on kv_raw_f32=off rope_exp2_log2=off math_safe=off tensor_matmul=on
+ds4: Metal model views created in 1.697 ms, residency requested in 470.616 ms, warmup 3.812 ms (mapped 71400.44 MiB from offset 10.51 MiB)
+ds4: Metal mapped mmaped model as 1 overlapping shared buffers
+ds4: metal backend initialized for graph diagnostics
+ds4: memory: KV 2.08 GiB (raw 1.63 + compressed 0.46) + buffers 8.68 GiB + resident model 69.73 GiB = 80.49 GiB planned
+ds4: memory detail: ctx=65536 prefill_cap=8192 raw_kv_rows=65536 compressed_kv_rows=16385 backend=metal
+1118 16:44:55 ds4-server: context buffers 11024.12 MiB (ctx=65536, backend=metal, prefill_chunk=8192, raw_kv_rows=65536, compressed_kv_rows=16385)
+1118 16:44:55 ds4-server: KV disk cache /Volumes/FireCuda520/ds4-ab-cdiv (budget=32768 MiB, cross-quant=accept, min=512, cold_max=30000, continued=10000, trim=32, align=2048, hit_half_life=21600s)
+1118 16:44:55 ds4-server: KV retention anchor_step=8192 continued_step=8192 (doubles above 49152 tokens) prefill_chunk=4096 small_dense=49152 tail=2 mid_spacing=131072 min_anchors=4 max_conversations=0 model_fp=2241966725151111098
+1118 16:44:55 ds4-server: listening on http://127.0.0.1:8003
+1118 16:44:59 ds4-server: chat ctx=0..82:82 prompt start
+1118 16:44:59 ds4-server: chat ctx=0..82:82 prefill chunk 82/82 (100.0%) chunk=0.00 t/s avg=289.71 t/s 0.283s
+1118 16:44:59 ds4-server: chat ctx=0..82:82 prompt done 0.283s
+1118 16:44:59 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:00 ds4-server: chat ctx=82..97:15 gen=15 decoding chunk=59.61 t/s avg=59.61 t/s 0.252s
+1118 16:45:00 ds4-server: chat ctx=0..82:82 gen=15 finish=stop 0.535s
+1118 16:45:00 ds4-server: live kv cache miss live=97 prompt=23 common=1 vision=match reason=token-mismatch
+1118 16:45:00 ds4-server: chat ctx=0..23:23 prompt start
+1118 16:45:00 ds4-server: chat ctx=0..23:23 prefill chunk 23/23 (100.0%) chunk=0.00 t/s avg=259.79 t/s 0.089s
+1118 16:45:00 ds4-server: chat ctx=0..23:23 prompt done 0.089s
+1118 16:45:00 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:00 ds4-server: chat ctx=23..26:3 gen=3 decoding chunk=57.24 t/s avg=57.24 t/s 0.052s
+1118 16:45:00 ds4-server: chat ctx=0..23:23 gen=3 finish=stop 0.141s
+1118 16:45:00 ds4-server: live kv cache miss live=26 prompt=82 common=1 vision=match reason=token-mismatch
+1118 16:45:00 ds4-server: chat ctx=0..82:82 prompt start
+1118 16:45:00 ds4-server: chat ctx=0..82:82 prefill chunk 82/82 (100.0%) chunk=0.00 t/s avg=389.57 t/s 0.210s
+1118 16:45:00 ds4-server: chat ctx=0..82:82 prompt done 0.211s
+1118 16:45:00 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:00 ds4-server: chat ctx=82..97:15 gen=15 decoding chunk=59.91 t/s avg=59.91 t/s 0.250s
+1118 16:45:00 ds4-server: chat ctx=0..82:82 gen=15 finish=stop 0.461s
+1118 16:45:00 ds4-server: live kv cache miss live=97 prompt=142 common=5 vision=match reason=token-mismatch
+1118 16:45:00 ds4-server: chat ctx=0..142:142 prompt start
+1118 16:45:01 ds4-server: chat ctx=0..142:142 prefill chunk 142/142 (100.0%) chunk=0.00 t/s avg=516.64 t/s 0.275s
+1118 16:45:01 ds4-server: chat ctx=0..142:142 prompt done 0.275s
+1118 16:45:01 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:01 ds4-server: chat ctx=142..151:9 gen=9 decoding chunk=59.34 t/s avg=59.34 t/s 0.152s
+1118 16:45:01 ds4-server: chat ctx=0..142:142 gen=9 finish=stop 0.427s
+1118 16:45:01 ds4-server: live kv cache miss live=151 prompt=23 common=1 vision=match reason=token-mismatch
+1118 16:45:01 ds4-server: chat ctx=0..23:23 prompt start
+1118 16:45:01 ds4-server: chat ctx=0..23:23 prefill chunk 23/23 (100.0%) chunk=0.00 t/s avg=259.97 t/s 0.088s
+1118 16:45:01 ds4-server: chat ctx=0..23:23 prompt done 0.089s
+1118 16:45:01 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:01 ds4-server: chat ctx=23..26:3 gen=3 decoding chunk=57.21 t/s avg=57.21 t/s 0.052s
+1118 16:45:01 ds4-server: chat ctx=0..23:23 gen=3 finish=stop 0.141s
+1118 16:45:01 ds4-server: live kv cache miss live=26 prompt=142 common=1 vision=match reason=token-mismatch
+1118 16:45:01 ds4-server: chat ctx=0..142:142 prompt start
+1118 16:45:01 ds4-server: chat ctx=0..142:142 prefill chunk 142/142 (100.0%) chunk=0.00 t/s avg=517.99 t/s 0.274s
+1118 16:45:01 ds4-server: chat ctx=0..142:142 prompt done 0.274s
+1118 16:45:01 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:01 ds4-server: chat ctx=142..151:9 gen=9 decoding chunk=59.41 t/s avg=59.41 t/s 0.151s
+1118 16:45:01 ds4-server: chat ctx=0..142:142 gen=9 finish=stop 0.426s
+1118 16:45:01 ds4-server: live kv cache miss live=151 prompt=224 common=5 vision=match reason=token-mismatch
+1118 16:45:01 ds4-server: chat ctx=0..224:224 prompt start
+1118 16:45:02 ds4-server: chat ctx=0..224:224 prefill chunk 224/224 (100.0%) chunk=0.00 t/s avg=812.15 t/s 0.276s
+1118 16:45:02 ds4-server: chat ctx=0..224:224 prompt done 0.276s
+1118 16:45:02 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:02 ds4-server: chat ctx=224..247:23 gen=23 decoding chunk=60.09 t/s avg=60.09 t/s 0.383s
+1118 16:45:02 ds4-server: chat ctx=0..224:224 gen=23 finish=stop 0.659s
+1118 16:45:02 ds4-server: live kv cache miss live=247 prompt=23 common=1 vision=match reason=token-mismatch
+1118 16:45:02 ds4-server: chat ctx=0..23:23 prompt start
+1118 16:45:02 ds4-server: chat ctx=0..23:23 prefill chunk 23/23 (100.0%) chunk=0.00 t/s avg=259.97 t/s 0.088s
+1118 16:45:02 ds4-server: chat ctx=0..23:23 prompt done 0.089s
+1118 16:45:02 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:02 ds4-server: chat ctx=23..26:3 gen=3 decoding chunk=57.45 t/s avg=57.45 t/s 0.052s
+1118 16:45:02 ds4-server: chat ctx=0..23:23 gen=3 finish=stop 0.141s
+1118 16:45:02 ds4-server: live kv cache miss live=26 prompt=224 common=1 vision=match reason=token-mismatch
+1118 16:45:02 ds4-server: chat ctx=0..224:224 prompt start
+1118 16:45:02 ds4-server: chat ctx=0..224:224 prefill chunk 224/224 (100.0%) chunk=0.00 t/s avg=815.16 t/s 0.275s
+1118 16:45:02 ds4-server: chat ctx=0..224:224 prompt done 0.275s
+1118 16:45:02 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:03 ds4-server: chat ctx=224..247:23 gen=23 decoding chunk=60.27 t/s avg=60.27 t/s 0.382s
+1118 16:45:03 ds4-server: chat ctx=0..224:224 gen=23 finish=stop 0.657s
+1118 16:45:03 ds4-server: live kv cache miss live=247 prompt=241 common=5 vision=match reason=token-mismatch
+1118 16:45:03 ds4-server: chat ctx=0..241:241 prompt start
+1118 16:45:03 ds4-server: chat ctx=0..241:241 prefill chunk 241/241 (100.0%) chunk=0.00 t/s avg=747.77 t/s 0.322s
+1118 16:45:03 ds4-server: chat ctx=0..241:241 prompt done 0.322s
+1118 16:45:03 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:03 ds4-server: chat ctx=241..258:17 gen=17 decoding chunk=59.98 t/s avg=59.98 t/s 0.283s
+1118 16:45:03 ds4-server: chat ctx=0..241:241 gen=17 finish=stop 0.606s
+1118 16:45:03 ds4-server: live kv cache miss live=258 prompt=23 common=1 vision=match reason=token-mismatch
+1118 16:45:03 ds4-server: chat ctx=0..23:23 prompt start
+1118 16:45:03 ds4-server: chat ctx=0..23:23 prefill chunk 23/23 (100.0%) chunk=0.00 t/s avg=259.48 t/s 0.089s
+1118 16:45:03 ds4-server: chat ctx=0..23:23 prompt done 0.089s
+1118 16:45:03 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:04 ds4-server: chat ctx=23..26:3 gen=3 decoding chunk=57.10 t/s avg=57.10 t/s 0.053s
+1118 16:45:04 ds4-server: chat ctx=0..23:23 gen=3 finish=stop 0.141s
+1118 16:45:04 ds4-server: live kv cache miss live=26 prompt=241 common=1 vision=match reason=token-mismatch
+1118 16:45:04 ds4-server: chat ctx=0..241:241 prompt start
+1118 16:45:04 ds4-server: chat ctx=0..241:241 prefill chunk 241/241 (100.0%) chunk=0.00 t/s avg=746.16 t/s 0.323s
+1118 16:45:04 ds4-server: chat ctx=0..241:241 prompt done 0.323s
+1118 16:45:04 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:04 ds4-server: chat ctx=241..258:17 gen=17 decoding chunk=59.96 t/s avg=59.96 t/s 0.284s
+1118 16:45:04 ds4-server: chat ctx=0..241:241 gen=17 finish=stop 0.607s
+1118 16:45:04 ds4-server: live kv cache miss live=258 prompt=326 common=5 vision=match reason=token-mismatch
+1118 16:45:04 ds4-server: chat ctx=0..326:326 prompt start
+1118 16:45:05 ds4-server: chat ctx=0..326:326 prefill chunk 326/326 (100.0%) chunk=0.00 t/s avg=891.35 t/s 0.366s
+1118 16:45:05 ds4-server: chat ctx=0..326:326 prompt done 0.366s
+1118 16:45:05 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:05 ds4-server: chat ctx=326..358:32 gen=32 decoding chunk=60.19 t/s avg=60.19 t/s 0.532s
+1118 16:45:05 ds4-server: chat ctx=0..326:326 gen=32 finish=length 0.898s
+1118 16:45:05 ds4-server: live kv cache miss live=358 prompt=23 common=1 vision=match reason=token-mismatch
+1118 16:45:05 ds4-server: chat ctx=0..23:23 prompt start
+1118 16:45:05 ds4-server: chat ctx=0..23:23 prefill chunk 23/23 (100.0%) chunk=0.00 t/s avg=259.46 t/s 0.089s
+1118 16:45:05 ds4-server: chat ctx=0..23:23 prompt done 0.089s
+1118 16:45:05 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:05 ds4-server: chat ctx=23..26:3 gen=3 decoding chunk=57.23 t/s avg=57.23 t/s 0.052s
+1118 16:45:05 ds4-server: chat ctx=0..23:23 gen=3 finish=stop 0.141s
+1118 16:45:05 ds4-server: live kv cache miss live=26 prompt=326 common=1 vision=match reason=token-mismatch
+1118 16:45:05 ds4-server: chat ctx=0..326:326 prompt start
+1118 16:45:06 ds4-server: chat ctx=0..326:326 prefill chunk 326/326 (100.0%) chunk=0.00 t/s avg=891.66 t/s 0.366s
+1118 16:45:06 ds4-server: chat ctx=0..326:326 prompt done 0.366s
+1118 16:45:06 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:06 ds4-server: chat ctx=326..358:32 gen=32 decoding chunk=60.60 t/s avg=60.60 t/s 0.528s
+1118 16:45:06 ds4-server: chat ctx=0..326:326 gen=32 finish=length 0.894s
+1118 16:45:06 ds4-server: live kv cache miss live=358 prompt=389 common=5 vision=match reason=token-mismatch
+1118 16:45:06 ds4-server: chat ctx=0..389:389 prompt start
+1118 16:45:06 ds4-server: chat ctx=0..389:389 prefill chunk 389/389 (100.0%) chunk=0.00 t/s avg=968.27 t/s 0.402s
+1118 16:45:06 ds4-server: chat ctx=0..389:389 prompt done 0.402s
+1118 16:45:06 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:07 ds4-server: chat ctx=389..406:17 gen=17 decoding chunk=59.78 t/s avg=59.78 t/s 0.284s
+1118 16:45:07 ds4-server: chat ctx=0..389:389 gen=17 finish=stop 0.686s
+1118 16:45:07 ds4-server: live kv cache miss live=406 prompt=23 common=1 vision=match reason=token-mismatch
+1118 16:45:07 ds4-server: chat ctx=0..23:23 prompt start
+1118 16:45:07 ds4-server: chat ctx=0..23:23 prefill chunk 23/23 (100.0%) chunk=0.00 t/s avg=259.00 t/s 0.089s
+1118 16:45:07 ds4-server: chat ctx=0..23:23 prompt done 0.089s
+1118 16:45:07 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:07 ds4-server: chat ctx=23..26:3 gen=3 decoding chunk=57.48 t/s avg=57.48 t/s 0.052s
+1118 16:45:07 ds4-server: chat ctx=0..23:23 gen=3 finish=stop 0.141s
+1118 16:45:07 ds4-server: live kv cache miss live=26 prompt=389 common=1 vision=match reason=token-mismatch
+1118 16:45:07 ds4-server: chat ctx=0..389:389 prompt start
+1118 16:45:07 ds4-server: chat ctx=0..389:389 prefill chunk 389/389 (100.0%) chunk=0.00 t/s avg=967.96 t/s 0.402s
+1118 16:45:07 ds4-server: chat ctx=0..389:389 prompt done 0.402s
+1118 16:45:07 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:08 ds4-server: chat ctx=389..406:17 gen=17 decoding chunk=59.82 t/s avg=59.82 t/s 0.284s
+1118 16:45:08 ds4-server: chat ctx=0..389:389 gen=17 finish=stop 0.686s
+1118 16:45:08 ds4-server: live kv cache miss live=406 prompt=72 common=5 vision=match reason=token-mismatch
+1118 16:45:08 ds4-server: chat ctx=0..72:72 prompt start
+1118 16:45:08 ds4-server: chat ctx=0..72:72 prefill chunk 72/72 (100.0%) chunk=0.00 t/s avg=352.46 t/s 0.204s
+1118 16:45:08 ds4-server: chat ctx=0..72:72 prompt done 0.204s
+1118 16:45:08 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:08 ds4-server: chat ctx=72..95:23 gen=23 decoding chunk=60.61 t/s avg=60.61 t/s 0.379s
+1118 16:45:08 ds4-server: chat ctx=0..72:72 gen=23 finish=stop 0.584s
+1118 16:45:08 ds4-server: live kv cache miss live=95 prompt=23 common=1 vision=match reason=token-mismatch
+1118 16:45:08 ds4-server: chat ctx=0..23:23 prompt start
+1118 16:45:08 ds4-server: chat ctx=0..23:23 prefill chunk 23/23 (100.0%) chunk=0.00 t/s avg=257.16 t/s 0.089s
+1118 16:45:08 ds4-server: chat ctx=0..23:23 prompt done 0.089s
+1118 16:45:08 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:08 ds4-server: chat ctx=23..26:3 gen=3 decoding chunk=60.82 t/s avg=60.82 t/s 0.049s
+1118 16:45:08 ds4-server: chat ctx=0..23:23 gen=3 finish=stop 0.139s
+1118 16:45:08 ds4-server: live kv cache miss live=26 prompt=72 common=1 vision=match reason=token-mismatch
+1118 16:45:08 ds4-server: chat ctx=0..72:72 prompt start
+1118 16:45:09 ds4-server: chat ctx=0..72:72 prefill chunk 72/72 (100.0%) chunk=0.00 t/s avg=352.71 t/s 0.204s
+1118 16:45:09 ds4-server: chat ctx=0..72:72 prompt done 0.204s
+1118 16:45:09 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:09 ds4-server: chat ctx=72..95:23 gen=23 decoding chunk=59.99 t/s avg=59.99 t/s 0.383s
+1118 16:45:09 ds4-server: chat ctx=0..72:72 gen=23 finish=stop 0.588s
+1118 16:45:09 ds4-server: live kv cache miss live=95 prompt=127 common=5 vision=match reason=token-mismatch
+1118 16:45:09 ds4-server: chat ctx=0..127:127 prompt start
+1118 16:45:09 ds4-server: chat ctx=0..127:127 prefill chunk 127/127 (100.0%) chunk=0.00 t/s avg=504.54 t/s 0.252s
+1118 16:45:09 ds4-server: chat ctx=0..127:127 prompt done 0.252s
+1118 16:45:09 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:10 ds4-server: chat ctx=127..147:20 gen=20 decoding chunk=59.70 t/s avg=59.70 t/s 0.335s
+1118 16:45:10 ds4-server: chat ctx=0..127:127 gen=20 finish=stop 0.587s
+1118 16:45:10 ds4-server: live kv cache miss live=147 prompt=23 common=1 vision=match reason=token-mismatch
+1118 16:45:10 ds4-server: chat ctx=0..23:23 prompt start
+1118 16:45:10 ds4-server: chat ctx=0..23:23 prefill chunk 23/23 (100.0%) chunk=0.00 t/s avg=258.64 t/s 0.089s
+1118 16:45:10 ds4-server: chat ctx=0..23:23 prompt done 0.089s
+1118 16:45:10 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:10 ds4-server: chat ctx=23..26:3 gen=3 decoding chunk=56.54 t/s avg=56.54 t/s 0.053s
+1118 16:45:10 ds4-server: chat ctx=0..23:23 gen=3 finish=stop 0.142s
+1118 16:45:10 ds4-server: live kv cache miss live=26 prompt=127 common=1 vision=match reason=token-mismatch
+1118 16:45:10 ds4-server: chat ctx=0..127:127 prompt start
+1118 16:45:10 ds4-server: chat ctx=0..127:127 prefill chunk 127/127 (100.0%) chunk=0.00 t/s avg=505.33 t/s 0.251s
+1118 16:45:10 ds4-server: chat ctx=0..127:127 prompt done 0.251s
+1118 16:45:10 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:10 ds4-server: chat ctx=127..147:20 gen=20 decoding chunk=60.02 t/s avg=60.02 t/s 0.333s
+1118 16:45:10 ds4-server: chat ctx=0..127:127 gen=20 finish=stop 0.585s
+1118 16:45:10 ds4-server: live kv cache miss live=147 prompt=216 common=5 vision=match reason=token-mismatch
+1118 16:45:10 ds4-server: chat ctx=0..216:216 prompt start
+1118 16:45:11 ds4-server: chat ctx=0..216:216 prefill chunk 216/216 (100.0%) chunk=0.00 t/s avg=716.26 t/s 0.302s
+1118 16:45:11 ds4-server: chat ctx=0..216:216 prompt done 0.302s
+1118 16:45:11 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:11 ds4-server: chat ctx=216..225:9 gen=9 decoding chunk=59.09 t/s avg=59.09 t/s 0.152s
+1118 16:45:11 ds4-server: chat ctx=0..216:216 gen=9 finish=stop 0.454s
+1118 16:45:11 ds4-server: live kv cache miss live=225 prompt=23 common=1 vision=match reason=token-mismatch
+1118 16:45:11 ds4-server: chat ctx=0..23:23 prompt start
+1118 16:45:11 ds4-server: chat ctx=0..23:23 prefill chunk 23/23 (100.0%) chunk=0.00 t/s avg=259.57 t/s 0.089s
+1118 16:45:11 ds4-server: chat ctx=0..23:23 prompt done 0.089s
+1118 16:45:11 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:11 ds4-server: chat ctx=23..26:3 gen=3 decoding chunk=56.99 t/s avg=56.99 t/s 0.053s
+1118 16:45:11 ds4-server: chat ctx=0..23:23 gen=3 finish=stop 0.141s
+1118 16:45:11 ds4-server: live kv cache miss live=26 prompt=216 common=1 vision=match reason=token-mismatch
+1118 16:45:11 ds4-server: chat ctx=0..216:216 prompt start
+1118 16:45:11 ds4-server: chat ctx=0..216:216 prefill chunk 216/216 (100.0%) chunk=0.00 t/s avg=715.12 t/s 0.302s
+1118 16:45:11 ds4-server: chat ctx=0..216:216 prompt done 0.302s
+1118 16:45:11 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:11 ds4-server: chat ctx=216..225:9 gen=9 decoding chunk=59.01 t/s avg=59.01 t/s 0.153s
+1118 16:45:11 ds4-server: chat ctx=0..216:216 gen=9 finish=stop 0.455s
+1118 16:45:11 ds4-server: live kv cache miss live=225 prompt=230 common=5 vision=match reason=token-mismatch
+1118 16:45:11 ds4-server: chat ctx=0..230:230 prompt start
+1118 16:45:12 ds4-server: chat ctx=0..230:230 prefill chunk 230/230 (100.0%) chunk=0.00 t/s avg=726.93 t/s 0.316s
+1118 16:45:12 ds4-server: chat ctx=0..230:230 prompt done 0.316s
+1118 16:45:12 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:12 ds4-server: chat ctx=230..249:19 gen=19 decoding chunk=60.20 t/s avg=60.20 t/s 0.316s
+1118 16:45:12 ds4-server: chat ctx=0..230:230 gen=19 finish=stop 0.632s
+1118 16:45:12 ds4-server: live kv cache miss live=249 prompt=23 common=1 vision=match reason=token-mismatch
+1118 16:45:12 ds4-server: chat ctx=0..23:23 prompt start
+1118 16:45:12 ds4-server: chat ctx=0..23:23 prefill chunk 23/23 (100.0%) chunk=0.00 t/s avg=255.56 t/s 0.090s
+1118 16:45:12 ds4-server: chat ctx=0..23:23 prompt done 0.090s
+1118 16:45:12 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:12 ds4-server: chat ctx=23..26:3 gen=3 decoding chunk=56.84 t/s avg=56.84 t/s 0.053s
+1118 16:45:12 ds4-server: chat ctx=0..23:23 gen=3 finish=stop 0.143s
+1118 16:45:12 ds4-server: live kv cache miss live=26 prompt=230 common=1 vision=match reason=token-mismatch
+1118 16:45:12 ds4-server: chat ctx=0..230:230 prompt start
+1118 16:45:12 ds4-server: chat ctx=0..230:230 prefill chunk 230/230 (100.0%) chunk=0.00 t/s avg=727.41 t/s 0.316s
+1118 16:45:12 ds4-server: chat ctx=0..230:230 prompt done 0.316s
+1118 16:45:12 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:13 ds4-server: chat ctx=230..249:19 gen=19 decoding chunk=60.47 t/s avg=60.47 t/s 0.314s
+1118 16:45:13 ds4-server: chat ctx=0..230:230 gen=19 finish=stop 0.631s
+1118 16:45:13 ds4-server: live kv cache miss live=249 prompt=355 common=5 vision=match reason=token-mismatch
+1118 16:45:13 ds4-server: chat ctx=0..355:355 prompt start
+1118 16:45:13 ds4-server: chat ctx=0..355:355 prefill chunk 355/355 (100.0%) chunk=0.00 t/s avg=911.43 t/s 0.389s
+1118 16:45:13 ds4-server: chat ctx=0..355:355 prompt done 0.390s
+1118 16:45:13 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:13 ds4-server: chat ctx=355..369:14 gen=14 decoding chunk=59.60 t/s avg=59.60 t/s 0.235s
+1118 16:45:13 ds4-server: chat ctx=0..355:355 gen=14 finish=stop 0.625s
+1118 16:45:13 ds4-server: live kv cache miss live=369 prompt=23 common=1 vision=match reason=token-mismatch
+1118 16:45:13 ds4-server: chat ctx=0..23:23 prompt start
+1118 16:45:13 ds4-server: chat ctx=0..23:23 prefill chunk 23/23 (100.0%) chunk=0.00 t/s avg=259.47 t/s 0.089s
+1118 16:45:13 ds4-server: chat ctx=0..23:23 prompt done 0.089s
+1118 16:45:13 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:13 ds4-server: chat ctx=23..26:3 gen=3 decoding chunk=57.08 t/s avg=57.08 t/s 0.053s
+1118 16:45:13 ds4-server: chat ctx=0..23:23 gen=3 finish=stop 0.141s
+1118 16:45:13 ds4-server: live kv cache miss live=26 prompt=355 common=1 vision=match reason=token-mismatch
+1118 16:45:13 ds4-server: chat ctx=0..355:355 prompt start
+1118 16:45:14 ds4-server: chat ctx=0..355:355 prefill chunk 355/355 (100.0%) chunk=0.00 t/s avg=910.83 t/s 0.390s
+1118 16:45:14 ds4-server: chat ctx=0..355:355 prompt done 0.390s
+1118 16:45:14 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:14 ds4-server: chat ctx=355..369:14 gen=14 decoding chunk=59.56 t/s avg=59.56 t/s 0.235s
+1118 16:45:14 ds4-server: chat ctx=0..355:355 gen=14 finish=stop 0.625s
+1118 16:45:14 ds4-server: live kv cache miss live=369 prompt=322 common=6 vision=match reason=token-mismatch
+1118 16:45:14 ds4-server: chat ctx=0..322:322 prompt start
+1118 16:45:14 ds4-server: chat ctx=0..322:322 prefill chunk 322/322 (100.0%) chunk=0.00 t/s avg=886.36 t/s 0.363s
+1118 16:45:14 ds4-server: chat ctx=0..322:322 prompt done 0.363s
+1118 16:45:14 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:15 ds4-server: chat ctx=322..332:10 gen=10 decoding chunk=59.10 t/s avg=59.10 t/s 0.169s
+1118 16:45:15 ds4-server: chat ctx=0..322:322 gen=10 finish=stop 0.533s
+1118 16:45:15 ds4-server: live kv cache miss live=332 prompt=23 common=1 vision=match reason=token-mismatch
+1118 16:45:15 ds4-server: chat ctx=0..23:23 prompt start
+1118 16:45:15 ds4-server: chat ctx=0..23:23 prefill chunk 23/23 (100.0%) chunk=0.00 t/s avg=258.19 t/s 0.089s
+1118 16:45:15 ds4-server: chat ctx=0..23:23 prompt done 0.089s
+1118 16:45:15 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:15 ds4-server: chat ctx=23..26:3 gen=3 decoding chunk=57.13 t/s avg=57.13 t/s 0.053s
+1118 16:45:15 ds4-server: chat ctx=0..23:23 gen=3 finish=stop 0.142s
+1118 16:45:15 ds4-server: live kv cache miss live=26 prompt=322 common=1 vision=match reason=token-mismatch
+1118 16:45:15 ds4-server: chat ctx=0..322:322 prompt start
+1118 16:45:15 ds4-server: chat ctx=0..322:322 prefill chunk 322/322 (100.0%) chunk=0.00 t/s avg=888.28 t/s 0.362s
+1118 16:45:15 ds4-server: chat ctx=0..322:322 prompt done 0.363s
+1118 16:45:15 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:15 ds4-server: chat ctx=322..332:10 gen=10 decoding chunk=59.39 t/s avg=59.39 t/s 0.168s
+1118 16:45:15 ds4-server: chat ctx=0..322:322 gen=10 finish=stop 0.531s
+1118 16:45:15 ds4-server: live kv cache miss live=332 prompt=87 common=6 vision=match reason=token-mismatch
+1118 16:45:15 ds4-server: chat ctx=0..87:87 prompt start
+1118 16:45:16 ds4-server: chat ctx=0..87:87 prefill chunk 87/87 (100.0%) chunk=0.00 t/s avg=402.82 t/s 0.216s
+1118 16:45:16 ds4-server: chat ctx=0..87:87 prompt done 0.216s
+1118 16:45:16 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:16 ds4-server: chat ctx=87..101:14 gen=14 decoding chunk=60.49 t/s avg=60.49 t/s 0.231s
+1118 16:45:16 ds4-server: chat ctx=0..87:87 gen=14 finish=stop 0.448s
+1118 16:45:16 ds4-server: live kv cache miss live=101 prompt=23 common=1 vision=match reason=token-mismatch
+1118 16:45:16 ds4-server: chat ctx=0..23:23 prompt start
+1118 16:45:16 ds4-server: chat ctx=0..23:23 prefill chunk 23/23 (100.0%) chunk=0.00 t/s avg=255.90 t/s 0.090s
+1118 16:45:16 ds4-server: chat ctx=0..23:23 prompt done 0.090s
+1118 16:45:16 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:16 ds4-server: chat ctx=23..26:3 gen=3 decoding chunk=56.73 t/s avg=56.73 t/s 0.053s
+1118 16:45:16 ds4-server: chat ctx=0..23:23 gen=3 finish=stop 0.143s
+1118 16:45:16 ds4-server: live kv cache miss live=26 prompt=87 common=1 vision=match reason=token-mismatch
+1118 16:45:16 ds4-server: chat ctx=0..87:87 prompt start
+1118 16:45:16 ds4-server: chat ctx=0..87:87 prefill chunk 87/87 (100.0%) chunk=0.00 t/s avg=403.53 t/s 0.216s
+1118 16:45:16 ds4-server: chat ctx=0..87:87 prompt done 0.216s
+1118 16:45:16 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:16 ds4-server: chat ctx=87..101:14 gen=14 decoding chunk=60.62 t/s avg=60.62 t/s 0.231s
+1118 16:45:16 ds4-server: chat ctx=0..87:87 gen=14 finish=stop 0.447s
+1118 16:45:16 ds4-server: live kv cache miss live=101 prompt=103 common=6 vision=match reason=token-mismatch
+1118 16:45:16 ds4-server: chat ctx=0..103:103 prompt start
+1118 16:45:17 ds4-server: chat ctx=0..103:103 prefill chunk 103/103 (100.0%) chunk=0.00 t/s avg=433.80 t/s 0.237s
+1118 16:45:17 ds4-server: chat ctx=0..103:103 prompt done 0.237s
+1118 16:45:17 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:17 ds4-server: chat ctx=103..131:28 gen=28 decoding chunk=60.46 t/s avg=60.46 t/s 0.463s
+1118 16:45:17 ds4-server: chat ctx=0..103:103 gen=28 finish=stop 0.701s
+1118 16:45:17 ds4-server: live kv cache miss live=131 prompt=23 common=1 vision=match reason=token-mismatch
+1118 16:45:17 ds4-server: chat ctx=0..23:23 prompt start
+1118 16:45:17 ds4-server: chat ctx=0..23:23 prefill chunk 23/23 (100.0%) chunk=0.00 t/s avg=259.83 t/s 0.089s
+1118 16:45:17 ds4-server: chat ctx=0..23:23 prompt done 0.089s
+1118 16:45:17 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:17 ds4-server: chat ctx=23..26:3 gen=3 decoding chunk=60.62 t/s avg=60.62 t/s 0.049s
+1118 16:45:17 ds4-server: chat ctx=0..23:23 gen=3 finish=stop 0.138s
+1118 16:45:17 ds4-server: live kv cache miss live=26 prompt=103 common=1 vision=match reason=token-mismatch
+1118 16:45:17 ds4-server: chat ctx=0..103:103 prompt start
+1118 16:45:17 ds4-server: chat ctx=0..103:103 prefill chunk 103/103 (100.0%) chunk=0.00 t/s avg=433.87 t/s 0.237s
+1118 16:45:17 ds4-server: chat ctx=0..103:103 prompt done 0.237s
+1118 16:45:17 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:18 ds4-server: chat ctx=103..131:28 gen=28 decoding chunk=59.94 t/s avg=59.94 t/s 0.467s
+1118 16:45:18 ds4-server: chat ctx=0..103:103 gen=28 finish=stop 0.705s
+1118 16:45:18 ds4-server: live kv cache miss live=131 prompt=233 common=6 vision=match reason=token-mismatch
+1118 16:45:18 ds4-server: chat ctx=0..233:233 prompt start
+1118 16:45:18 ds4-server: chat ctx=0..233:233 prefill chunk 233/233 (100.0%) chunk=0.00 t/s avg=724.53 t/s 0.322s
+1118 16:45:18 ds4-server: chat ctx=0..233:233 prompt done 0.322s
+1118 16:45:18 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:18 ds4-server: chat ctx=233..249:16 gen=16 decoding chunk=59.66 t/s avg=59.66 t/s 0.268s
+1118 16:45:18 ds4-server: chat ctx=0..233:233 gen=16 finish=stop 0.590s
+1118 16:45:18 ds4-server: live kv cache miss live=249 prompt=23 common=1 vision=match reason=token-mismatch
+1118 16:45:18 ds4-server: chat ctx=0..23:23 prompt start
+1118 16:45:19 ds4-server: chat ctx=0..23:23 prefill chunk 23/23 (100.0%) chunk=0.00 t/s avg=260.50 t/s 0.088s
+1118 16:45:19 ds4-server: chat ctx=0..23:23 prompt done 0.088s
+1118 16:45:19 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:19 ds4-server: chat ctx=23..26:3 gen=3 decoding chunk=60.95 t/s avg=60.95 t/s 0.049s
+1118 16:45:19 ds4-server: chat ctx=0..23:23 gen=3 finish=stop 0.138s
+1118 16:45:19 ds4-server: live kv cache miss live=26 prompt=233 common=1 vision=match reason=token-mismatch
+1118 16:45:19 ds4-server: chat ctx=0..233:233 prompt start
+1118 16:45:19 ds4-server: chat ctx=0..233:233 prefill chunk 233/233 (100.0%) chunk=0.00 t/s avg=712.46 t/s 0.327s
+1118 16:45:19 ds4-server: chat ctx=0..233:233 prompt done 0.327s
+1118 16:45:19 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:19 ds4-server: chat ctx=233..249:16 gen=16 decoding chunk=59.18 t/s avg=59.18 t/s 0.270s
+1118 16:45:19 ds4-server: chat ctx=0..233:233 gen=16 finish=stop 0.598s
+1118 16:45:19 ds4-server: live kv cache miss live=249 prompt=275 common=6 vision=match reason=token-mismatch
+1118 16:45:19 ds4-server: chat ctx=0..275:275 prompt start
+1118 16:45:20 ds4-server: chat ctx=0..275:275 prefill chunk 275/275 (100.0%) chunk=0.00 t/s avg=772.09 t/s 0.356s
+1118 16:45:20 ds4-server: chat ctx=0..275:275 prompt done 0.356s
+1118 16:45:20 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:20 ds4-server: chat ctx=275..284:9 gen=9 decoding chunk=58.20 t/s avg=58.20 t/s 0.155s
+1118 16:45:20 ds4-server: chat ctx=0..275:275 gen=9 finish=stop 0.511s
+1118 16:45:20 ds4-server: live kv cache miss live=284 prompt=23 common=1 vision=match reason=token-mismatch
+1118 16:45:20 ds4-server: chat ctx=0..23:23 prompt start
+1118 16:45:20 ds4-server: chat ctx=0..23:23 prefill chunk 23/23 (100.0%) chunk=0.00 t/s avg=257.34 t/s 0.089s
+1118 16:45:20 ds4-server: chat ctx=0..23:23 prompt done 0.089s
+1118 16:45:20 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:20 ds4-server: chat ctx=23..26:3 gen=3 decoding chunk=58.04 t/s avg=58.04 t/s 0.052s
+1118 16:45:20 ds4-server: chat ctx=0..23:23 gen=3 finish=stop 0.141s
+1118 16:45:20 ds4-server: live kv cache miss live=26 prompt=275 common=1 vision=match reason=token-mismatch
+1118 16:45:20 ds4-server: chat ctx=0..275:275 prompt start
+1118 16:45:20 ds4-server: chat ctx=0..275:275 prefill chunk 275/275 (100.0%) chunk=0.00 t/s avg=769.59 t/s 0.357s
+1118 16:45:20 ds4-server: chat ctx=0..275:275 prompt done 0.357s
+1118 16:45:20 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:20 ds4-server: chat ctx=275..284:9 gen=9 decoding chunk=56.65 t/s avg=56.65 t/s 0.159s
+1118 16:45:20 ds4-server: chat ctx=0..275:275 gen=9 finish=stop 0.516s
+1118 16:45:20 ds4-server: live kv cache miss live=284 prompt=369 common=6 vision=match reason=token-mismatch
+1118 16:45:20 ds4-server: chat ctx=0..369:369 prompt start
+1118 16:45:21 ds4-server: chat ctx=0..369:369 prefill chunk 369/369 (100.0%) chunk=0.00 t/s avg=897.43 t/s 0.411s
+1118 16:45:21 ds4-server: chat ctx=0..369:369 prompt done 0.411s
+1118 16:45:21 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:21 ds4-server: chat ctx=369..392:23 gen=23 decoding chunk=58.16 t/s avg=58.16 t/s 0.395s
+1118 16:45:21 ds4-server: chat ctx=0..369:369 gen=23 finish=stop 0.807s
+1118 16:45:21 ds4-server: live kv cache miss live=392 prompt=23 common=1 vision=match reason=token-mismatch
+1118 16:45:21 ds4-server: chat ctx=0..23:23 prompt start
+1118 16:45:21 ds4-server: chat ctx=0..23:23 prefill chunk 23/23 (100.0%) chunk=0.00 t/s avg=255.29 t/s 0.090s
+1118 16:45:21 ds4-server: chat ctx=0..23:23 prompt done 0.090s
+1118 16:45:21 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:21 ds4-server: chat ctx=23..26:3 gen=3 decoding chunk=56.52 t/s avg=56.52 t/s 0.053s
+1118 16:45:21 ds4-server: chat ctx=0..23:23 gen=3 finish=stop 0.143s
+1118 16:45:21 ds4-server: live kv cache miss live=26 prompt=369 common=1 vision=match reason=token-mismatch
+1118 16:45:21 ds4-server: chat ctx=0..369:369 prompt start
+1118 16:45:22 ds4-server: chat ctx=0..369:369 prefill chunk 369/369 (100.0%) chunk=0.00 t/s avg=909.48 t/s 0.406s
+1118 16:45:22 ds4-server: chat ctx=0..369:369 prompt done 0.406s
+1118 16:45:22 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:22 ds4-server: chat ctx=369..392:23 gen=23 decoding chunk=58.05 t/s avg=58.05 t/s 0.396s
+1118 16:45:22 ds4-server: chat ctx=0..369:369 gen=23 finish=stop 0.802s
+1118 16:45:22 ds4-server: live kv cache miss live=392 prompt=356 common=6 vision=match reason=token-mismatch
+1118 16:45:22 ds4-server: chat ctx=0..356:356 prompt start
+1118 16:45:23 ds4-server: chat ctx=0..356:356 prefill chunk 356/356 (100.0%) chunk=0.00 t/s avg=894.94 t/s 0.398s
+1118 16:45:23 ds4-server: chat ctx=0..356:356 prompt done 0.398s
+1118 16:45:23 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:23 ds4-server: chat ctx=356..383:27 gen=27 decoding chunk=58.55 t/s avg=58.55 t/s 0.461s
+1118 16:45:23 ds4-server: chat ctx=0..356:356 gen=27 finish=stop 0.859s
+1118 16:45:23 ds4-server: live kv cache miss live=383 prompt=23 common=1 vision=match reason=token-mismatch
+1118 16:45:23 ds4-server: chat ctx=0..23:23 prompt start
+1118 16:45:23 ds4-server: chat ctx=0..23:23 prefill chunk 23/23 (100.0%) chunk=0.00 t/s avg=258.36 t/s 0.089s
+1118 16:45:23 ds4-server: chat ctx=0..23:23 prompt done 0.089s
+1118 16:45:23 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:23 ds4-server: chat ctx=23..26:3 gen=3 decoding chunk=59.24 t/s avg=59.24 t/s 0.051s
+1118 16:45:23 ds4-server: chat ctx=0..23:23 gen=3 finish=stop 0.140s
+1118 16:45:23 ds4-server: live kv cache miss live=26 prompt=356 common=1 vision=match reason=token-mismatch
+1118 16:45:23 ds4-server: chat ctx=0..356:356 prompt start
+1118 16:45:24 ds4-server: chat ctx=0..356:356 prefill chunk 356/356 (100.0%) chunk=0.00 t/s avg=892.90 t/s 0.399s
+1118 16:45:24 ds4-server: chat ctx=0..356:356 prompt done 0.399s
+1118 16:45:24 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:24 ds4-server: chat ctx=356..383:27 gen=27 decoding chunk=58.97 t/s avg=58.97 t/s 0.458s
+1118 16:45:24 ds4-server: chat ctx=0..356:356 gen=27 finish=stop 0.857s
+1118 16:45:24 ds4-server: live kv cache miss live=383 prompt=75 common=6 vision=match reason=token-mismatch
+1118 16:45:24 ds4-server: chat ctx=0..75:75 prompt start
+1118 16:45:24 ds4-server: chat ctx=0..75:75 prefill chunk 75/75 (100.0%) chunk=0.00 t/s avg=358.94 t/s 0.209s
+1118 16:45:24 ds4-server: chat ctx=0..75:75 prompt done 0.209s
+1118 16:45:24 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:25 ds4-server: chat ctx=75..107:32 gen=32 decoding chunk=59.85 t/s avg=59.85 t/s 0.535s
+1118 16:45:25 ds4-server: chat ctx=0..75:75 gen=32 finish=length 0.744s
+1118 16:45:25 ds4-server: live kv cache miss live=107 prompt=23 common=1 vision=match reason=token-mismatch
+1118 16:45:25 ds4-server: chat ctx=0..23:23 prompt start
+1118 16:45:25 ds4-server: chat ctx=0..23:23 prefill chunk 23/23 (100.0%) chunk=0.00 t/s avg=253.92 t/s 0.091s
+1118 16:45:25 ds4-server: chat ctx=0..23:23 prompt done 0.091s
+1118 16:45:25 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:25 ds4-server: chat ctx=23..26:3 gen=3 decoding chunk=56.10 t/s avg=56.10 t/s 0.053s
+1118 16:45:25 ds4-server: chat ctx=0..23:23 gen=3 finish=stop 0.144s
+1118 16:45:25 ds4-server: live kv cache miss live=26 prompt=75 common=1 vision=match reason=token-mismatch
+1118 16:45:25 ds4-server: chat ctx=0..75:75 prompt start
+1118 16:45:25 ds4-server: chat ctx=0..75:75 prefill chunk 75/75 (100.0%) chunk=0.00 t/s avg=358.86 t/s 0.209s
+1118 16:45:25 ds4-server: chat ctx=0..75:75 prompt done 0.209s
+1118 16:45:25 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:26 ds4-server: chat ctx=75..107:32 gen=32 decoding chunk=59.69 t/s avg=59.69 t/s 0.536s
+1118 16:45:26 ds4-server: chat ctx=0..75:75 gen=32 finish=length 0.745s
+1118 16:45:26 ds4-server: live kv cache miss live=107 prompt=138 common=6 vision=match reason=token-mismatch
+1118 16:45:26 ds4-server: chat ctx=0..138:138 prompt start
+1118 16:45:26 ds4-server: chat ctx=0..138:138 prefill chunk 138/138 (100.0%) chunk=0.00 t/s avg=501.00 t/s 0.275s
+1118 16:45:26 ds4-server: chat ctx=0..138:138 prompt done 0.276s
+1118 16:45:26 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:26 ds4-server: chat ctx=138..155:17 gen=17 decoding chunk=58.72 t/s avg=58.72 t/s 0.290s
+1118 16:45:26 ds4-server: chat ctx=0..138:138 gen=17 finish=stop 0.565s
+1118 16:45:26 ds4-server: live kv cache miss live=155 prompt=23 common=1 vision=match reason=token-mismatch
+1118 16:45:26 ds4-server: chat ctx=0..23:23 prompt start
+1118 16:45:26 ds4-server: chat ctx=0..23:23 prefill chunk 23/23 (100.0%) chunk=0.00 t/s avg=258.00 t/s 0.089s
+1118 16:45:26 ds4-server: chat ctx=0..23:23 prompt done 0.089s
+1118 16:45:26 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:26 ds4-server: chat ctx=23..26:3 gen=3 decoding chunk=56.82 t/s avg=56.82 t/s 0.053s
+1118 16:45:26 ds4-server: chat ctx=0..23:23 gen=3 finish=stop 0.142s
+1118 16:45:26 ds4-server: live kv cache miss live=26 prompt=138 common=1 vision=match reason=token-mismatch
+1118 16:45:26 ds4-server: chat ctx=0..138:138 prompt start
+1118 16:45:27 ds4-server: chat ctx=0..138:138 prefill chunk 138/138 (100.0%) chunk=0.00 t/s avg=500.28 t/s 0.276s
+1118 16:45:27 ds4-server: chat ctx=0..138:138 prompt done 0.276s
+1118 16:45:27 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:27 ds4-server: chat ctx=138..155:17 gen=17 decoding chunk=58.41 t/s avg=58.41 t/s 0.291s
+1118 16:45:27 ds4-server: chat ctx=0..138:138 gen=17 finish=stop 0.567s
+1118 16:45:27 ds4-server: live kv cache miss live=155 prompt=193 common=5 vision=match reason=token-mismatch
+1118 16:45:27 ds4-server: chat ctx=0..193:193 prompt start
+1118 16:45:27 ds4-server: chat ctx=0..193:193 prefill chunk 193/193 (100.0%) chunk=0.00 t/s avg=654.41 t/s 0.295s
+1118 16:45:27 ds4-server: chat ctx=0..193:193 prompt done 0.295s
+1118 16:45:27 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:28 ds4-server: chat ctx=193..216:23 gen=23 decoding chunk=58.66 t/s avg=58.66 t/s 0.392s
+1118 16:45:28 ds4-server: chat ctx=0..193:193 gen=23 finish=stop 0.687s
+1118 16:45:28 ds4-server: live kv cache miss live=216 prompt=23 common=1 vision=match reason=token-mismatch
+1118 16:45:28 ds4-server: chat ctx=0..23:23 prompt start
+1118 16:45:28 ds4-server: chat ctx=0..23:23 prefill chunk 23/23 (100.0%) chunk=0.00 t/s avg=257.14 t/s 0.089s
+1118 16:45:28 ds4-server: chat ctx=0..23:23 prompt done 0.089s
+1118 16:45:28 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:28 ds4-server: chat ctx=23..26:3 gen=3 decoding chunk=56.38 t/s avg=56.38 t/s 0.053s
+1118 16:45:28 ds4-server: chat ctx=0..23:23 gen=3 finish=stop 0.143s
+1118 16:45:28 ds4-server: live kv cache miss live=26 prompt=193 common=1 vision=match reason=token-mismatch
+1118 16:45:28 ds4-server: chat ctx=0..193:193 prompt start
+1118 16:45:28 ds4-server: chat ctx=0..193:193 prefill chunk 193/193 (100.0%) chunk=0.00 t/s avg=649.27 t/s 0.297s
+1118 16:45:28 ds4-server: chat ctx=0..193:193 prompt done 0.297s
+1118 16:45:28 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:28 ds4-server: chat ctx=193..216:23 gen=23 decoding chunk=58.47 t/s avg=58.47 t/s 0.393s
+1118 16:45:28 ds4-server: chat ctx=0..193:193 gen=23 finish=stop 0.691s
+1118 16:45:28 ds4-server: live kv cache miss live=216 prompt=242 common=6 vision=match reason=token-mismatch
+1118 16:45:28 ds4-server: chat ctx=0..242:242 prompt start
+1118 16:45:29 ds4-server: chat ctx=0..242:242 prefill chunk 242/242 (100.0%) chunk=0.00 t/s avg=727.44 t/s 0.333s
+1118 16:45:29 ds4-server: chat ctx=0..242:242 prompt done 0.333s
+1118 16:45:29 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:29 ds4-server: chat ctx=242..262:20 gen=20 decoding chunk=58.01 t/s avg=58.01 t/s 0.345s
+1118 16:45:29 ds4-server: chat ctx=0..242:242 gen=20 finish=stop 0.678s
+1118 16:45:29 ds4-server: live kv cache miss live=262 prompt=23 common=1 vision=match reason=token-mismatch
+1118 16:45:29 ds4-server: chat ctx=0..23:23 prompt start
+1118 16:45:29 ds4-server: chat ctx=0..23:23 prefill chunk 23/23 (100.0%) chunk=0.00 t/s avg=258.46 t/s 0.089s
+1118 16:45:29 ds4-server: chat ctx=0..23:23 prompt done 0.089s
+1118 16:45:29 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:29 ds4-server: chat ctx=23..26:3 gen=3 decoding chunk=56.60 t/s avg=56.60 t/s 0.053s
+1118 16:45:29 ds4-server: chat ctx=0..23:23 gen=3 finish=stop 0.142s
+1118 16:45:29 ds4-server: live kv cache miss live=26 prompt=242 common=1 vision=match reason=token-mismatch
+1118 16:45:29 ds4-server: chat ctx=0..242:242 prompt start
+1118 16:45:30 ds4-server: chat ctx=0..242:242 prefill chunk 242/242 (100.0%) chunk=0.00 t/s avg=711.11 t/s 0.340s
+1118 16:45:30 ds4-server: chat ctx=0..242:242 prompt done 0.340s
+1118 16:45:30 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:30 ds4-server: chat ctx=242..262:20 gen=20 decoding chunk=56.86 t/s avg=56.86 t/s 0.352s
+1118 16:45:30 ds4-server: chat ctx=0..242:242 gen=20 finish=stop 0.692s
+1118 16:45:30 ds4-server: live kv cache miss live=262 prompt=355 common=6 vision=match reason=token-mismatch
+1118 16:45:30 ds4-server: chat ctx=0..355:355 prompt start
+1118 16:45:30 ds4-server: chat ctx=0..355:355 prefill chunk 355/355 (100.0%) chunk=0.00 t/s avg=862.90 t/s 0.411s
+1118 16:45:30 ds4-server: chat ctx=0..355:355 prompt done 0.411s
+1118 16:45:30 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:31 ds4-server: chat ctx=355..364:9 gen=9 decoding chunk=52.16 t/s avg=52.16 t/s 0.173s
+1118 16:45:31 ds4-server: chat ctx=0..355:355 gen=9 finish=stop 0.584s
+1118 16:45:31 ds4-server: live kv cache miss live=364 prompt=23 common=1 vision=match reason=token-mismatch
+1118 16:45:31 ds4-server: chat ctx=0..23:23 prompt start
+1118 16:45:31 ds4-server: chat ctx=0..23:23 prefill chunk 23/23 (100.0%) chunk=0.00 t/s avg=245.46 t/s 0.094s
+1118 16:45:31 ds4-server: chat ctx=0..23:23 prompt done 0.094s
+1118 16:45:31 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:31 ds4-server: chat ctx=23..26:3 gen=3 decoding chunk=55.47 t/s avg=55.47 t/s 0.054s
+1118 16:45:31 ds4-server: chat ctx=0..23:23 gen=3 finish=stop 0.148s
+1118 16:45:31 ds4-server: live kv cache miss live=26 prompt=355 common=1 vision=match reason=token-mismatch
+1118 16:45:31 ds4-server: chat ctx=0..355:355 prompt start
+1118 16:45:31 ds4-server: chat ctx=0..355:355 prefill chunk 355/355 (100.0%) chunk=0.00 t/s avg=857.32 t/s 0.414s
+1118 16:45:31 ds4-server: chat ctx=0..355:355 prompt done 0.414s
+1118 16:45:31 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:31 ds4-server: chat ctx=355..364:9 gen=9 decoding chunk=58.14 t/s avg=58.14 t/s 0.155s
+1118 16:45:31 ds4-server: chat ctx=0..355:355 gen=9 finish=stop 0.569s
+1118 16:45:31 ds4-server: live kv cache miss live=364 prompt=339 common=6 vision=match reason=token-mismatch
+1118 16:45:31 ds4-server: chat ctx=0..339:339 prompt start
+1118 16:45:32 ds4-server: chat ctx=0..339:339 prefill chunk 339/339 (100.0%) chunk=0.00 t/s avg=871.58 t/s 0.389s
+1118 16:45:32 ds4-server: chat ctx=0..339:339 prompt done 0.389s
+1118 16:45:32 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:32 ds4-server: chat ctx=339..358:19 gen=19 decoding chunk=59.20 t/s avg=59.20 t/s 0.321s
+1118 16:45:32 ds4-server: chat ctx=0..339:339 gen=19 finish=stop 0.710s
+1118 16:45:32 ds4-server: live kv cache miss live=358 prompt=23 common=1 vision=match reason=token-mismatch
+1118 16:45:32 ds4-server: chat ctx=0..23:23 prompt start
+1118 16:45:32 ds4-server: chat ctx=0..23:23 prefill chunk 23/23 (100.0%) chunk=0.00 t/s avg=255.63 t/s 0.090s
+1118 16:45:32 ds4-server: chat ctx=0..23:23 prompt done 0.090s
+1118 16:45:32 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:32 ds4-server: chat ctx=23..26:3 gen=3 decoding chunk=56.35 t/s avg=56.35 t/s 0.053s
+1118 16:45:32 ds4-server: chat ctx=0..23:23 gen=3 finish=stop 0.143s
+1118 16:45:32 ds4-server: live kv cache miss live=26 prompt=339 common=1 vision=match reason=token-mismatch
+1118 16:45:32 ds4-server: chat ctx=0..339:339 prompt start
+1118 16:45:32 ds4-server: chat ctx=0..339:339 prefill chunk 339/339 (100.0%) chunk=0.00 t/s avg=863.42 t/s 0.393s
+1118 16:45:32 ds4-server: chat ctx=0..339:339 prompt done 0.393s
+1118 16:45:32 ds4-server: DSML token not found in vocab; suppression disabled
+1118 16:45:33 ds4-server: chat ctx=339..358:19 gen=19 decoding chunk=59.05 t/s avg=59.05 t/s 0.322s
+1118 16:45:33 ds4-server: chat ctx=0..339:339 gen=19 finish=stop 0.715s
+1118 16:45:33 ds4-server: shutdown requested, draining requests
