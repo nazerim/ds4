@@ -511,8 +511,11 @@ Nothing merged, so it is real and unfixed but not novel: at most a corrected mea
 My tie-break claim from an earlier pass is RETRACTED (exact-double ties are 0.14 % of zero-hit entries, measured on the live cache); the surviving
 claim is only "with hits==0 the score has no age term". See `20261118-kvstorm/PRIOR-ART-AND-CORRECTIONS.md`.
 **Cache-dependent outputs: benign FP numerics** (upstream's own comment `ds4.c:1052-1053` says chunk boundaries change reduction order; payload load is a
-raw byte dump; first divergence at request 53 with all 78 turn-1 replies agreeing). ONE real-bug risk left open: `ds4_kvstore.c:691-704` tokenises the
-suffix standalone vs the cold path's whole-prompt tokenisation -- needs the logprobs forced-hit vs forced-cold experiment in a stop window. INDEPENDENTLY VERIFIED after writing: an adversarial re-review on a different model re-derived every headline number
+raw byte dump; first divergence at request 53 with all 78 turn-1 replies agreeing). **Tokeniser suffix risk: MEASURED PASS** 2026-11-18 15:57 in a 97 s
+window -- `tests/test_kv_prefix_stability.c`, 8/8 cases stable, raw output in `20261118-kvstorm/PREFIX-STABILITY-RUN.{txt,err}`. Scope is narrow: it covers
+the invalid-tool-call path (cut mid malformed tool call, where the code actually runs), and the Qwen spaced markers were seen tokenising as plain text, so
+the merge hazard was live and did not fire. **Still untested: normal turn continuation**, which cuts at a completed assistant turn -- my omission, and it
+needs only a case-table extension, no window. INDEPENDENTLY VERIFIED after writing: an adversarial re-review on a different model re-derived every headline number
 from raw logs without reusing the scripts here (SURVIVES) and returned 4 corrections now folded into RESULTS.md -- lifetime percentages are
 match-order dependent (FIFO 75%<=10s vs LIFO 58%), zero-hit entries TIE so the `last_used` tiebreak picks the OLDER victim, u400 is a ceiling not an
 isolation, and the untuned 300 s half-life sits at this workload's p90 revisit gap (~315 s), so the remedy is validated at its fitness boundary.

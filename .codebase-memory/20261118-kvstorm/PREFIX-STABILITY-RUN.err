@@ -1,0 +1,25 @@
+kv_prefix_stability: model=gguf/Qwen3.8-Flash-Next-Q4.gguf backend=metal
+ds4: Qwen BF16 n-grams: 95.37 GiB, disk reads only
+ds4: Metal device Apple M5 Max, 128.00 GiB RAM
+ds4: Metal 4 tensor API enabled for Tensor kernels
+ds4: drift-patch flags hc_stable=on norm_unify=on kv_raw_f32=off rope_exp2_log2=off math_safe=off tensor_matmul=on
+ds4: Metal model views created in 1.622 ms, residency requested in 473.247 ms, warmup 4.110 ms (mapped 71400.44 MiB from offset 10.51 MiB)
+ds4: Metal mapped mmaped model as 1 overlapping shared buffers
+ds4: metal backend initialized for graph diagnostics
+engine open: vocab=248320 model=Qwen3.8 Flash Next
+case 'qwen-invalid-tool-suffix': prefix=330 bytes, suffix=328 bytes, full=658 bytes
+  prefix_slice_matches_prefix_tokenization=yes (k=109)
+case 'qwen-suffix-leading-newline-space': prefix=330 bytes, suffix=28 bytes, full=358 bytes
+  prefix_slice_matches_prefix_tokenization=yes (k=109)
+case 'qwen-suffix-leading-prose': prefix=330 bytes, suffix=26 bytes, full=356 bytes
+  prefix_slice_matches_prefix_tokenization=yes (k=109)
+case 'qwen-suffix-leading-digit': prefix=330 bytes, suffix=28 bytes, full=358 bytes
+  prefix_slice_matches_prefix_tokenization=yes (k=109)
+case 'qwen-suffix-leading-hyphen': prefix=330 bytes, suffix=27 bytes, full=357 bytes
+  prefix_slice_matches_prefix_tokenization=yes (k=109)
+case 'qwen-suffix-leading-multibyte': prefix=330 bytes, suffix=37 bytes, full=367 bytes
+  prefix_slice_matches_prefix_tokenization=yes (k=109)
+case 'dsml-invalid-tool-suffix': prefix=275 bytes, suffix=280 bytes, full=555 bytes
+  prefix_slice_matches_prefix_tokenization=yes (k=70)
+case 'control-marker-led': prefix=330 bytes, suffix=35 bytes, full=365 bytes
+  prefix_slice_matches_prefix_tokenization=yes (k=109)

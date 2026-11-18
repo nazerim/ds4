@@ -110,6 +110,20 @@ string from `build_invalid_tool_call_error_suffix` (`:14585`), which dispatches 
   ordinary text, so cross-boundary BPE merges are plausible -- **and prod runs Qwen syntax**, so this fires on every malformed tool call.
 - `--inspect` cannot check the vocab either: `./ds4 --inspect -m gguf/...` exits *"another ds4 process is already running (pid 849)"*, i.e. the lock is
   global, so nothing in this area is probeable without a window.
+
+**RESULT, measured 2026-11-18 15:57 in a 97 s prod window: `PREFIX_STABILITY: PASS`, exit 0, 8/8 cases, every case with
+`prefix_slice_matches_prefix_tokenization=yes`.** Raw output: `PREFIX-STABILITY-RUN.{txt,err}`; binary `/tmp/kv_prefix_stability`;
+model `Qwen3.8-Flash-Next-Q4.gguf`; `vocab=248320` in stderr confirms a genuine load (3 s because Metal mmaps rather than copies).
+- Scope, stated narrowly: the boundary tested is the live-session position on the **invalid-tool-call path**, i.e. cut mid malformed tool
+  call, which is exactly where `append_rendered_suffix_to_live_session` operates. The Qwen suffix beginning with literal
+  `< |im_end| >` + `< |im_start| >user` + prose tokenises IDENTICALLY whether appended standalone or inside the full prompt (A=B, 192=192
+  ids), as do leading-newline-space, digit, hyphen, multibyte, the DSML form and the control-token form.
+- **Corroborating, not proof:** those spaced markers tokenise as ordinary text rather than one registered special (the ids at the boundary
+  are text fragments), so the merge hazard was genuinely live and simply did not occur.
+- **GAP, still untested:** normal conversation continuation cuts at a completed assistant turn, a different position, NOT covered by these
+  8 cases. Extending the case table needs no prod window (rebuild takes seconds), so this gap is my omission, not a constraint.
+- **Not obtained:** the GGUF `tokenizer.ggml.added_tokens` / special-token metadata. My reader hit MemoryError on a large array and I
+  stopped to restore prod rather than debug it. Marked unresolved, not disproved.
 Status: harness `tests/test_kv_prefix_stability.c` drafted and being revised to test these real shapes; NOT built, NOT run. Whether `< |im_end| >` is a
 registered special in `gguf/Qwen3.8-Flash-Next-Q4.gguf` is **UNVERIFIED** -- it decides whether this is a bug or a non-issue.
 
