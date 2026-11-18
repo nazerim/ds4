@@ -507,7 +507,10 @@ live-reuse prefill counted as 0, prompt cross-check only covered cold requests.
 
 **What the RFC should now be:** a small, evidence-backed upstream issue/PR about never-hit entries being first victims -- NOT the
 fork's retirement ladder (upstream has no retirement class). It must carry the limits: synthetic workload, constants untuned,
-one budget, no production claim. NOT POSTED; needs the independent review below and the owner's go.
+one budget, no production claim. NOT POSTED; needs the owner's go. INDEPENDENTLY VERIFIED after writing: an adversarial re-review on a different model re-derived every headline number
+from raw logs without reusing the scripts here (SURVIVES) and returned 4 corrections now folded into RESULTS.md -- lifetime percentages are
+match-order dependent (FIFO 75%<=10s vs LIFO 58%), zero-hit entries TIE so the `last_used` tiebreak picks the OLDER victim, u400 is a ceiling not an
+isolation, and the untuned 300 s half-life sits at this workload's p90 revisit gap (~315 s), so the remedy is validated at its fitness boundary.
 
 **Open:** replies differ between arms with different cache behaviour even on the SAME binary (u16a vs u400 agree 247/430) --
 recomputed vs loaded prefix state gives different temperature-0 output; unexplained and correctness-relevant. Boost constants

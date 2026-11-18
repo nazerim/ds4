@@ -15,8 +15,13 @@ All numbers by finish-line segmentation (`kvparse.py`, reviewed twice; 0 attribu
 Qwen3.8-Flash-Next-Q4, ctx 65536, M5 Max, sequential, temperature 0, thinking off, seeded schedule.
 Raw: `runs/*/{requests.jsonl,server.log.gz,meta.txt}`; tables: `runs/COMPARE-561.txt` (6 GiB),
 `runs/COMPARE-16G.txt`, `runs/COMPARE-FIX.txt`; re-derive with `python3 -I compare.py runs N arm...`.
+**Column note:** the evictions column is prefix-restricted by finish-line segmentation and reads 1-2 LOW against a raw `grep -c 'kv cache evicted'`
+(833->832, 903->902, 636->635, 454->453, 431->430): lines after the last finish, and the store-attribution shift, fall outside the prefix. Use the raw
+grep when comparing counts.
+**Independent verification:** an adversarial re-review (different model, its own segmentation, not reusing `kvparse.py`/`compare.py`) reproduced every
+figure above exactly, including all rebuilt-token sums and reply agreements, and returned SURVIVES with the corrections folded into this section.
 
-| budget | arm | cold % (returning turns) | rebuilt tokens | mean s | files at end | evictions |
+| budget | arm | cold % (returning turns) | rebuilt tokens | mean s | files at end | evictions (segmented) |
 |---|---|---|---|---|---|---|
 | 6 GiB (561 req) | fork F1 / F2 | 32.8 / 32.8 | 1.78 M | 3.5 / 3.4 | 29 | 832 |
 | 6 GiB | upstream U1 / U2 | 71.1 / 71.1 | 3.39 M | 6.2 | 11 | 902 |
@@ -32,16 +37,24 @@ Raw: `runs/*/{requests.jsonl,server.log.gz,meta.txt}`; tables: `runs/COMPARE-561
   and lookup design is fine; the victims chosen are not.
 - **Mechanism (measured + code):** upstream's score is `(effective_hits + 1) * tokens / file_size`
   (`ds4_kvstore_entry_eviction_score`) with a 6 h hit half-life and no recency term for never-hit entries. Entries hit even
-  once keep ~2x a fresh entry's score for hours, so every new checkpoint is the lowest score and goes first. Measured
+  once keep ~2x a fresh entry's score for hours, so new checkpoints sit at the bottom of the ranking. Precisely: a fresh entry TIES with every other
+  zero-hit entry (the constant +1 carries no recency term), and ties fall to the `last_used` tiebreak at `ds4_kvstore.c:586-592`, which picks the OLDER
+  entry first -- i.e. it discards the checkpoint most likely to be revisited. Measured
   (`lifetime.py`): 98-99 % of `disk-cache-full` victims had zero hits (u16a, u16b, u1), **median store->evict lifetime 5 s,
-  75 % evicted within 10 s of being written**; the cache freezes on old content (70 disk-hit events in u16a).
+  evicted within 10 s of being written**; the cache freezes on old content (70 disk-hit events in u16a).
+  **Precision on that 10 s figure (added by independent review):** stores are matched to evictions by `(tokens,size)` and up to 93 stores share some
+  evicted keys, so lifetime depends on match order: FIFO 5 s median / 75 % <=10 s, LIFO 8 s / 58 %, nearest 4 s / 78 %; log timestamps are 1 s resolution.
+  The qualitative claim (most victims are fresh, never-hit entries) is robust; the exact percentage is not.
 - **Remedy demonstrated on this workload:** a 20-line experimental boost for never-hit entries (x9 at birth, 300 s half-life,
   `ds4-ab-evictfix`, constants untuned) takes upstream from 63.4 % to 5.1 % cold, rebuilt tokens -87 %, mean latency 6.5 s ->
   1.6 s. With it, zero-hit victims fall 98 % -> 37 %, median lifetime 5 s -> 54 s, disk hits 70 -> 273.
 - The fork's retirement ladder is NOT what the data supports as the lesson: upstream shows no retirement class at all.
   The pre-registered criterion 2 (retirement-class clustering on upstream) is not met; a different, simpler mechanism is.
-- Same-arm repeats were bit-identical in every pair run (F1/F2, U1/U2, f16a/b, u16a/b), so run noise is ~0 under this
-  deterministic workload. `u400` and `u16fix` were single runs.
+- Same-arm repeats were bit-identical in every pair run (F1/F2, U1/U2, f16a/b, u16a/b). **That proves determinism, not robustness:** the workload is
+  seeded, so repeats agree by construction. Robustness needs workload and budget VARIANTS, not reruns. `u400` and `u16fix` were single runs.
+- `u400` is a CEILING, not a clean isolation: it differs from `u16a` only by budget (verified in `meta.txt`), but `u16fix` changes retention DURATION, so it
+  is an ordering + effective-capacity hybrid. "Eviction is the whole explanation" means "removing eviction removes the misses", not "victim-choice was
+  isolated from capacity".
 
 **Does NOT license**
 - Any production claim. Prod runs the fork at 256 GiB (resident 255.95 GiB, 636 retained-log evictions, 98.6 % `conversation-retired`)
@@ -50,6 +63,12 @@ Raw: `runs/*/{requests.jsonl,server.log.gz,meta.txt}`; tables: `runs/COMPARE-561
 - The boost constants (8.0, 300 s) as a recommendation: they are guesses, tested at ONE budget on ONE synthetic workload
   (12 live conversations, Zipf 1.1, median revisit 7 steps, concurrency 1, text-only, one novel). No sweep, no real traffic.
 - Anything about Linux/CUDA, vision, MTP, or concurrency 2.
+- **The 300 s half-life beyond this workload:** measured revisit gaps here are median 44 s, p75 122 s, p90 315 s, p95 491 s (n=352 returning turns) --
+  ~90 % fall inside one half-life, so the remedy is validated AT ITS FITNESS BOUNDARY. Longer gaps (real sessions) are untested and the boost has decayed
+  by then.
+- Robustness against a fresh-heavy/adversarial workload: a 9x boost for never-hit entries could thrash genuinely reusable stale entries. Not tested.
+- Implicit endorsement of output-dependence-on-cache: raising the hit rate CHANGES model outputs (open question below), so "cut cold rebuilds 63 % -> 5 %"
+  is not a pure win statement while that behaviour is unexplained.
 
 **Open / unexplained**
 - Replies diverge between arms with different cache behaviour: fork vs upstream agree 137-161/430-561, **and upstream vs itself
