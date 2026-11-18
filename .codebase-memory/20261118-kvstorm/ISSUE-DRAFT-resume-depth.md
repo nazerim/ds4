@@ -49,15 +49,25 @@ follows the schedule, not the route.
 
 ## Measured
 
-| comparison | differ | note |
+| comparison | fork | upstream `b3f5018` |
 |---|---|---|
-| cold **disk ON** vs cold **disk OFF** (same prompt, same binary) | 6 / 6 | no checkpoint read on either side |
-| cold disk ON vs resume at the cold boundary (`ctx=10240`) | 0 / 28 | also 0/16 at 11.6k–20.3k tokens, 512-token generations |
-| cold disk ON vs resume at a mid-prefill checkpoint (`ctx=8192`) | 15 / 16 | fork 8/8, upstream `b3f5018` 7/8 |
-| resume@8192 vs cold disk OFF (same 3505 tail) | 0 / 6 identical | the checkpoint is a faithful snapshot |
+| cold **disk ON** vs cold **disk OFF**, real prose ~12k tokens | **6 / 6 differ** | **4 / 6 differ** |
+| cold disk ON vs resume at the cold boundary (`ctx=10240`) | 0 / 28 differ | 0 / 8 differ |
+| cold disk ON vs resume at a mid-prefill checkpoint (`ctx=8192`) | 8 / 8 differ | 7 / 8 differ |
+| resume@8192 vs cold disk OFF (same merged tail chunk) | 6 / 6 **identical** | not run |
 
-Median character-level similarity of "differing" completions ~0.16–0.25: substantively different answers, not
-different wording. First difference typically ~100–230 characters in.
+The top row is the headline and needs no checkpoint read at all: same prompt, same binary, one flag different.
+Median character-level similarity where they differ is ~0.2-0.4 (range 0.059-0.757), and the first difference
+is typically ~100-230 characters in: substantively different answers, not different wording.
+
+The fork/upstream 6-vs-4 difference on the top row is **not** a claim that the fork is worse. At n=6 the
+Fisher exact two-sided p is 0.455; what is claimed is only that both builds change answers when the boundary
+moves (pooled 10/12).
+
+Upstream ran the *same* prompts (identical token counts, identical chunk schedules, calibration reproduced to
+six decimals) and two of the six came back byte-identical. A moved reduction order is a chance of flipping the
+argmax, not a guarantee of it - which is what makes this an amplification effect rather than corruption, and is
+why the `resume@8192 == cold-disk-off` cell is the load-bearing one for "the checkpoint is faithful".
 
 ## Not claimed
 
@@ -67,12 +77,10 @@ different wording. First difference typically ~100–230 characters in.
   rows) before concluding it.
 * **No claim that either completion is worse.** Both are fluent; the complaint is that output is a function of
   cache configuration and cache history, not quality.
-* **Rate on realistic prompts is not measured.** All figures above use a deliberately repetitive synthetic
-  corpus, which is the most favourable case for amplifying a near-tie. Treat this as "reproducibly sensitive",
-  not as "unreliable under normal traffic".
-* Not tested: vision sessions, speculative decoding/MTP, `--batched-session`, concurrency > 1, non-Qwen
-  models, prompts beyond ~20k tokens, and the `shutdown`/`evict` store reasons.
-* Nothing about CUDA or Linux: measured only on macOS/Metal.
+* **Sample size is small and the prompt range narrow.** Twelve realistic prompts in total across both builds,
+  all ~12k tokens of English technical prose. The repetitive synthetic corpus was tested first and showed the
+  same effect (6/6), so this is not a corpus artifact; but short prompts are unmeasured, where the tail chunk
+  is large relative to the 8192 prefix and the rate may well be lower.
 
 ## Why it matters
 
@@ -96,6 +104,7 @@ I would not attempt (2) without your view on the cost.
 
 ---
 
-*Before posting, still wants: (1) one run on a realistic (non-repetitive) long prompt, to bound how often this
-bites in normal use — the current numbers all come from repetitive synthetic prose; (2) confirmation the
-repro works from a plain `git clone` + `make` without my scripts; (3) the owner's decision.*
+*Pre-post checklist: (1) realistic prose - **done**, the effect holds (6/6 fork, 4/6 upstream).
+Still open: (2) confirm the repro works from a plain `git clone` + `make` without the scripts in this repo,
+and add one concrete prompt+completion pair to the repro so a maintainer can copy-paste it; (3) the owner's
+decision to post.*

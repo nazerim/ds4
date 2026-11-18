@@ -33,3 +33,28 @@ Stopping ds4-server (PID: 44093)...
 ds4-server stopped
 11-18 23:32:28 phase 1: disk ON
 measured 3.06 chars/token from real corpus
+  i=0  P=12555  ctx=0      chunks=8192+4096+267          chars=1391
+  i=1  P=11600  ctx=0      chunks=8192+2048+1360         chars=1192
+  i=2  P=12230  ctx=0      chunks=8192+2048+1990         chars=1442
+  i=3  P=11685  ctx=0      chunks=8192+2048+1445         chars=1153
+  i=4  P=12624  ctx=0      chunks=8192+4096+336          chars=1326
+  i=5  P=12345  ctx=0      chunks=8192+4096+57           chars=1382
+  schedules confirmed for expect_disk=on: [(8192, 2048, 1360), (8192, 2048, 1445), (8192, 2048, 1990), (8192, 4096, 57), (8192, 4096, 267), (8192, 4096, 336)]
+11-18 23:34:00 phase 1 exit=0 cpt=3.063960
+11-18 23:34:00 phase 2: disk OFF
+  i=0  P=12555  ctx=0      chunks=8192+4363              chars=1391
+  i=1  P=11600  ctx=0      chunks=8192+3408              chars=1381
+  i=2  P=12230  ctx=0      chunks=8192+4038              chars=1194
+  i=3  P=11685  ctx=0      chunks=8192+3493              chars=1153
+  i=4  P=12624  ctx=0      chunks=8192+4432              chars=1312
+  i=5  P=12345  ctx=0      chunks=8192+4153              chars=1415
+  schedules confirmed for expect_disk=off: [(8192, 3408), (8192, 3493), (8192, 4038), (8192, 4153), (8192, 4363), (8192, 4432)]
+11-18 23:35:27 phase 2 exit=0
+11-18 23:35:27 done
+11-18 23:35:32 restoring production
+Rotated previous log to ./log/ds4-qwen.log.20261118-233533
+Starting ds4-server on port 8002 with model gguf/Qwen3.8-Flash-Next-Q4.gguf (ctx: 524288)...
+Logging to ./log/ds4-qwen.log
+Qwen3.8: vision encoder gguf/mmproj-Qwen3.8-Flash-Next-Q8_0.gguf, batched-session 2, mtp 1, mixed-prefill-quantum 512
+ds4-server started (PID: 44346)
+11-18 23:35:39 prod answering on :8002

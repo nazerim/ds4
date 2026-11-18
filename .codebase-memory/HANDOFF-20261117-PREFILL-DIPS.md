@@ -530,15 +530,32 @@ engine is deterministic across processes (12/12). The single anomaly: the same p
 reproduced. That is the live lead: if checkpoint survival (arbitrary, per the density finding) picks resume depth,
 then eviction can change answers, rarely.
 
-DECISIVE TEST RUN, same evening, on PURPOSE (`20261118-kvstorm/resume_depth_probe.py`): resuming an 11,699-token prompt from the mid-prefill
-`reason=continued` checkpoint at ctx=8192 changes the completion vs cold prefill -- fork 8/8 differ, upstream b3f5018 7/8
-differ (median similarity ~0.25, first difference ~170-230 chars in) -- while resuming from the aligned `reason=cold`
-checkpoint at ctx=10240 is byte-identical to cold in 28/28 comparisons. So: a checkpoint the engine treats as a valid
-SHA-matched prefix does not restore equivalent state. Both builds => NOT a fork regression. Mechanism NOT established
-(candidate: state that completes only at end-of-prefill, or per-layer KV compression ratios disagreeing on an 8192
-boundary). This also explains the u16a-vs-u400 reply divergence that the earlier cache-stability results could not.
-Prior art searched (read-only): #1266/#1186/#174 are about continued checkpoints being EVICTED; nothing on output
-changing. Draft issue written but NOT POSTED -- `20261118-kvstorm/ISSUE-DRAFT-resume-depth.md` needs owner's go.
+FINAL, SAME NIGHT -- AND IT REFUTES THE SENTENCE ABOVE: "a checkpoint ... does not restore equivalent state" is WRONG.
+The checkpoint is faithful. `20261118-kvstorm/run-chunkshape.sh` / `20261118-kvstorm/run-shapereal.sh` removed the mid-prefill route entirely by
+starting the SAME binary without `--kv-disk-dir`: with the cache off there is no cold-store sync, so cold prefill
+loses its extra boundary and runs the shallow resume's chunk shape. Result, real prose ~12k tokens:
+
+  cold disk ON vs cold disk OFF      fork 6/6 differ    upstream b3f5018 4/6 differ   (pooled 10/12)
+  resume@8192 vs cold disk OFF       6/6 IDENTICAL
+
+So the finding is NOT about checkpoints: **greedy completions are not invariant to prefill chunk schedule, and
+enabling the disk cache changes that schedule** (the cold checkpoint write syncs the session to cold_store_len
+mid-prefill -- ds4_server.c:16207-16274, gated on s->kv.enabled, set only by --kv-disk-dir). Upstream documents
+the reduction-order premise (ds4.c:1059); it does not document this consequence. Production runs with
+--kv-disk-dir and cold_max 30000, so every prod prompt of 512-30k tokens is served in the split-schedule regime.
+H1 (lost state) is refuted; H2 (chaotic amplification) is confirmed -- and the 2/6 upstream agreements are the
+tell: a moved reduction order only flips the argmax at a near-tie, which corruption would not do.
+Fork 6/6 vs upstream 4/6 is NOT a fork-worse claim (Fisher exact p=0.455 at n=6); verified by me, not inherited.
+
+Also retracted here: my "161 comparisons" headline was structurally guaranteed to pass -- all 17 resumes in the
+clean run landed on a cold chunk boundary, so byte-identity was forced by construction (off-boundary: 0).
+The u16a-vs-u400 divergence is now explained: different surviving checkpoints => different resume depth =>
+different chunk schedule => different answer.
+
+Prior art searched (read-only): #1266/#1186/#174 concern continued checkpoints being EVICTED; nothing found on
+output changing between chunk schedules. Draft issue rewritten (it no longer accuses the checkpoint) and still
+NOT POSTED -- `20261118-kvstorm/ISSUE-DRAFT-resume-depth.md` needs the owner's go. Full study:
+`20261118-kvstorm/CACHE-DIVERGENCE.md`.
 
 MECHANISM, corrected same day by an independent Opus pass I then verified myself: the harm is the DENSITY term, not the missing age term.
 `size(MiB)=113.518+0.0300516*tokens` (max residual 0.0073 over 1342 lines, re-fit by me), so a positive fixed payload intercept makes

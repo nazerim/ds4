@@ -216,6 +216,30 @@ and 30k tokens is in the split-schedule regime** — production is serving the "
 and those differ from what the same binary says with the cache off. This is not a regression introduced by the
 fork: it comes from the cold-checkpoint write path that upstream shares.
 
+### Upstream arm: same effect, 4/6 — and the 2 agreements are informative
+
+`MODE=upstream` reruns the identical comparison on the `b3f5018` build. Calibration returned the same
+3.063960 chars/token and every prompt landed on the same token count (12,555 / 11,600 / 12,230 / 11,685 /
+12,624 / 12,345) with the same chunk schedules, so the two builds really were handed the same inputs:
+
+| prompt | tokens | schedule (both builds) | fork | upstream `b3f5018` |
+|---|---|---|---|---|
+| i=0 | 12,555 | 8192+4096+267 vs 8192+4363 | DIFFER 0.683 | **SAME 1.000** |
+| i=1 | 11,600 | 8192+2048+1360 vs 8192+3408 | DIFFER 0.059 | DIFFER 0.222 |
+| i=2 | 12,230 | 8192+2048+1990 vs 8192+4038 | DIFFER 0.407 | DIFFER 0.179 |
+| i=3 | 11,685 | 8192+2048+1445 vs 8192+3493 | DIFFER 0.305 | **SAME 1.000** |
+| i=4 | 12,624 | 8192+4096+336 vs 8192+4432 | DIFFER 0.477 | DIFFER 0.757 |
+| i=5 | 12,345 | 8192+4096+57 vs 8192+4153 | DIFFER 0.251 | DIFFER 0.296 |
+
+**The effect reproduces upstream: 4/6 (67 %) versus the fork's 6/6 (100 %).** Two points follow.
+
+- **Do not read the 6-vs-4 gap as "the fork is worse."** At n=6 that difference is well inside noise (Fisher
+  exact p ~ 0.5). What is established is that *both* builds change answers when the boundary changes.
+- **The two agreements strengthen the amplification reading rather than weakening the finding.** A changed
+  reduction order is not a guarantee of a changed answer — it only matters where greedy decoding sits on a
+  near-tie. Same schedule change, six prompts, sometimes the argmax survives. That is precisely what
+  "chaotic amplification" predicts and precisely what a state-corruption bug would not produce.
+
 ### Status versus upstream
 
 Searched `antirez/ds4` (read-only) for "continued checkpoint", "mid-prefill checkpoint", "cache hit wrong
