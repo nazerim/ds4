@@ -108,6 +108,12 @@ reports perfect agreement is a prompt to verify the mechanism fired.**
 Newest instance: `./ds4_test --server` passed and proved nothing — `ds4_test` links `ds4.c`; the
 suite that compiles `ds4_server.c` is `make test-server-logic` → `ds4_server_test`.
 
+Same class, twice in the follow-up session: `git ls-tree -q` and `git verify-commit -q` /
+`verify-tag -q` do not exist, and each reported a **false failure** on known-good input (tracked
+`AGENTS.md` as MISSING; an unsigned annotated tag as a verification failure). Suppress streams with
+`>/dev/null 2>&1` instead of reaching for `-q`. **Every probe needs a case whose correct answer is
+already known** — that is the only reason both were caught instead of banked as findings.
+
 ## 8. Resume cold, next session
 
 No window needed for any of these — run from `.codebase-memory/` (paths below are relative to it):
