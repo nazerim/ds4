@@ -96,10 +96,16 @@ def looks_like_path(token: str) -> bool:
     return bool(LOOKS_LIKE_FILE.match(token))
 
 
-def resolves(token: str) -> bool:
+def resolves(token: str, doc: str | None = None) -> bool:
     if token.startswith(("/", "~")):
         return os.path.exists(os.path.expanduser(token))
     base = os.path.basename(token)
+    # A doc may cite a sibling by relative name (`RESULTS.md` inside its own folder).
+    # Checking the doc's own directory first keeps such citations from being reported
+    # as rot; the ROOTS scan below still covers repo-root-relative and bare names.
+    if doc and (os.path.exists(os.path.join(os.path.dirname(doc), token))
+                or os.path.exists(os.path.join(os.path.dirname(doc), base))):
+        return True
     return any(os.path.exists(os.path.join(root, token))
                or os.path.exists(os.path.join(root, base)) for root in ROOTS)
 
@@ -122,7 +128,7 @@ def scan() -> dict:
             # "see tools/foo.py" and "`tools/foo.py`" are both tested.
             for raw in (token, token.split()[-1] if " " in token else token):
                 candidate = canonical(raw)
-                if looks_like_path(candidate) and not resolves(candidate):
+                if looks_like_path(candidate) and not resolves(candidate, doc):
                     if candidate not in whitelisted:
                         found.setdefault(doc, set()).add(candidate)
                     break

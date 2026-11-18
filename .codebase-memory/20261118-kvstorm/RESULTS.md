@@ -33,7 +33,8 @@ figure above exactly, including all rebuilt-token sums and reply agreements, and
 **Pre-registered reading, now resolved**
 - Capacity is NOT the explanation (the earlier leading hypothesis is refuted): upstream goes 71 % -> 63 % cold with 2.7x the
   budget, and the fork at 6 GiB (29 files) beats upstream at 16 GiB (34 files).
-- **Eviction is the whole explanation for upstream's misses**: with eviction removed (`u400`) upstream is 0 % cold. Its storage
+- **Eviction is the whole explanation for upstream's misses** ("whole" = "removing eviction removes the misses"; read as a ceiling, not a clean
+  isolation of victim-choice from capacity -- see the u400 bullet under 'Does NOT license'): with eviction removed (`u400`) upstream is 0 % cold. Its storage
   and lookup design is fine; the victims chosen are not.
 - **Mechanism (measured + code):** upstream's score is `(effective_hits + 1) * tokens / file_size`
   (`ds4_kvstore_entry_eviction_score`) with a 6 h hit half-life and no recency term for never-hit entries. Entries hit even
