@@ -522,6 +522,15 @@ helper. Also settled from GGUF metadata (`20261118-kvstorm/check_marker_specials
 the SPACED markers the Qwen error builder emits are NOT special tokens (they tokenise as text), so the hazard was live and the PASS is
 meaningful. Probe exit codes de-clashed from the engine's own `exit(2)`: 0 PASS / 1 FAIL / 3 INVALID / 4 usage / 5 could-not-run.
 
+CACHE-PATH OUTPUT DIVERGENCE -- measured; see `20261118-kvstorm/CACHE-DIVERGENCE.md`. 161 controlled comparisons,
+1 divergence. Cold rebuild vs disk resume is bit-identical on the fork AND upstream b3f5018 at arms-scale prompts
+(16/16 at 11.6k-20.3k tokens, generations to 512 tok, resume loading up to 91% of a prompt from disk), and the
+engine is deterministic across processes (12/12). The single anomaly: the same prompt resumed at checkpoint depth
+10240 vs 8192 matched for 298 chars then diverged (difflib 0.633) -- found by accident, never deliberately
+reproduced. That is the live lead: if checkpoint survival (arbitrary, per the density finding) picks resume depth,
+then eviction can change answers, rarely. Decisive test is written in that doc -- force deep vs shallow resume on
+one prompt, 20 repeats, ~1 window.
+
 MECHANISM, corrected same day by an independent Opus pass I then verified myself: the harm is the DENSITY term, not the missing age term.
 `size(MiB)=113.518+0.0300516*tokens` (max residual 0.0073 over 1342 lines, re-fit by me), so a positive fixed payload intercept makes
 `tokens/size` strictly increasing in tokens => for `hits==0` upstream simply evicts the fewest-token file. Proof in the log: u16a wrote 309

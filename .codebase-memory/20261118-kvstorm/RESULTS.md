@@ -140,6 +140,15 @@ the existing six-hour hit decay"; `ds4_kvstore.c` + `ds4_server.c`); **#444/#711
 attempt at freshness decay. Nothing merged (`origin/main` = `b3f5018`), so it is real and unfixed -- but **do NOT file a new issue**; at most a short
 measured-evidence comment on #986/#1170 with figures corrected per `PRIOR-ART-AND-CORRECTIONS.md` s4.
 
+**Cache-dependent outputs -- SUPERSEDED IN DETAIL by `CACHE-DIVERGENCE.md`** (161 controlled comparisons,
+1 divergence). Headline corrections to the paragraph below: (a) cold rebuild vs disk resume is bit-identical on
+the fork AND on upstream `b3f5018` at arms-scale prompts -- 16/16 at 11.6k-20.3k tokens with generations to 512,
+resumes loading up to 91 % of the prompt from disk; (b) the engine is deterministic across processes (12/12),
+ruling out my cross-process hypothesis; (c) the ONE real anomaly is that the same prompt resumed at checkpoint
+depth `10240` vs `8192` matched for 298 characters then diverged (difflib 0.633) -- found accidentally through a
+harness bug, never deliberately reproduced; (d) "divergence starts at request ~1" was wrong for that arm pair
+(first divergence is request 53; all 78 turn-1 replies agree). Original text retained for the trail:
+
 **Cache-dependent outputs -- RESOLVED as benign FP numerics, one risk left open.** Independent investigation (`/tmp/cachediver/REPORT.md`) plus my own
 verification: upstream's own comment at `ds4.c:1052-1053` says *"changing chunk boundaries also changes floating-point reduction order"*; the f16<->f32
 payload converters are separate unused variants, so the span load is a raw byte dump with no requantisation; **first divergence is request 53 and all 78

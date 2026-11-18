@@ -45,3 +45,7 @@ Logging to ./log/ds4-qwen.log
 Qwen3.8: vision encoder gguf/mmproj-Qwen3.8-Flash-Next-Q8_0.gguf, batched-session 2, mtp 1, mixed-prefill-quantum 512
 ds4-server started (PID: 19924)
 11-18 17:15:02 prod answering on :8002
+
+=== RECOMPUTED from the saved round files ===
+CROSS-PROCESS (two separate engine processes, identical prompts, no shared cache state)
+  prompts compared: 12   identical: 12   divergent: 0
