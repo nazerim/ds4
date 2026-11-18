@@ -11107,6 +11107,11 @@ struct server {
     tool_map_index tool_map;   /* id -> file; guarded by tool_mu */
     server_image_cache image_cache; /* Protected by inference_mu. */    bool disable_exact_dsml_tool_replay;
     bool enable_cors;
+    /* Opt-out for prefill-plan parity (see the cold-anchor stop in
+     * server_run_job): with the disk cache off, still insert the intermediate
+     * sync the storing path would have inserted, so a request's chunk plan --
+     * and therefore greedy output -- does not depend on --kv-disk-dir. */
+    bool disable_kv_cache_cold_stop_parity;
     pthread_mutex_t tool_mu;
     pthread_mutex_t kv_mu;
     pthread_mutex_t inference_mu;
@@ -16204,9 +16209,11 @@ static void generate_job_inner(server *s, server_slot *slot, job *j) {
     ds4_session_set_display_progress(slot->session, server_progress_cb, &progress);
     ds4_session_dspark_stats_begin(slot->session);
 
+    /* The stop below is what splits the prefill, so it is computed even when
+     * the disk cache is off: the chunk plan must be a function of the request,
+     * not of whether a checkpoint will be written at that stop. */
     int cold_store_len = 0;
     if (!multimodal && cached == 0 &&
-        s->kv.enabled &&
         prompt_for_sync->len >= s->kv.opt.min_tokens &&
         s->kv.opt.cold_max_tokens > 0 &&
         prompt_for_sync->len <= s->kv.opt.cold_max_tokens)
@@ -16218,7 +16225,9 @@ static void generate_job_inner(server *s, server_slot *slot, job *j) {
                          anchor : kv_cache_store_len(&s->kv, prompt_for_sync->len);
     }
     int suppressed_continued_last = -1;
-    if (cold_store_len >= s->kv.opt.min_tokens) {
+    const bool cold_stop = cold_store_len >= s->kv.opt.min_tokens &&
+                           cold_store_len < prompt_for_sync->len;
+    if (s->kv.enabled && cold_store_len >= s->kv.opt.min_tokens) {
         /* A cold checkpoint can land exactly on the continued-checkpoint
          * frontier.  The prefill progress callback would then write the same
          * prefix as "continued" while we are intentionally stopping there to
@@ -16229,9 +16238,8 @@ static void generate_job_inner(server *s, server_slot *slot, job *j) {
             kv_cache_slot_suppress_continued(s, slot, cold_store_len);
     }
 
-    if (s->kv.enabled &&
-        cold_store_len >= s->kv.opt.min_tokens &&
-        cold_store_len < prompt_for_sync->len)
+    if (cold_stop &&
+        (s->kv.enabled || !s->disable_kv_cache_cold_stop_parity))
     {
         ds4_tokens prefix = {0};
         tokens_copy_prefix(&prefix, prompt_for_sync, cold_store_len);
@@ -16255,14 +16263,16 @@ static void generate_job_inner(server *s, server_slot *slot, job *j) {
             send_prefill_failure_response(s, j, &progress, ctx_span, req_flags, err);
             return;
         }
-        if (kv_cache_store_live_prefix(s, slot, prompt_for_sync,
-                                       cold_store_len, "cold")) {
-            kv_cache_slot_note_store(slot, cold_store_len);
-            suppressed_continued_last = -1;
-        } else {
-            kv_cache_slot_restore_suppressed(slot, suppressed_continued_last,
-                                             cold_store_len);
-            suppressed_continued_last = -1;
+        if (s->kv.enabled) {
+            if (kv_cache_store_live_prefix(s, slot, prompt_for_sync,
+                                           cold_store_len, "cold")) {
+                kv_cache_slot_note_store(slot, cold_store_len);
+                suppressed_continued_last = -1;
+            } else {
+                kv_cache_slot_restore_suppressed(slot, suppressed_continued_last,
+                                                 cold_store_len);
+                suppressed_continued_last = -1;
+            }
         }
         ds4_tokens_free(&prefix);
     }
@@ -16315,7 +16325,7 @@ static void generate_job_inner(server *s, server_slot *slot, job *j) {
                req_flags[0] ? " " : "",
                req_flags,
                now_sec() - t0);
-    if (cold_store_len == prompt_for_sync->len) {
+    if (s->kv.enabled && cold_store_len == prompt_for_sync->len) {
         if (!multimodal && kv_cache_store_live_prefix(s, slot, prompt_for_sync,
                                        cold_store_len, "cold")) {
             kv_cache_slot_note_store(slot, cold_store_len);
@@ -18338,6 +18348,7 @@ typedef struct {
     kv_cache_options kv_cache;
     bool kv_cache_reject_different_quant;
     bool disable_exact_dsml_tool_replay;
+    bool disable_kv_cache_cold_stop_parity;
     int tool_memory_max_ids;
     bool enable_cors;
     int batched_sessions;
@@ -18624,6 +18635,8 @@ static server_config parse_options(int argc, char **argv) {
             c.kv_cache_reject_different_quant = true;
         } else if (!strcmp(arg, "--disable-exact-dsml-tool-replay")) {
             c.disable_exact_dsml_tool_replay = true;
+        } else if (!strcmp(arg, "--disable-kv-cache-cold-stop-parity")) {
+            c.disable_kv_cache_cold_stop_parity = true;
         } else if (!strcmp(arg, "--tool-memory-max-ids")) {
             c.tool_memory_max_ids = parse_int_arg(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--quality")) {
@@ -18892,6 +18905,7 @@ int main(int argc, char **argv) {
     s.last_prefill_slot = slot_count - 1;
     s.default_tokens = cfg.default_tokens;
     s.disable_exact_dsml_tool_replay = cfg.disable_exact_dsml_tool_replay;
+    s.disable_kv_cache_cold_stop_parity = cfg.disable_kv_cache_cold_stop_parity;
     s.tool_mem.max_entries = cfg.tool_memory_max_ids;
     s.enable_cors = cfg.enable_cors;
     s.slots = xmalloc((size_t)slot_count * sizeof(*s.slots));
@@ -18928,6 +18942,13 @@ int main(int argc, char **argv) {
         }
     }
 
+    /* Align the continued-checkpoint grid to the engine's effective prefill
+     * chunk (explicit setting, env override, or backend default) so anchors
+     * actually land on chunk boundaries (kv_cache_continued_step).  Hoisted out
+     * of the dir branch on purpose: the cold-anchor stop position has to be
+     * computed identically with and without a disk cache, otherwise the prefill
+     * chunk plan depends on --kv-disk-dir and so does greedy output. */
+    cfg.kv_cache.prefill_chunk = (int)ds4_engine_effective_prefill_chunk(engine);
     if (cfg.kv_disk_dir) {
         uint64_t model_fp = ds4_kvstore_model_fingerprint(cfg.engine.model_path);
         /* The vision encoder sidecar is part of the weights that produce the
@@ -18940,12 +18961,18 @@ int main(int argc, char **argv) {
                 ds4_kvstore_model_fingerprint(cfg.engine.vision_path);
             model_fp ^= vision_fp * 0x9E3779B97F4A7C15ull;
         }
-        /* Align the continued-checkpoint grid to the engine's effective prefill
-         * chunk (explicit setting, env override, or backend default) so anchors
-         * actually land on chunk boundaries (kv_cache_continued_step). */
-        cfg.kv_cache.prefill_chunk = (int)ds4_engine_effective_prefill_chunk(engine);
         kv_cache_open(&s.kv, cfg.kv_disk_dir, cfg.kv_disk_space_mb,
                       cfg.kv_cache_reject_different_quant, model_fp, cfg.kv_cache);
+    } else {
+        /* No disk cache.  Keep the same thresholds live so the cold-anchor stop
+         * is computed exactly as it would be with one.  Nothing is opened and
+         * nothing is written -- kc.enabled stays false, so every store path
+         * returns early -- but a request's chunk plan stops depending on
+         * --kv-disk-dir. */
+        s.kv.opt = cfg.kv_cache;
+        server_log(DS4_LOG_DEFAULT,
+                   "ds4-server: disk KV cache disabled; prefill plan parity %s",
+                   s.disable_kv_cache_cold_stop_parity ? "off" : "on");
     }
     if (s.disable_exact_dsml_tool_replay) {
         server_log(DS4_LOG_DEFAULT,
