@@ -122,3 +122,91 @@ prompts compared: 1   identical: 1 (100.0%)   divergent: 0 (0.0%)
 median completion_tokens=32 (max_tokens=32)
 results: /Users/naz/Projects/ds4/.codebase-memory/20261118-kvstorm/runs/cdiv-preflight.jsonl  -- cross-check the server log for 'kv cache hit' on each pass-2 request
 11-18 16:59:40 preflight ok (disk-hit lines 0 -> 1): mode=multi-turn x5 x3 convs, max_tokens=256
+  conv=0 turn=1 P=2961   SAME
+  conv=0 turn=2 P=3072   SAME
+  conv=0 turn=3 P=3182   SAME
+  conv=0 turn=4 P=3292   SAME
+  conv=0 turn=5 P=3402   SAME
+  conv=1 turn=1 P=2961   SAME
+  conv=1 turn=2 P=3072   SAME
+  conv=1 turn=3 P=3182   SAME
+  conv=1 turn=4 P=3292   SAME
+  conv=1 turn=5 P=3402   SAME
+  conv=2 turn=1 P=2961   SAME
+  conv=2 turn=2 P=3071   SAME
+  conv=2 turn=3 P=3189   SAME
+  conv=2 turn=4 P=3307   SAME
+  conv=2 turn=5 P=3425   SAME
+
+multi-turn turns compared: 15   divergent: 0
+11-18 17:00:26 probe exit=0
+11-18 17:00:26 server-side: disk-hit lines=6  live-miss lines=17 (hits should be >= 12)
+11-18 17:00:26 done
+11-18 17:00:31 restoring production
+Rotated previous log to ./log/ds4-qwen.log.20261118-170031
+Starting ds4-server on port 8002 with model gguf/Qwen3.8-Flash-Next-Q4.gguf (ctx: 524288)...
+Logging to ./log/ds4-qwen.log
+Qwen3.8: vision encoder gguf/mmproj-Qwen3.8-Flash-Next-Q8_0.gguf, batched-session 2, mtp 1, mixed-prefill-quantum 512
+ds4-server started (PID: 14757)
+11-18 17:00:37 prod answering on :8002
+11-18 17:01:48 stopping production (idle-verified first) MODE=upstream wt=/Users/naz/Projects/ds4-ab-upstream
+Stopping ds4-server (PID: 14757)...
+ds4-server stopped
+11-18 17:01:53 starting isolated engine on :8003
+11-18 17:01:58 preflight: one prompt, expecting a store and a disk hit
+  WARNING: replies stopped early, so long-generation divergence is NOT tested. Make the prompt demand more output or raise the ceiling.
+  0   P=2665   target=4096   SAME
+
+prompts compared: 1   identical: 1 (100.0%)   divergent: 0 (0.0%)
+median completion_tokens=32 (max_tokens=32)
+results: /Users/naz/Projects/ds4/.codebase-memory/20261118-kvstorm/runs/cdiv-preflight.jsonl  -- cross-check the server log for 'kv cache hit' on each pass-2 request
+11-18 17:02:02 preflight ok (disk-hit lines 0 -> 1): mode=multi-turn x5 x3 convs, max_tokens=768
+  0   P=2665   target=4096   SAME
+  1   P=3603   target=6144   SAME
+  2   P=4800   target=8192   SAME
+  3   P=6528   target=12288  SAME
+  4   P=8979   target=16384  SAME
+  5   P=2330   target=4096   SAME
+  6   P=3354   target=6144   SAME
+  7   P=4512   target=8192   SAME
+  8   P=7168   target=12288  SAME
+  9   P=8614   target=16384  SAME
+  10  P=2460   target=4096   SAME
+  11  P=3213   target=6144   SAME
+
+prompts compared: 12   identical: 12 (100.0%)   divergent: 0 (0.0%)
+median completion_tokens=214 (max_tokens=768)
+results: /Users/naz/Projects/ds4/.codebase-memory/20261118-kvstorm/runs/cachediver-single.jsonl  -- cross-check the server log for 'kv cache hit' on each pass-2 request
+11-18 17:04:34 single-turn probe exit=0
+  conv=0 turn=1 P=2961   SAME
+  conv=0 turn=2 P=3072   SAME
+  conv=0 turn=3 P=3178   SAME
+  conv=0 turn=4 P=3284   SAME
+  conv=0 turn=5 P=3390   SAME
+  conv=1 turn=1 P=2961   SAME
+  conv=1 turn=2 P=3072   SAME
+  conv=1 turn=3 P=3182   SAME
+  conv=1 turn=4 P=3292   SAME
+  conv=1 turn=5 P=3402   SAME
+  conv=2 turn=1 P=2961   SAME
+  conv=2 turn=2 P=3070   SAME
+  conv=2 turn=3 P=3188   SAME
+  conv=2 turn=4 P=3306   SAME
+  conv=2 turn=5 P=3424   SAME
+
+multi-turn turns compared: 15   divergent: 0
+11-18 17:05:26 multi-turn probe exit=0
+11-18 17:05:26 server-side: disk-hit lines=19  live-miss lines=53 (hits should be >= 12)
+11-18 17:05:26 done
+11-18 17:05:31 restoring production
+Rotated previous log to ./log/ds4-qwen.log.20261118-170531
+Starting ds4-server on port 8002 with model gguf/Qwen3.8-Flash-Next-Q4.gguf (ctx: 524288)...
+Logging to ./log/ds4-qwen.log
+Qwen3.8: vision encoder gguf/mmproj-Qwen3.8-Flash-Next-Q8_0.gguf, batched-session 2, mtp 1, mixed-prefill-quantum 512
+ds4-server started (PID: 14927)
+11-18 17:05:38 prod answering on :8002
+11-18 17:16:12 stopping production (idle-verified first) MODE=fork wt=/Users/naz/Projects/ds4
+Stopping ds4-server (PID: 19924)...
+ds4-server stopped
+11-18 17:16:17 starting isolated engine on :8003
+11-18 17:16:22 preflight: one prompt, expecting a store and a disk hit

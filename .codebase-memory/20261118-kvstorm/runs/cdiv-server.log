@@ -2,40 +2,18 @@ ds4: Qwen BF16 n-grams: 95.37 GiB, disk reads only
 ds4: Metal device Apple M5 Max, 128.00 GiB RAM
 ds4: Metal 4 tensor API enabled for Tensor kernels
 ds4: drift-patch flags hc_stable=on norm_unify=on kv_raw_f32=off rope_exp2_log2=off math_safe=off tensor_matmul=on
-ds4: Metal model views created in 1.622 ms, residency requested in 457.024 ms, warmup 3.937 ms (mapped 71400.44 MiB from offset 10.51 MiB)
+ds4: Metal model views created in 1.750 ms, residency requested in 472.438 ms, warmup 3.941 ms (mapped 71400.44 MiB from offset 10.51 MiB)
 ds4: Metal mapped mmaped model as 1 overlapping shared buffers
 ds4: metal backend initialized for graph diagnostics
 ds4: memory: KV 2.08 GiB (raw 1.63 + compressed 0.46) + buffers 8.68 GiB + resident model 69.73 GiB = 80.49 GiB planned
 ds4: memory detail: ctx=65536 prefill_cap=8192 raw_kv_rows=65536 compressed_kv_rows=16385 backend=metal
-1118 16:59:31 ds4-server: context buffers 11024.12 MiB (ctx=65536, backend=metal, prefill_chunk=8192, raw_kv_rows=65536, compressed_kv_rows=16385)
-1118 16:59:32 ds4-server: KV disk cache /Volumes/FireCuda520/ds4-ab-cdiv (budget=32768 MiB, cross-quant=accept, min=512, cold_max=30000, continued=10000, trim=32, align=2048, hit_half_life=21600s)
-1118 16:59:32 ds4-server: KV retention anchor_step=8192 continued_step=8192 (doubles above 49152 tokens) prefill_chunk=4096 small_dense=49152 tail=2 mid_spacing=131072 min_anchors=4 max_conversations=0 model_fp=2241966725151111098
-1118 16:59:32 ds4-server: listening on http://127.0.0.1:8003
-1118 16:59:36 ds4-server: chat ctx=0..2665:2665 prompt start
-1118 16:59:37 ds4-server: chat ctx=0..2665:2665 prefill chunk 2048/2665 (76.8%) chunk=0.00 t/s avg=1656.81 t/s 1.236s
-1118 16:59:37 ds4-server: kv cache stored tokens=2048 trimmed=617 reason=cold key=token-text sha=52254330 size=175.07 MiB save=56.4 ms
-1118 16:59:38 ds4-server: chat ctx=0..2665:2665 prefill chunk 2665/2665 (100.0%) chunk=936.04 t/s avg=1406.13 t/s 1.895s
-1118 16:59:38 ds4-server: chat ctx=0..2665:2665 prompt done 1.895s
-1118 16:59:38 ds4-server: DSML token not found in vocab; suppression disabled
-1118 16:59:38 ds4-server: chat ctx=2665..2697:32 gen=32 decoding chunk=58.53 t/s avg=58.53 t/s 0.547s
-1118 16:59:38 ds4-server: chat ctx=0..2665:2665 gen=32 finish=length 2.442s
-1118 16:59:38 ds4-server: live kv cache miss live=2697 prompt=23 common=1 vision=match reason=token-mismatch
-1118 16:59:38 ds4-server: kv cache stored tokens=2697 trimmed=0 reason=evict key=token-text sha=0af2757a delta=2048..2697 size=133.04 MiB save=39.1 ms
-1118 16:59:38 ds4-server: chat ctx=0..23:23 prompt start
-1118 16:59:38 ds4-server: chat ctx=0..23:23 prefill chunk 23/23 (100.0%) chunk=0.00 t/s avg=259.49 t/s 0.089s
-1118 16:59:38 ds4-server: chat ctx=0..23:23 prompt done 0.089s
-1118 16:59:38 ds4-server: DSML token not found in vocab; suppression disabled
-1118 16:59:39 ds4-server: chat ctx=23..26:3 gen=3 decoding chunk=56.85 t/s avg=56.85 t/s 0.053s
-1118 16:59:39 ds4-server: chat ctx=0..23:23 gen=3 finish=stop 0.142s
-1118 16:59:39 ds4-server: live kv cache miss live=26 prompt=2665 common=1 vision=match reason=token-mismatch
-1118 16:59:39 ds4-server: kv cache hit text tokens=2048 text=10957 quant=4 key=token-text chain=1 load=11.1 ms file=/Volumes/FireCuda520/ds4-ab-cdiv/5225433062a2a7d216a534fc884f775f22fd415f.kv
-1118 16:59:39 ds4-server: chat ctx=2048..2665:617 prompt start
-1118 16:59:39 ds4-server: chat ctx=2048..2665:617 prefill chunk 617/617 (100.0%) chunk=0.00 t/s avg=1073.11 t/s 0.575s
-1118 16:59:39 ds4-server: chat ctx=2048..2665:617 prompt done 0.575s
-1118 16:59:39 ds4-server: DSML token not found in vocab; suppression disabled
-1118 16:59:40 ds4-server: chat ctx=2665..2697:32 gen=32 decoding chunk=58.72 t/s avg=58.72 t/s 0.545s
-1118 16:59:40 ds4-server: chat ctx=2048..2665:617 gen=32 finish=length 1.120s
-1118 16:59:40 ds4-server: live kv cache miss live=2697 prompt=2961 common=4 vision=match reason=token-mismatch
-1118 16:59:40 ds4-server: chat ctx=0..2961:2961 prompt start
-1118 16:59:41 ds4-server: chat ctx=0..2961:2961 prefill chunk 2048/2961 (69.2%) chunk=0.00 t/s avg=1736.30 t/s 1.180s
-1118 16:59:41 ds4-server: kv cache stored tokens=2048 trimmed=913 reason=cold key=token-text sha=b35e6d05 size=175.07 MiB save=47.6 ms
+1118 17:16:17 ds4-server: context buffers 11024.12 MiB (ctx=65536, backend=metal, prefill_chunk=8192, raw_kv_rows=65536, compressed_kv_rows=16385)
+1118 17:16:18 ds4-server: KV disk cache /Volumes/FireCuda520/ds4-ab-cdiv (budget=32768 MiB, cross-quant=accept, min=512, cold_max=30000, continued=10000, trim=32, align=2048, hit_half_life=21600s)
+1118 17:16:18 ds4-server: KV retention anchor_step=8192 continued_step=8192 (doubles above 49152 tokens) prefill_chunk=4096 small_dense=49152 tail=2 mid_spacing=131072 min_anchors=4 max_conversations=0 model_fp=2241966725151111098
+1118 17:16:18 ds4-server: listening on http://127.0.0.1:8003
+1118 17:16:22 ds4-server: chat ctx=0..10460:10460 prompt start
+1118 17:16:26 ds4-server: chat ctx=0..10460:10460 prefill chunk 8192/10460 (78.3%) chunk=0.00 t/s avg=1843.61 t/s 4.443s
+1118 17:16:27 ds4-server: kv cache stored tokens=8192 trimmed=0 reason=continued key=token-text sha=660df7c0 size=359.72 MiB save=104.5 ms
+1118 17:16:28 ds4-server: chat ctx=0..10460:10460 prefill chunk 10240/10460 (97.9%) chunk=1519.92 t/s avg=1768.29 t/s 5.791s
+1118 17:16:28 ds4-server: prefill hold slot=0 5.79s tokens=0..10240 remaining=0 quantum=0 (holds=1 total=5.8s max=5.79s)
+1118 17:16:28 ds4-server: kv cache stored tokens=10240 trimmed=220 reason=cold key=token-text sha=571806a2 delta=8192..10240 size=175.14 MiB save=49.3 ms

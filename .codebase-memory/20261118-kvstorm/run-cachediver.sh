@@ -11,6 +11,8 @@ LOG=$HERE/runs/cdiv.log
 NPROMPT=${NPROMPT:-12}
 MAXTOK=${MAXTOK:-32}
 TURNS=${TURNS:-0}
+MODE=${MODE:-fork}      # fork = production build+flags; upstream = b3f5018 build with its own flag dialect
+WT=${WT:-$REPO}
 say() { echo "$(date '+%m-%d %H:%M:%S') $*" | tee -a $LOG; }
 
 restore_prod() {
@@ -28,7 +30,7 @@ restore_prod() {
 trap restore_prod EXIT
 
 cd $REPO || exit 2
-say "stopping production (idle-verified first)"
+say "stopping production (idle-verified first) MODE=$MODE wt=$WT"
 ./ds4-server.sh stop >> $LOG 2>&1
 sleep 4
 [ -e "$KV" ] && rm -rf "$KV"
@@ -38,9 +40,15 @@ unset DS4_API_KEY QWEN_API_KEY QWEN_SUBSCRIPTION_KEY
 if [ -e $HERE/runs/cdiv-server.log ]; then mv $HERE/runs/cdiv-server.log $HERE/runs/cdiv-server-prev.log; fi
 : > $HERE/runs/cdiv-server.log      # so the preflight hit counter starts from zero
 say "starting isolated engine on :$PORT"
+cd $WT || exit 2
+if [ "$MODE" = "upstream" ]; then
+  # b3f5018 has no --kv-cache-small-dense and no divergence anchors; those are fork-only.
+  FLAGS=(--kv-disk-space-mb 32768)
+else
+  FLAGS=(--kv-disk-space-mb 32768 --kv-cache-small-dense 49152 --kv-cache-max-divergence-anchors 8)
+fi
 ./ds4-server --model gguf/Qwen3.8-Flash-Next-Q4.gguf --ctx 65536 --tokens 4096 \
-  --host 127.0.0.1 --port $PORT --kv-disk-dir "$KV" --kv-disk-space-mb 32768 \
-  --kv-cache-small-dense 49152 --kv-cache-max-divergence-anchors 8 \
+  --host 127.0.0.1 --port $PORT --kv-disk-dir "$KV" $FLAGS \
   >> $HERE/runs/cdiv-server.log 2>&1 &
 SPID=$!
 
@@ -66,9 +74,17 @@ if [ "$h1" -le "$h0" ]; then
 fi
 say "preflight ok (disk-hit lines $h0 -> $h1): mode=$([ $TURNS -gt 0 ] && echo "multi-turn x$TURNS x3 convs" || echo "$NPROMPT single-turn"), max_tokens=$MAXTOK"
 
-python3 -I $HERE/cachediver_probe.py --port $PORT --n $NPROMPT --max-tokens $MAXTOK --turns $TURNS --attach \
-  --out $HERE/runs/cachediver-results.jsonl >> $LOG 2>&1
-say "probe exit=$?"
+rc=0
+if [ "$NPROMPT" -gt 0 ]; then
+  python3 -I $HERE/cachediver_probe.py --port $PORT --n $NPROMPT --max-tokens $MAXTOK --attach \
+    --out $HERE/runs/cachediver-single.jsonl >> $LOG 2>&1
+  say "single-turn probe exit=$?"; rc=$?
+fi
+if [ "$TURNS" -gt 0 ]; then
+  python3 -I $HERE/cachediver_probe.py --port $PORT --turns $TURNS --max-tokens $MAXTOK --attach \
+    --out $HERE/runs/cachediver-multi.jsonl >> $LOG 2>&1
+  say "multi-turn probe exit=$?"; rc=$?
+fi
 
 hits=$(grep -ac 'kv cache hit' $HERE/runs/cdiv-server.log)
 cold=$(grep -ac 'live kv cache miss' $HERE/runs/cdiv-server.log)

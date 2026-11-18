@@ -44,7 +44,10 @@ DOCS = [
     ("Bronze hoards", "Deposit frequency rises at landscape boundaries because ")
 ]
 
-TARGETS = [4096, 6144, 8192, 12288, 16384]
+import os as _os
+# Overridable so the same harness can be pushed to the prompt sizes where the eviction arms
+# actually diverged (they ran to 30k+ tokens; the default tops out at 16k).
+TARGETS = [int(x) for x in _os.environ.get("CACHEDIVER_TARGETS", "4096,6144,8192,12288,16384").split(",")]
 
 FILLER = [{"role": "user", "content": "Name a random colour and one number, nothing else."}]
 

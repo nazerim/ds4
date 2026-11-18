@@ -1,0 +1,47 @@
+11-18 17:07:56 stopping production (MODE=fork, 12 prompts x 2 separate processes)
+Stopping ds4-server (PID: 14927)...
+ds4-server stopped
+11-18 17:08:01 round 1: starting engine (fresh empty KV dir)
+  0   P=2665   target=4096   SAME
+  1   P=3603   target=6144   SAME
+  2   P=4800   target=8192   SAME
+  3   P=6528   target=12288  SAME
+  4   P=8979   target=16384  SAME
+  5   P=2330   target=4096   SAME
+  6   P=3354   target=6144   SAME
+  7   P=4512   target=8192   SAME
+  8   P=7168   target=12288  SAME
+  9   P=8614   target=16384  SAME
+  10  P=2460   target=4096   SAME
+  11  P=3213   target=6144   SAME
+
+prompts compared: 12   identical: 12 (100.0%)   divergent: 0 (0.0%)
+median completion_tokens=297 (max_tokens=768)
+results: /Users/naz/Projects/ds4/.codebase-memory/20261118-kvstorm/runs/crossproc-round1.jsonl  -- cross-check the server log for 'kv cache hit' on each pass-2 request
+11-18 17:11:19 round 1 probe exit=0 (pid 15864)
+11-18 17:11:22 round 2: starting engine (fresh empty KV dir)
+  0   P=2665   target=4096   SAME
+  1   P=3603   target=6144   SAME
+  2   P=4800   target=8192   SAME
+  3   P=6528   target=12288  SAME
+  4   P=8979   target=16384  SAME
+  5   P=2330   target=4096   SAME
+  6   P=3354   target=6144   SAME
+  7   P=4512   target=8192   SAME
+  8   P=7168   target=12288  SAME
+  9   P=8614   target=16384  SAME
+  10  P=2460   target=4096   SAME
+  11  P=3213   target=6144   SAME
+
+prompts compared: 12   identical: 12 (100.0%)   divergent: 0 (0.0%)
+median completion_tokens=297 (max_tokens=768)
+results: /Users/naz/Projects/ds4/.codebase-memory/20261118-kvstorm/runs/crossproc-round2.jsonl  -- cross-check the server log for 'kv cache hit' on each pass-2 request
+11-18 17:14:48 round 2 probe exit=0 (pid 19687)
+11-18 17:14:51 done
+11-18 17:14:56 restoring production
+Rotated previous log to ./log/ds4-qwen.log.20261118-171456
+Starting ds4-server on port 8002 with model gguf/Qwen3.8-Flash-Next-Q4.gguf (ctx: 524288)...
+Logging to ./log/ds4-qwen.log
+Qwen3.8: vision encoder gguf/mmproj-Qwen3.8-Flash-Next-Q8_0.gguf, batched-session 2, mtp 1, mixed-prefill-quantum 512
+ds4-server started (PID: 19924)
+11-18 17:15:02 prod answering on :8002
