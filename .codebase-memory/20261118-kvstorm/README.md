@@ -16,6 +16,8 @@ the trail, quote nothing from below the rule.
 | `compare.py`, `summarize.py`, `lifetime.py` | token-denominated tables; store->evict lifetime analysis |
 | `PROTOCOL.md` | pre-registered reading rules, written before results |
 | `evict-fresh-boost.patch` | the 20-line experimental fix (applies cleanly to `b3f5018`) |
+| `evict_replay.py`, `evict_policies.py` | **Offline replay of the recorded store/lookup stream: no model, no GPU, <1 s per policy.** Validated to the digit on 3 live arms; read its limits block first |
+| `check_marker_specials.py` | Reads a GGUF's `token_type`/vocab to say whether chat markers are registered special tokens |
 | `runs/COMPARE-*.txt` | the three tables; re-derive with `python3 -I compare.py runs <N> <arms...>` |
 | `runs/<arm>/` | requests.jsonl + server.log.gz + meta.txt per arm |
 | `runs/chain*.log` | the operational record, including the killed-and-resumed chain |

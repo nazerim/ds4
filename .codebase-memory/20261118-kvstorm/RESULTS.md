@@ -83,6 +83,44 @@ figure above exactly, including all rebuilt-token sums and reply agreements, and
   the budget is advisory while every entry is younger than the grace. Prod at 256 GiB is evicting, so this is a configuration trap.
 - `prefill_t/s` includes cache-save stalls, so it slightly understates the fork; not used for any conclusion.
 
+**MECHANISM CORRECTED (independent Opus pass + my own verification): the harm is the DENSITY term, not merely the missing age term.**
+`size(MiB) = 113.518 + 0.0300516 * tokens`, fitted over all 1342 store/evict lines in u16a -- **max residual 0.0073 MiB**, exact at log precision
+(I re-fit it myself; the draft reported 0.037). Because that intercept is the fixed payload cost of upstream #711 and is positive,
+`tokens/file_size` is **strictly increasing in tokens**, so for `hits == 0` upstream's score reduces to "evict the fewest-token file". Every store
+here is an anchor reason (cold/evict/shutdown) so the x2.0 factor is uniform and cancels, and no CONTINUED entries exist so that factor never
+fires. Verified in the log: u16a wrote **309 `reason=cold` mid-prefill checkpoints and all 309 were evicted** (309 of 654 victims have
+`tokens % 2048 == 0`). "No age term" is the enabling condition; the active harm is a size bias anti-correlated with need.
+
+**Same-capacity policy comparison (offline replay of the recorded stream, 16 GiB, one binary, so no confound):**
+| policy | cold % | rebuilt tok | zero-hit victims |
+|---|---|---|---|
+| **upstream b3f5018** | **63.4** | 2,459,409 | 98.6 % |
+| smallest-tokens-first | 59.7 | 2,053,672 | 89.4 % |
+| MRU (deliberately adversarial) | 44.9 | 1,890,122 | 79.6 % |
+| largest-first | 36.4 | 2,028,108 | 84.8 % |
+| random (3 seeds) | 11.9-13.6 | 696,871 | 57.1 % |
+| LRU | 15.9 | 762,165 | 53.2 % |
+| fresh-boost patch | 5.7 | 321,374 | 37.4 % |
+
+At identical capacity upstream is the WORST of seven policies -- worse than random, worse than an intentionally adversarial MRU. Capacity's share
+is bounded at <=5.7 pts (boost at 16 GiB vs 0 % at 400 GiB), so ~58 of the 63.4 points are victim choice. This supplies the same-budget control
+that the "u400 is a ceiling, not an isolation" note above said was missing. Falsifier pre-stated: had upstream landed inside random's
+11.9-13.6 % band the claim dies; it did not (4.7x gap). Secondary: deleting the hit bonus entirely still gives 59.7 %, so the 6 h half-life is
+worth ~3.7 pts -- minor, and my earlier prose over-weighted it.
+
+**New durable artefact: `evict_replay.py` / `evict_policies.py`.** Offline discrete-event replay of the recorded store/lookup stream: no model, no
+GPU, no prod window, <1 s per policy vs ~50 min live. **Validated to the digit on all three live arms** (6 GiB 71.1 %/3,390,964/903/11 files;
+16 GiB 63.4 %/2,459,409/636/34; 400 GiB 0.0 %/145,836/0/447), none of which it was tuned to. Only the boost arm drifts ~0.5 pt (identity keyed by
+token count rather than SHA). Its docstring carries the limits, chiefly that the affine size fit is load-bearing (zero the intercept: 63.4 -> 52.3 %).
+Sweep bonus: the "300 s half-life sits at its fitness boundary" worry recorded above is overstated -- 60 s -> 4.8 %, 300 s -> 5.7 %, 600 s -> 9.4 %,
+and any boost magnitude > 1 flips the ordering, so the constants are unswept rather than delicate.
+
+**Revised recommendation.** The eviction FINDING is third-hand (see immediately below) and worth less than I argued; the METHOD is the contribution.
+Highest value now is the replay, which can rank the four competing open PRs against one recorded stream in seconds. One fact is also offerable on
+#444/#711: the fixed payload cost is **measured 113.5 MiB**, 65 % of a 2048-token file, making #444's symptom analytic rather than anecdotal --
+owner's call before posting. **Do not run another live eviction arm**; the replay already matches to the digit. One live upstream+LRU arm
+(~50 min, needs a window, predicted 15.9 %) is justified only if a reviewer disputes the replay.
+
 **Status versus upstream -- NOT NOVEL** (verified with `gh` 2026-11-18). Open on `antirez/ds4` now: **#1170** states the same mechanism ("a fresh
 evict snapshot has zero hits, so its score is usually the lowest"); **#986** already implements the fix ("age the eviction score's initial `+1` using
 the existing six-hour hit decay"; `ds4_kvstore.c` + `ds4_server.c`); **#444/#711/#814** cover density and cold-vs-live bias; **#550** is a closed earlier

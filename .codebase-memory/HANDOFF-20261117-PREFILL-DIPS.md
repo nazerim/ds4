@@ -515,7 +515,20 @@ raw byte dump; first divergence at request 53 with all 78 turn-1 replies agreein
 window -- `tests/test_kv_prefix_stability.c`, 8/8 cases stable, raw output in `20261118-kvstorm/PREFIX-STABILITY-RUN.{txt,err}`. Scope is narrow: it covers
 the invalid-tool-call path (cut mid malformed tool call, where the code actually runs), and the Qwen spaced markers were seen tokenising as plain text, so
 the merge hazard was live and did not fire. **Still untested: normal turn continuation**, which cuts at a completed assistant turn -- my omission, and it
-needs only a case-table extension, no window. INDEPENDENTLY VERIFIED after writing: an adversarial re-review on a different model re-derived every headline number
+needs only a case-table extension, no window.
+UPDATE 2026-11-18 late: that extension is largely moot -- `append_rendered_suffix_to_live_session` has exactly ONE caller
+(`continue_after_invalid_dsml`, ds4_server.c:14990), which is the boundary the probe already covers. Normal continuation never uses the
+helper. Also settled from GGUF metadata (`20261118-kvstorm/check_marker_specials.py`, v3/vocab 248320/27 CONTROLs, no added_tokens key):
+the SPACED markers the Qwen error builder emits are NOT special tokens (they tokenise as text), so the hazard was live and the PASS is
+meaningful. Probe exit codes de-clashed from the engine's own `exit(2)`: 0 PASS / 1 FAIL / 3 INVALID / 4 usage / 5 could-not-run.
+
+MECHANISM, corrected same day by an independent Opus pass I then verified myself: the harm is the DENSITY term, not the missing age term.
+`size(MiB)=113.518+0.0300516*tokens` (max residual 0.0073 over 1342 lines, re-fit by me), so a positive fixed payload intercept makes
+`tokens/size` strictly increasing in tokens => for `hits==0` upstream simply evicts the fewest-token file. Proof in the log: u16a wrote 309
+`reason=cold` checkpoints and all 309 were evicted. A new offline replay (`20261118-kvstorm/evict_replay.py`, no model/GPU, <1 s/policy,
+validated to the digit on all three live arms) shows upstream is the WORST of seven policies at identical 16 GiB capacity -- worse than random
+(13.6%) and worse than adversarial MRU (44.9%) -- which supplies the same-budget control the earlier 'u400 is a ceiling' note said was missing.
+Recommendation now: the finding is third-hand, the METHOD is the contribution; do not run another live eviction arm. INDEPENDENTLY VERIFIED after writing: an adversarial re-review on a different model re-derived every headline number
 from raw logs without reusing the scripts here (SURVIVES) and returned 4 corrections now folded into RESULTS.md -- lifetime percentages are
 match-order dependent (FIFO 75%<=10s vs LIFO 58%), zero-hit entries TIE so the `last_used` tiebreak picks the OLDER victim, u400 is a ceiling not an
 isolation, and the untuned 300 s half-life sits at this workload's p90 revisit gap (~315 s), so the remedy is validated at its fitness boundary.
