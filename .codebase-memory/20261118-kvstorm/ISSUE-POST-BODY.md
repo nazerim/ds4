@@ -84,7 +84,7 @@ Any prompt where the cold boundary lands strictly inside the prompt reproduces t
 
 ## Measured
 
-| comparison | fork | upstream `b3f5018` |
+| comparison | my fork (same base commit) | upstream `b3f5018` |
 |---|---|---|
 | cold **disk ON** vs cold **disk OFF**, real prose ~12k tokens | **6 / 6 differ** | **4 / 6 differ** |
 | cold disk ON vs resume at the cold boundary (`ctx=10240`) | 0 / 28 differ | 0 / 8 differ |
@@ -95,7 +95,8 @@ The top row is the headline and needs no checkpoint read at all: same prompt, sa
 Across the ten divergent pairs, median character-level similarity is **0.30** (range 0.059-0.757) and the
 first difference appears ~100-230 characters in: substantively different answers, not different wording.
 
-The fork/upstream 6-vs-4 difference on the top row is **not** a claim that the fork is worse. At n=6 the
+The 6-vs-4 difference between the two builds on the top row is **not** a claim that the fork is
+worse. At n=6 the
 Fisher exact two-sided p is 0.455; what is claimed is only that both builds change answers when the boundary
 moves (pooled 10/12).
 
