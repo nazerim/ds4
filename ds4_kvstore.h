@@ -413,10 +413,67 @@ void ds4_kvstore_rewrite_trailer(ds4_kvstore *kc, const char *path,
  * ones written for a different weight fingerprint — unless a live v3 chain
  * dependent still references it, in which case the file is kept for the
  * in-place overwrite and eviction handles it (review M-4). */
+/* Tri-state verdict over a checkpoint's tokenizer-fingerprint stamp, the
+ * shared definition used by the load path, the store-reuse shortcut, and
+ * the store-level abort decision.  The bool form merged "reads and differs"
+ * (file provably stale: replace, removal by design) with "cannot be read"
+ * (unprovable: refuse, KEEP the file byte-identical) - and that merge is
+ * how transient read failures started deleting healthy checkpoints. */
+typedef enum {
+    DS4_KVSTAMP_MATCH = 0,   /* readable stamp equals current, or the file
+                              * makes no stamp claim (legacy trust) */
+    DS4_KVSTAMP_MISMATCH,    /* readable stamp differs: verified stale */
+    DS4_KVSTAMP_UNREADABLE,  /* a stamp claim cannot be verified: I/O error,
+                              * truncated/absent TKF section behind the
+                              * TOKFP bit, or current fingerprint unknown */
+} ds4_kvstamp_verdict;
+
+/* current-fingerprint sentinel for "no engine".  fingerprint(NULL)==0 must
+ * never act as a valid current (a zero-stamped file matching "unknown"
+ * is the laundering shape wearing a different hat).  A real FNV-1a output
+ * colliding with UINT64_MAX is 2^-64 and costs one decline-and-keep. */
+#define DS4_KVSTAMP_CURRENT_UNKNOWN UINT64_MAX
+
+/* Read-only tri-state verdict of one checkpoint's stamp against a current
+ * fingerprint, parsed from path.  Pure: never touches the file.  This is
+ * the exact decision input of the store-level reuse/replace/abort logic
+ * (ds4_kvstore.c store_live_prefix_text); exposed so tests and auditors
+ * can pin the abort condition without a loaded model. */
+ds4_kvstamp_verdict ds4_kvstore_existing_stamp_verdict(const char *path,
+                                                       uint64_t current_tok_fp);
+
+/* Store-level abort decision (ds4_kvstore.c, after the reuse shortcut): true
+ * ends the store before staging, eviction and the tmp+rename.  Only an
+ * UNREADABLE stamp against an UNKNOWN current fingerprint aborts; UNREADABLE
+ * with a known fingerprint proceeds, so the atomic replace self-heals it.
+ * Pure, exposed so the decision table is unit-tested without a model. */
+bool ds4_kvstore_stamp_store_aborts(ds4_kvstamp_verdict reuse_stamp,
+                                    uint64_t cur_fp);
+
 bool ds4_kvstore_existing_compatible(ds4_kvstore *kc, const char *path,
                                      const char sha[41],
                                      const char *text, size_t text_len,
                                      int model_id, int quant_bits, int ctx_size);
+/* Engine-aware reuse check (production store path): MISMATCHING stamps are
+ * replaced, UNREADABLE stamp claims refuse reuse but KEEP the file, and a
+ * NULL engine is loudly refused (never fingerprint-0).  The plain form
+ * above behaves like a NULL engine: claimed files refuse-and-keep. */
+bool ds4_kvstore_existing_compatible_for_engine(ds4_kvstore *kc,
+                                                ds4_engine *engine,
+                                                const char *path,
+                                                const char sha[41],
+                                                const char *text, size_t text_len,
+                                                int model_id, int quant_bits,
+                                                int ctx_size);
+/* Value form of the same gate against an explicit current tokenizer
+ * fingerprint (tests, and callers that cache the fingerprint). */
+bool ds4_kvstore_existing_compatible_for_tokfp(ds4_kvstore *kc,
+                                               uint64_t current_tok_fp,
+                                               const char *path,
+                                               const char sha[41],
+                                               const char *text, size_t text_len,
+                                               int model_id, int quant_bits,
+                                               int ctx_size);
 uint64_t ds4_kvstore_compute_conv_id(const char *text, size_t text_len,
                                      uint64_t model_fp);
 uint64_t ds4_kvstore_model_fingerprint(const char *model_path);

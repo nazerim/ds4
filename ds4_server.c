@@ -27539,6 +27539,418 @@ static void test_kv_cache_keep_set_per_session(void) {
     rmdir(dir);
 }
 
+/* v2 checkpoint carrying a tokenizer-fingerprint trailer section.  `claim`
+ * sets KV_EXT_TOKFP in the header; `mode` writes the TKF section after the
+ * zero-filled payload: 0 = absent, 1 = complete (16 bytes, stamped `fp`
+ * LE), 2 = truncated 3 bytes into the 8-byte fingerprint value (a clean
+ * EOF mid-section: unreadable, not a verified mismatch).  Lets a test
+ * simulate a tokenizer-behaviour change or a torn trailer without a
+ * model. */
+#define KV_TOKFP_SEC_ABSENT 0
+#define KV_TOKFP_SEC_FULL   1
+#define KV_TOKFP_SEC_TRUNC  2
+static void test_kv_tokfp_stub_file(const char *dir, const char *text,
+                                    bool claim, int mode, uint64_t fp,
+                                    uint32_t tokens, uint64_t payload_bytes) {
+    char sha[41];
+    sha1_bytes_hex(text, strlen(text), sha);
+    char name[44];
+    snprintf(name, sizeof(name), "%.40s.kv", sha);
+    char *path = path_join(dir, name);
+    FILE *f = fopen(path, "wb");
+    TEST_ASSERT(f != NULL);
+    if (!f) {
+        free(path);
+        return;
+    }
+    uint8_t h[KV_CACHE_FIXED_HEADER + DS4_KVSTORE_HEADER_V2_EXTRA];
+    uint32_t bucket = DS4_KVSTORE_DEFAULT_ANCHOR_STEP > 0
+        ? tokens / (uint32_t)DS4_KVSTORE_DEFAULT_ANCHOR_STEP : 0u;
+    uint8_t ext = claim ? (uint8_t)(KV_EXT_TOKFP | KV_EXT_TOOL_MAP) : 0;
+    ds4_kvstore_fill_header_v2(h, 0, 2, KV_REASON_COLD, ext, tokens, 0, 32768,
+                               100, (uint64_t)time(NULL), payload_bytes,
+                               0, 0, bucket, 0, false);
+    uint8_t tl[4];
+    le_put32(tl, (uint32_t)strlen(text));
+    TEST_ASSERT(fwrite(h, 1, sizeof(h), f) == sizeof(h));
+    TEST_ASSERT(fwrite(tl, 1, sizeof(tl), f) == sizeof(tl));
+    TEST_ASSERT(fwrite(text, 1, strlen(text), f) == strlen(text));
+    for (uint64_t i = 0; i < payload_bytes; i++)
+        TEST_ASSERT(fputc(7, f) != EOF);
+    if (mode != KV_TOKFP_SEC_ABSENT) {
+        uint8_t sh[8] = {'T', 'K', 'F', 1, 0, 0, 0, 0};
+        le_put32(sh + 4, 8);
+        uint8_t fpb[8];
+        for (int i = 0; i < 8; i++) fpb[i] = (uint8_t)(fp >> (8 * i));
+        TEST_ASSERT(fwrite(sh, 1, sizeof(sh), f) == sizeof(sh));
+        const size_t w = mode == KV_TOKFP_SEC_TRUNC ? 3 : 8;
+        TEST_ASSERT(fwrite(fpb, 1, w, f) == w);
+    }
+    TEST_ASSERT(fclose(f) == 0);
+    free(path);
+}
+
+static size_t test_kv_file_snapshot(const char *path, unsigned char *buf,
+                                    size_t cap) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return (size_t)-1;
+    size_t n = fread(buf, 1, cap, f);
+    fclose(f);
+    return n;
+}
+
+static void test_kv_cache_compat_rejects_stale_tokfp(void) {
+    /* PR #1020 restamp-laundering hole 1, review round 2 semantics:
+     *  - a VERIFIED-MISMATCHING stamp rejects reuse AND replaces the file
+     *    (removal by design; the following full store writes fresh rows);
+     *  - an UNVERIFIABLE stamp (unknown engine, torn trailer) rejects reuse
+     *    but must KEEP the file untouched (finding 1: a transient read
+     *    failure must never delete a healthy checkpoint);
+     *  - legacy unclaimed files keep trusted behavior. */
+    char tmpl[] = "/tmp/ds4-kv-compat-tokfp-test.XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    TEST_ASSERT(dir != NULL);
+    if (!dir) return;
+
+    const char *text = "checkpoint text whose tokenizer behaviour changed";
+    char sha[41];
+    sha1_bytes_hex(text, strlen(text), sha);
+
+    kv_disk_cache kc = {0};
+    kc.enabled = true;
+    kc.dir = xstrdup(dir);
+    kc.opt = kv_cache_default_options();
+    kc.budget_bytes = 1ull << 30;
+
+    char *path = test_kv_path_for_text(dir, text);
+    const size_t tl = strlen(text);
+    unsigned char snap[8192];
+
+    /* 1. Stamped file, no engine available: the stamp cannot be verified,
+     * so reuse is refused but the file is KEPT (not removed, not restamped). */
+    test_kv_tokfp_stub_file(dir, text, true, KV_TOKFP_SEC_FULL,
+                            0x0BADC0DE0BADC0DEull, 1024, 64);
+    size_t n0 = test_kv_file_snapshot(path, snap, sizeof snap);
+    TEST_ASSERT(n0 != (size_t)-1);
+    TEST_ASSERT(!ds4_kvstore_existing_compatible(&kc, path, sha, text,
+                                                 tl, 0, 2, 32768));
+    TEST_ASSERT(access(path, F_OK) == 0);
+    unsigned char snap2[8192];
+    TEST_ASSERT(test_kv_file_snapshot(path, snap2, sizeof snap2) == n0 &&
+                memcmp(snap, snap2, n0) == 0);
+
+    /* 2. Legacy unstamped (no claim, no section): trusted, reused. */
+    test_kv_tokfp_stub_file(dir, text, false, KV_TOKFP_SEC_ABSENT,
+                            0, 1024, 64);
+    TEST_ASSERT(ds4_kvstore_existing_compatible(&kc, path, sha, text,
+                                                tl, 0, 2, 32768));
+    unlink(path);
+
+    /* 3. Section readable but no claim: a readable value is a claim in
+     * itself; with an unknown engine -> refuse, keep. */
+    test_kv_tokfp_stub_file(dir, text, false, KV_TOKFP_SEC_FULL,
+                            42, 1024, 64);
+    TEST_ASSERT(!ds4_kvstore_existing_compatible(&kc, path, sha, text,
+                                                 tl, 0, 2, 32768));
+    TEST_ASSERT(access(path, F_OK) == 0);
+
+    kv_cache_close(&kc);
+    free(path);
+    rmdir(dir);
+}
+
+static void test_kv_cache_compat_keeps_unreadable_stamp(void) {
+    /* Review finding 1: EOF mid-TKF-section / trailer beyond EOF is
+     * UNREADABLE, not MISMATCH: the reuse shortcut must refuse WITHOUT
+     * removing anything. Deleting a usable checkpoint because a read
+     * hiccuped (or the trailer tore) is a new availability bug. */
+    char tmpl[] = "/tmp/ds4-kv-tokfp-unread-test.XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    TEST_ASSERT(dir != NULL);
+    if (!dir) return;
+
+    const char *text = "checkpoint with a torn fingerprint trailer section";
+    char sha[41];
+    sha1_bytes_hex(text, strlen(text), sha);
+
+    kv_disk_cache kc = {0};
+    kc.enabled = true;
+    kc.dir = xstrdup(dir);
+    kc.opt = kv_cache_default_options();
+    kc.budget_bytes = 1ull << 30;
+
+    char *path = test_kv_path_for_text(dir, text);
+    const size_t tl = strlen(text);
+    unsigned char snap[8192], snap2[8192];
+
+    /* (a) claim + truncated section (clean EOF inside the fingerprint). */
+    test_kv_tokfp_stub_file(dir, text, true, KV_TOKFP_SEC_TRUNC,
+                            0x1122334455667788ull, 1024, 64);
+    size_t n0 = test_kv_file_snapshot(path, snap, sizeof snap);
+    TEST_ASSERT(n0 != (size_t)-1);
+    TEST_ASSERT(!ds4_kvstore_existing_compatible_for_engine(&kc, NULL, path,
+                                                            sha, text, tl,
+                                                            0, 2, 32768));
+    TEST_ASSERT(access(path, F_OK) == 0);
+    TEST_ASSERT(test_kv_file_snapshot(path, snap2, sizeof snap2) == n0 &&
+                memcmp(snap, snap2, n0) == 0);
+
+    /* (b) claim + section absent entirely (trailer begins at EOF). */
+    test_kv_tokfp_stub_file(dir, text, true, KV_TOKFP_SEC_ABSENT,
+                            0, 1024, 64);
+    n0 = test_kv_file_snapshot(path, snap, sizeof snap);
+    TEST_ASSERT(n0 != (size_t)-1);
+    TEST_ASSERT(!ds4_kvstore_existing_compatible_for_engine(&kc, NULL, path,
+                                                            sha, text, tl,
+                                                            0, 2, 32768));
+    TEST_ASSERT(access(path, F_OK) == 0);
+    TEST_ASSERT(test_kv_file_snapshot(path, snap2, sizeof snap2) == n0 &&
+                memcmp(snap, snap2, n0) == 0);
+
+    kv_cache_close(&kc);
+    free(path);
+    rmdir(dir);
+}
+
+static void test_kv_cache_compat_rejects_zero_stamp_unknown_engine(void) {
+    /* Review finding 3d: fingerprint(NULL)==0 must NOT act as "current"
+     * for unknown-engine callers - a zero-stamped file matching an unknown
+     * engine is the laundering shape wearing a different hat. */
+    char tmpl[] = "/tmp/ds4-kv-tokfp-zero-test.XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    TEST_ASSERT(dir != NULL);
+    if (!dir) return;
+
+    const char *text = "checkpoint stamped with the zero sentinel";
+    char sha[41];
+    sha1_bytes_hex(text, strlen(text), sha);
+
+    kv_disk_cache kc = {0};
+    kc.enabled = true;
+    kc.dir = xstrdup(dir);
+    kc.opt = kv_cache_default_options();
+    kc.budget_bytes = 1ull << 30;
+
+    char *path = test_kv_path_for_text(dir, text);
+    const size_t tl = strlen(text);
+
+    test_kv_tokfp_stub_file(dir, text, true, KV_TOKFP_SEC_FULL, 0, 1024, 64);
+    TEST_ASSERT(!ds4_kvstore_existing_compatible(&kc, path, sha, text,
+                                                 tl, 0, 2, 32768));
+    TEST_ASSERT(access(path, F_OK) == 0);
+
+    kv_cache_close(&kc);
+    unlink(path);
+    free(path);
+    rmdir(dir);
+}
+
+static void test_kv_cache_compat_tokfp_value_form(void) {
+    /* Review finding 3a: the gate must be proven against a NONZERO current
+     * fingerprint through the value form, so the comparison cannot be the
+     * round-1 `0 == fingerprint(NULL)` shortcut: stored == current must be
+     * reusable (file preserved), stored != current must refuse AND replace,
+     * and a zero-stamped file must NOT match a nonzero current (finding 3d
+     * from the other side). */
+    char tmpl[] = "/tmp/ds4-kv-tokfp-value-test.XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    TEST_ASSERT(dir != NULL);
+    if (!dir) return;
+
+    const uint64_t CUR = 0x0123456789ABCDEFull;
+    const uint64_t STALE = 0x0123456789ABCFFFull;
+    const char *text = "checkpoint validated against a nonzero current fp";
+    char sha[41];
+    sha1_bytes_hex(text, strlen(text), sha);
+
+    kv_disk_cache kc = {0};
+    kc.enabled = true;
+    kc.dir = xstrdup(dir);
+    kc.opt = kv_cache_default_options();
+    kc.budget_bytes = 1ull << 30;
+
+    char *path = test_kv_path_for_text(dir, text);
+    const size_t tl = strlen(text);
+
+    /* 1. stored == current (nonzero): reusable, file preserved. */
+    test_kv_tokfp_stub_file(dir, text, true, KV_TOKFP_SEC_FULL, CUR, 1024, 64);
+    TEST_ASSERT(ds4_kvstore_existing_compatible_for_tokfp(&kc, CUR, path, sha,
+                                                          text, tl, 0, 2, 32768));
+    TEST_ASSERT(access(path, F_OK) == 0);
+
+    /* 2. stored != current (both nonzero): refuse AND replace. */
+    test_kv_tokfp_stub_file(dir, text, true, KV_TOKFP_SEC_FULL, STALE, 1024, 64);
+    TEST_ASSERT(!ds4_kvstore_existing_compatible_for_tokfp(&kc, CUR, path, sha,
+                                                            text, tl, 0, 2, 32768));
+    TEST_ASSERT(access(path, F_OK) != 0);
+
+    /* 3. zero-stamped file vs nonzero current: refuses as a VERIFIED
+     * mismatch (the stamp was read; it says 0, current says CUR) -> replace.
+     * The round-1 engine-less comparison would have matched this file. */
+    test_kv_tokfp_stub_file(dir, text, true, KV_TOKFP_SEC_FULL, 0, 1024, 64);
+    TEST_ASSERT(!ds4_kvstore_existing_compatible_for_tokfp(&kc, CUR, path, sha,
+                                                           text, tl, 0, 2, 32768));
+    TEST_ASSERT(access(path, F_OK) != 0);
+
+    /* 4. engine form with a NULL engine == unknown: refuse AND keep;
+     * rewrite_trailer never gets the chance to restamp. */
+    test_kv_tokfp_stub_file(dir, text, true, KV_TOKFP_SEC_FULL, CUR, 1024, 64);
+    TEST_ASSERT(!ds4_kvstore_existing_compatible_for_engine(&kc, NULL, path,
+                                                            sha, text, tl,
+                                                            0, 2, 32768));
+    TEST_ASSERT(access(path, F_OK) == 0);
+
+    kv_cache_close(&kc);
+    unlink(path);
+    free(path);
+    rmdir(dir);
+}
+
+static void test_kv_cache_compat_replaced_then_reusable(void) {
+    /* Review finding 3b: the model-free suite CANNOT drive
+     * ds4_kvstore_store_live_prefix_text to a written checkpoint: it needs
+     * ds4_session_tokens/staging of a real session graph, and ds4_session is
+     * opaque outside ds4.c (the store-decision instrumentation at the server
+     * layer exists precisely because tests "cannot hand the policy a real
+     * checkpoint graph").  The closest reachable assertion is therefore the
+     * contractual sequence the store path performs: verified-stale stamp ->
+     * refuse + remove -> fresh store writes a stamped checkpoint at the same
+     * path -> reuse restored.  Payload freshness itself is verified by the
+     * post-deploy script (phase b). */
+    char tmpl[] = "/tmp/ds4-kv-tokfp-seq-test.XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    TEST_ASSERT(dir != NULL);
+    if (!dir) return;
+
+    const uint64_t CUR = 0x0F1E2D3C4B5A6978ull;
+    const char *text = "checkpoint laundered-then-replaced sequence";
+    char sha[41];
+    sha1_bytes_hex(text, strlen(text), sha);
+
+    kv_disk_cache kc = {0};
+    kc.enabled = true;
+    kc.dir = xstrdup(dir);
+    kc.opt = kv_cache_default_options();
+    kc.budget_bytes = 1ull << 30;
+
+    char *path = test_kv_path_for_text(dir, text);
+    const size_t tl = strlen(text);
+
+    test_kv_tokfp_stub_file(dir, text, true, KV_TOKFP_SEC_FULL,
+                            0xDEADBEEFDEADBEEFull, 1024, 64);
+    TEST_ASSERT(!ds4_kvstore_existing_compatible_for_tokfp(&kc, CUR, path, sha,
+                                                           text, tl, 0, 2, 32768));
+    TEST_ASSERT(access(path, F_OK) != 0);         /* stale payload removed */
+    test_kv_tokfp_stub_file(dir, text, true, KV_TOKFP_SEC_FULL, CUR, 1024, 64);
+    TEST_ASSERT(ds4_kvstore_existing_compatible_for_tokfp(&kc, CUR, path, sha,
+                                                          text, tl, 0, 2, 32768));
+    TEST_ASSERT(access(path, F_OK) == 0);         /* fresh file reused again */
+
+    kv_cache_close(&kc);
+    unlink(path);
+    free(path);
+    rmdir(dir);
+}
+
+static void test_kv_cache_stamp_verdict_store_gate(void) {
+    /* Review round 3 MF1.  The store-level guarantee ("UNREADABLE => file
+     * byte-identical after the whole store call") cannot be exercised
+     * end-to-end in the model-free suite: ds4_kvstore_store_live_prefix_text
+     * returns at its engine quant gate and its ds4_session_tokens() check
+     * long before reaching the reuse shortcut, and ds4_session is opaque
+     * outside ds4.c (ds4_session_create needs a loaded model).  The closest
+     * reachable assertion is the exact decision input the store branch
+     * consumes: ds4_kvstore_existing_stamp_verdict() is the same
+     * kv_file_path_tokfp_read the store calls at ds4_kvstore.c:3359+; the
+     * abort decision is pinned by test_kv_cache_store_abort_decision_table
+     * below, and end-to-end byte preservation is proven by the
+     * isolated-instance verify script (phase launder, PRE_BIN vs POST_BIN).
+     * Here: tri-state correctness + purity (no bytes touched) on every
+     * stamp shape. */
+    char tmpl[] = "/tmp/ds4-kv-tokfp-verdict-test.XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    TEST_ASSERT(dir != NULL);
+    if (!dir) return;
+
+    const uint64_t CUR = 0x9E3779B97F4A7C15ull;
+    const char *text = "checkpoint whose stamp verdict gates the store";
+    char sha[41];
+    sha1_bytes_hex(text, strlen(text), sha);
+    char *path = test_kv_path_for_text(dir, text);
+    unsigned char snap[8192], snap2[8192];
+
+    /* MATCH: readable, equal to current; verdict must not touch a byte. */
+    test_kv_tokfp_stub_file(dir, text, true, KV_TOKFP_SEC_FULL, CUR, 1024, 64);
+    size_t n0 = test_kv_file_snapshot(path, snap, sizeof snap);
+    TEST_ASSERT(n0 != (size_t)-1);
+    TEST_ASSERT(ds4_kvstore_existing_stamp_verdict(path, CUR) ==
+                DS4_KVSTAMP_MATCH);
+    TEST_ASSERT(test_kv_file_snapshot(path, snap2, sizeof snap2) == n0 &&
+                memcmp(snap, snap2, n0) == 0);
+    /* MISMATCH: readable, differs - the ONLY state the store may remove for. */
+    TEST_ASSERT(ds4_kvstore_existing_stamp_verdict(path, CUR ^ 0xFF) ==
+                DS4_KVSTAMP_MISMATCH);
+    TEST_ASSERT(test_kv_file_snapshot(path, snap2, sizeof snap2) == n0 &&
+                memcmp(snap, snap2, n0) == 0);
+    /* Zero-stamp vs nonzero current: MISMATCH (never MATCH-by-sentinel). */
+    test_kv_tokfp_stub_file(dir, text, true, KV_TOKFP_SEC_FULL, 0, 1024, 64);
+    TEST_ASSERT(ds4_kvstore_existing_stamp_verdict(path, CUR) ==
+                DS4_KVSTAMP_MISMATCH);
+    /* Unreadable shapes vs known current. */
+    test_kv_tokfp_stub_file(dir, text, true, KV_TOKFP_SEC_TRUNC, CUR, 1024, 64);
+    TEST_ASSERT(ds4_kvstore_existing_stamp_verdict(path, CUR) ==
+                DS4_KVSTAMP_UNREADABLE);
+    test_kv_tokfp_stub_file(dir, text, true, KV_TOKFP_SEC_ABSENT, 0, 1024, 64);
+    TEST_ASSERT(ds4_kvstore_existing_stamp_verdict(path, CUR) ==
+                DS4_KVSTAMP_UNREADABLE);
+    /* Unknown current: a readable stamp is UNREADABLE-verdict, never MATCH. */
+    test_kv_tokfp_stub_file(dir, text, true, KV_TOKFP_SEC_FULL, CUR, 1024, 64);
+    TEST_ASSERT(ds4_kvstore_existing_stamp_verdict(
+                    path, DS4_KVSTAMP_CURRENT_UNKNOWN) ==
+                DS4_KVSTAMP_UNREADABLE);
+    /* Legacy unclaimed: MATCH regardless. */
+    test_kv_tokfp_stub_file(dir, text, false, KV_TOKFP_SEC_ABSENT, 0, 1024, 64);
+    n0 = test_kv_file_snapshot(path, snap, sizeof snap);
+    TEST_ASSERT(n0 != (size_t)-1);
+    TEST_ASSERT(ds4_kvstore_existing_stamp_verdict(
+                    path, DS4_KVSTAMP_CURRENT_UNKNOWN) ==
+                DS4_KVSTAMP_MATCH);
+    TEST_ASSERT(test_kv_file_snapshot(path, snap2, sizeof snap2) == n0 &&
+                memcmp(snap, snap2, n0) == 0);
+    /* A missing file is UNREADABLE (decline+nothing-to-keep), not MISMATCH:
+     * the store must not count it as a verified-stale replacement. */
+    unlink(path);
+    TEST_ASSERT(ds4_kvstore_existing_stamp_verdict(path, CUR) ==
+                DS4_KVSTAMP_UNREADABLE);
+    free(path);
+    rmdir(dir);
+}
+
+static void test_kv_cache_store_abort_decision_table(void) {
+    /* Decision table for the store-level abort (ds4_kvstore.c, after the
+     * reuse shortcut).  The gate is pure, so the table is exact without a
+     * model.  Only UNREADABLE against an UNKNOWN fingerprint aborts.  The
+     * UNREADABLE + known row is the one changed from the old unconditional
+     * abort: it must proceed so the atomic replace repairs the file. */
+    const uint64_t KNOWN = 0x9E3779B97F4A7C15ull;
+    const uint64_t UNK = DS4_KVSTAMP_CURRENT_UNKNOWN;
+    static const struct {
+        ds4_kvstamp_verdict v;
+        uint64_t fp;
+        bool abort_expected;
+    } rows[] = {
+        { DS4_KVSTAMP_MATCH,      KNOWN, false },
+        { DS4_KVSTAMP_MISMATCH,   KNOWN, false },
+        { DS4_KVSTAMP_UNREADABLE, KNOWN, false },
+        { DS4_KVSTAMP_MATCH,      UNK,   false },
+        { DS4_KVSTAMP_MISMATCH,   UNK,   false },
+        { DS4_KVSTAMP_UNREADABLE, UNK,   true  },
+    };
+    for (size_t i = 0; i < sizeof rows / sizeof rows[0]; i++)
+        TEST_ASSERT(ds4_kvstore_stamp_store_aborts(rows[i].v, rows[i].fp) ==
+                    rows[i].abort_expected);
+}
+
 static void test_kv_cache_store_compat_rejects_stale_model_fp(void) {
     /* After a weight swap a same-text file carries the old fingerprint.  The
      * store path must not declare it compatible (that would silently disable
@@ -29747,6 +30159,13 @@ static void ds4_server_unit_tests_run(void) {
     test_kv_cache_stale_at_load_isolates_conversations();
     test_kv_cache_conv_id_distinguishes_shared_head_sessions();
     test_kv_cache_keep_set_per_session();
+    test_kv_cache_compat_rejects_stale_tokfp();
+    test_kv_cache_compat_keeps_unreadable_stamp();
+    test_kv_cache_compat_rejects_zero_stamp_unknown_engine();
+    test_kv_cache_compat_tokfp_value_form();
+    test_kv_cache_compat_replaced_then_reusable();
+    test_kv_cache_stamp_verdict_store_gate();
+    test_kv_cache_store_abort_decision_table();
     test_kv_cache_store_compat_rejects_stale_model_fp();
     test_kv_cache_find_skips_payload_less_files();
     test_kv_cache_continued_step_aligns_to_prefill_chunk();

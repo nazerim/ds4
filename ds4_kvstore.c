@@ -2732,33 +2732,79 @@ static void kv_cache_maybe_store_divergence(ds4_kvstore *kc,
                                   "cold", hooks, err, err_len);
 }
 
-/* Inspect the tokenizer fingerprint trailer section of a checkpoint.  Returns
- * false only when a TKF section is present and mismatches the engine;
- * *present reports whether the file is stamped at all.  The file position is
- * restored to the payload start. */
-static bool kv_file_tokfp_ok(FILE *fp, uint64_t payload_bytes,
-                             ds4_engine *engine, bool *present) {
-    if (present) *present = false;
+/* Read the TKF trailer section of a checkpoint from an fp positioned at the
+ * payload start (file position is restored before returning).  `current` is
+ * the live fingerprint or DS4_KVSTAMP_CURRENT_UNKNOWN.  A fully readable TKF
+ * section counts as a claim regardless of the header bit (a file that shows
+ * a stamp cannot disclaim it); a readable section with an unknown current is
+ * UNREADABLE, never MATCH.  *out_present reports a fully readable section. */
+static ds4_kvstamp_verdict kv_file_tokfp_read(FILE *fp, uint8_t ext_flags,
+                                              uint64_t payload_bytes,
+                                              uint64_t current,
+                                              bool *out_present) {
+    if (out_present) *out_present = false;
+    const bool claimed = (ext_flags & DS4_KVSTORE_EXT_TOKFP) != 0;
     const long payload_start = ftell(fp);
-    if (payload_start < 0) return true;   /* best-effort: legacy behaviour */
+    if (payload_start < 0) return DS4_KVSTAMP_UNREADABLE;
     if (fseek(fp, payload_start + (long)payload_bytes, SEEK_SET) != 0) {
         fseek(fp, payload_start, SEEK_SET);
-        return true;
+        return DS4_KVSTAMP_UNREADABLE;
     }
+    ds4_kvstamp_verdict v;
     uint8_t sh[8];
     uint8_t fb[8];
-    bool ok = true;
-    if (fread(sh, 1, sizeof(sh), fp) == (long)sizeof(sh) &&
-        sh[0] == 'T' && sh[1] == 'K' && sh[2] == 'F' && sh[3] == 1 &&
-        ds4_kvstore_le_get32(sh + 4) == 8 &&
-        fread(fb, 1, sizeof(fb), fp) == (long)sizeof(fb)) {
-        uint64_t tokfp = 0;
-        for (int i = 0; i < 8; i++) tokfp |= (uint64_t)fb[i] << (8 * i);
-        if (present) *present = true;
-        ok = (tokfp == ds4_engine_tokenizer_fingerprint(engine));
+    size_t n = fread(sh, 1, sizeof(sh), fp);
+    if (n < sizeof(sh) && ferror(fp)) {
+        v = DS4_KVSTAMP_UNREADABLE;
+    } else if (n == sizeof(sh) && sh[0] == 'T' && sh[1] == 'K' &&
+               sh[2] == 'F' && sh[3] == 1 &&
+               ds4_kvstore_le_get32(sh + 4) == 8) {
+        n = fread(fb, 1, sizeof(fb), fp);
+        if (n == sizeof(fb)) {
+            uint64_t tokfp = 0;
+            for (int i = 0; i < 8; i++) tokfp |= (uint64_t)fb[i] << (8 * i);
+            if (out_present) *out_present = true;
+            if (current == DS4_KVSTAMP_CURRENT_UNKNOWN)
+                v = DS4_KVSTAMP_UNREADABLE;
+            else
+                v = (tokfp == current) ? DS4_KVSTAMP_MATCH
+                                       : DS4_KVSTAMP_MISMATCH;
+        } else {
+            /* clean EOF or error mid-value: torn trailer, unprovable */
+            v = DS4_KVSTAMP_UNREADABLE;
+        }
+    } else {
+        /* no readable TKF section at the trailer head */
+        v = claimed ? DS4_KVSTAMP_UNREADABLE : DS4_KVSTAMP_MATCH;
     }
     fseek(fp, payload_start, SEEK_SET);
-    return ok;
+    clearerr(fp);   /* the verdict consumed the stream's error state */
+    return v;
+}
+
+/* Same verdict for a path-keyed checkpoint (the store-reuse shortcut):
+ * open, parse the envelope, skip the text section, parse the stamp.  Any
+ * read failure is UNREADABLE (decline-and-keep), never a fake mismatch. */
+static ds4_kvstamp_verdict kv_file_path_tokfp_read(const char *path,
+                                                   uint64_t current) {
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return DS4_KVSTAMP_UNREADABLE;
+    ds4_kvstore_entry hdr = {0};
+    uint32_t text_bytes = 0;
+    ds4_kvstamp_verdict v = DS4_KVSTAMP_UNREADABLE;
+    /* read_header leaves fp at the start of the text section. */
+    if (ds4_kvstore_read_header(fp, &hdr, &text_bytes) &&
+        fseeko(fp, (off_t)text_bytes, SEEK_CUR) == 0)
+        v = kv_file_tokfp_read(fp, hdr.ext_flags, hdr.payload_bytes,
+                               current, NULL);
+    fclose(fp);
+    return v;
+}
+
+/* The engine's live fingerprint, or the UNKNOWN sentinel with no engine. */
+static uint64_t kv_tokfp_current(ds4_engine *engine) {
+    return engine ? ds4_engine_tokenizer_fingerprint(engine)
+                  : DS4_KVSTAMP_CURRENT_UNKNOWN;
 }
 
 /* Choose the deepest existing anchor checkpoint that a continued store can
@@ -2829,7 +2875,9 @@ static int kv_store_pick_parent(ds4_kvstore *kc, ds4_engine *engine,
                 if (text_ok) {
                     bool present = false;
                     rej = "tokfp";
-                    if (kv_file_tokfp_ok(fp, ph.payload_bytes, engine, &present) &&
+                    if (kv_file_tokfp_read(fp, ph.ext_flags, ph.payload_bytes,
+                                           ds4_engine_tokenizer_fingerprint(engine),
+                                           &present) == DS4_KVSTAMP_MATCH &&
                         present) {
                         rej = "token-span";
                         ok = ds4_session_payload_token_span(
@@ -2969,10 +3017,13 @@ static bool kv_dir_has_dependents(ds4_kvstore *kc, const char sha[41]) {
     return found;
 }
 
-bool ds4_kvstore_existing_compatible(ds4_kvstore *kc, const char *path,
-                                     const char sha[41],
-                                     const char *text, size_t text_len,
-                                     int model_id, int quant_bits, int ctx_size) {
+static bool kv_cache_existing_compatible(ds4_kvstore *kc, uint64_t current_fp,
+                                         const char *path,
+                                         const char sha[41],
+                                         const char *text, size_t text_len,
+                                         int model_id, int quant_bits, int ctx_size,
+                                         ds4_kvstamp_verdict *stamp_out) {
+    if (stamp_out) *stamp_out = DS4_KVSTAMP_MATCH;
     if (access(path, F_OK) != 0) return false;
     ds4_kvstore_entry e = {0};
     if (!ds4_kvstore_read_entry_file(path, sha, &e)) return false;
@@ -2986,6 +3037,33 @@ bool ds4_kvstore_existing_compatible(ds4_kvstore *kc, const char *path,
                        e.quant_bits == (uint8_t)quant_bits) &&
                       e.ctx_size <= (uint32_t)ctx_size &&
                       kv_cache_file_text_matches(path, sha, text, text_len);
+    /* Restamp-laundering gate (PR #1020 hole 1), tri-state per review
+     * finding H-1:
+     *   MISMATCH   stamp read and differs: verified stale -> fall into the
+     *              incompatible branch below (unlink / in-place replace is
+     *              by design) and let the full store write fresh rows with
+     *              a fresh stamp;
+     *   UNREADABLE a stamp claim cannot be verified (transient I/O, torn
+     *              trailer, unknown engine): refuse the reuse shortcut for
+     *              THIS call but leave the file exactly as it is - a
+     *              healthy checkpoint must not be deleted because a read
+     *              hiccuped;
+     *   MATCH      reusable, including legacy files that claim nothing.
+     * One shared definition of the stamp verdict in kv_file_tokfp_read;
+     * never re-implement its byte parsing here. */
+    if (compatible) {
+        const ds4_kvstamp_verdict stamp_v =
+            kv_file_path_tokfp_read(path, current_fp);
+        if (stamp_out) *stamp_out = stamp_v;
+        if (stamp_v == DS4_KVSTAMP_UNREADABLE) {
+            ds4_kvstore_entry_free(&e);
+            kv_logf(kc, DS4_KVSTORE_LOG_WARNING,
+                    "%s: kv cache stamp unreadable, checkpoint kept and not reused: %s",
+                    kv_log_name(kc), path);
+            return false;
+        }
+        compatible = (stamp_v == DS4_KVSTAMP_MATCH);
+    }
     if (compatible) {
         /* Refresh hits/recency so an actively-revalidated checkpoint is not
          * ranked as idle by the LRU/halving passes. */
@@ -3015,6 +3093,73 @@ bool ds4_kvstore_existing_compatible(ds4_kvstore *kc, const char *path,
         return false;
     }
     return true;
+}
+
+/* Store-level abort decision (ds4_kvstore_store_live_prefix_text, after the
+ * reuse shortcut).  Abort ONLY when the stamp is UNREADABLE and the current
+ * fingerprint is UNKNOWN: nothing can be verified, so the file must not be
+ * replaced.  UNREADABLE with a known fingerprint proceeds through staging,
+ * eviction and the atomic tmp+rename, so the checkpoint self-heals on the
+ * next store.  MISMATCH always proceeds. */
+bool ds4_kvstore_stamp_store_aborts(ds4_kvstamp_verdict reuse_stamp,
+                                    uint64_t cur_fp) {
+    return reuse_stamp == DS4_KVSTAMP_UNREADABLE &&
+           cur_fp == DS4_KVSTAMP_CURRENT_UNKNOWN;
+}
+
+/* Engine-less form: the current fingerprint is UNKNOWN, so a stamped or
+ * claimed file cannot be verified: reuse is refused and the file KEPT
+ * (UNREADABLE), never removed and never matched against the 0 sentinel.
+ * Legacy unclaimed files are unaffected.  Production reuse checks know
+ * their engine: call ds4_kvstore_existing_compatible_for_engine (or
+ * _for_tokfp with an explicit value). */
+ds4_kvstamp_verdict ds4_kvstore_existing_stamp_verdict(const char *path,
+                                                       uint64_t current_tok_fp) {
+    return kv_file_path_tokfp_read(path, current_tok_fp);
+}
+
+bool ds4_kvstore_existing_compatible(ds4_kvstore *kc, const char *path,
+                                     const char sha[41],
+                                     const char *text, size_t text_len,
+                                     int model_id, int quant_bits, int ctx_size) {
+    return kv_cache_existing_compatible(kc, DS4_KVSTAMP_CURRENT_UNKNOWN,
+                                        path, sha, text, text_len,
+                                        model_id, quant_bits, ctx_size, NULL);
+}
+
+/* Reuse decision gated against the ENGINE's live tokenizer fingerprint.
+ * A NULL engine is loudly refused, not silently fingerprinted as 0
+ * (review finding H-3d). */
+bool ds4_kvstore_existing_compatible_for_engine(ds4_kvstore *kc,
+                                                ds4_engine *engine,
+                                                const char *path,
+                                                const char sha[41],
+                                                const char *text, size_t text_len,
+                                                int model_id, int quant_bits,
+                                                int ctx_size) {
+    if (!engine)
+        kv_logf(kc, DS4_KVSTORE_LOG_WARNING,
+                "%s: kv cache reuse check without an engine: stamped checkpoints cannot be validated (kept, not reused)",
+                kv_log_name(kc));
+    return kv_cache_existing_compatible(kc, kv_tokfp_current(engine),
+                                        path, sha, text, text_len,
+                                        model_id, quant_bits, ctx_size, NULL);
+}
+
+/* Value form: gate the reuse decision against an explicit current
+ * fingerprint.  Lets tests hold the gate to nonzero values (so the
+ * 0==0 shortcut can never masquerade as validation) and serves callers
+ * that cache their fingerprint. */
+bool ds4_kvstore_existing_compatible_for_tokfp(ds4_kvstore *kc,
+                                               uint64_t current_tok_fp,
+                                               const char *path,
+                                               const char sha[41],
+                                               const char *text, size_t text_len,
+                                               int model_id, int quant_bits,
+                                               int ctx_size) {
+    return kv_cache_existing_compatible(kc, current_tok_fp,
+                                        path, sha, text, text_len,
+                                        model_id, quant_bits, ctx_size, NULL);
 }
 
 static bool kv_trailer_serialized_size(const ds4_kvstore_trailer_hooks *hooks,
@@ -3207,9 +3352,38 @@ bool ds4_kvstore_store_live_prefix_text(ds4_kvstore *kc,
     char *path = ds4_kvstore_path_for_sha(kc, sha);
     const uint8_t reason_code = ds4_kvstore_reason_code(reason);
 
-    if (ds4_kvstore_existing_compatible(kc, path, sha, text, text_len,
-                                        model_id,
-                                        quant_bits, ds4_session_ctx(session))) {
+    /* Review round 3, finding M-1: the compat helper alone cannot deliver
+     * the "kept" promise.  false must split: MISMATCH (and base-incompat)
+     * proceed to the full store below, and so does UNREADABLE.  The compat
+     * helper returns before its unlink on UNREADABLE, so the file stays
+     * byte-identical there without a store-level abort.  The store then
+     * proceeds through delta staging, eviction, and the atomic tmp+rename
+     * over path (F_FULLFSYNC before rename), so a permanently unreadable
+     * stamp self-heals on the next store.  The only abort is an UNREADABLE
+     * stamp against an UNKNOWN fingerprint (API misuse; see the abort branch
+     * below).
+     * Serialization fact (review F2, voided as an in-process race): this
+     * check->rewrite pair runs inside ONE critical section - the sole
+     * production caller holds the server leaf mutex s->kv_mu across the
+     * whole call (lock ds4_server.c:12964, unlock :12974), and every other
+     * mutator of these paths takes the same mutex (unlinks :13114/:13130,
+     * sweep :13277, loads :13324/:13430); ds4_kvstore_evict is inline under
+     * the same mutex (:3397 here, convention documented at :1206).  A
+     * second server process cannot exist either (flock instance lock,
+     * ds4.c:63521-63548, taken at engine creation ds4.c:75011).  The
+     * residual exposure is out-of-band writes by a NON-ds4 process - no
+     * in-process scheme can fix that; the isolated-cache verification
+     * script is the operational protection. */
+    ds4_kvstamp_verdict reuse_stamp = DS4_KVSTAMP_MATCH;
+    const uint64_t cur_fp = kv_tokfp_current(engine);
+    if (cur_fp == DS4_KVSTAMP_CURRENT_UNKNOWN)
+        kv_logf(kc, DS4_KVSTORE_LOG_WARNING,
+                "%s: kv cache store without an engine: stamped checkpoints cannot be validated (kept, not replaced)",
+                kv_log_name(kc));
+    if (kv_cache_existing_compatible(kc, cur_fp, path, sha, text, text_len,
+                                     model_id, quant_bits,
+                                     ds4_session_ctx(session),
+                                     &reuse_stamp)) {
         /* Same sha already on disk: the trailer is refreshed and nothing is
          * written.  Counted separately, because a store that logs nothing is
          * exactly the case an offline census cannot see. */
@@ -3219,6 +3393,22 @@ bool ds4_kvstore_store_live_prefix_text(ds4_kvstore *kc,
         free(path);
         ds4_tokens_free(&store_tokens);
         return true;
+    }
+    /* Belt-and-braces guard for API misuse, not the normal path.  With an
+     * UNKNOWN current fingerprint (a caller passed no engine) an UNREADABLE
+     * stamp cannot be validated, so the store aborts before any write.
+     * Production never gets here: ds4_server.c:12965 always passes s->engine,
+     * a real engine (the server returns before s.engine is set when
+     * ds4_engine_open fails, ds4_server.c:18818/18832), so cur_fp is known
+     * and UNREADABLE falls through to the atomic replace below. */
+    if (ds4_kvstore_stamp_store_aborts(reuse_stamp, cur_fp)) {
+        kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
+                "%s: kv cache store aborted before eviction/replacement: stamp unreadable without an engine fingerprint tokens=%d reason=%s file=%s",
+                kv_log_name(kc), store_tokens.len, reason, path);
+        free(text);
+        free(path);
+        ds4_tokens_free(&store_tokens);
+        return false;
     }
 
     /* Delta chain (P1): continued stores hang off the deepest verified
@@ -3777,11 +3967,18 @@ static int kv_cache_try_load_one(ds4_kvstore *kc, ds4_engine *engine,
      * Reject before touching the payload (session untouched); the next
      * store under this text key writes a fresh stamped file.  Unstamped
      * legacy files keep today's trusted behavior. */
-    if (!kv_file_tokfp_ok(fp, hdr.payload_bytes, engine, NULL)) {
+    {
+        const ds4_kvstamp_verdict stamp_v =
+            kv_file_tokfp_read(fp, hdr.ext_flags, hdr.payload_bytes,
+                               kv_tokfp_current(engine), NULL);
+        if (stamp_v == DS4_KVSTAMP_MATCH) goto tokfp_ok;
         *retryable = true;
         kv_logf(kc, DS4_KVSTORE_LOG_WARNING,
-                "%s: kv cache tokenizer fingerprint mismatch, refusing stale tokenization%s%s %s",
+                "%s: kv cache %s%s%s %s",
                 kv_log_name(kc),
+                stamp_v == DS4_KVSTAMP_MISMATCH
+                    ? "tokenizer fingerprint mismatch, refusing stale tokenization"
+                    : "tokenizer fingerprint stamp unreadable, declining load (file kept)",
                 responses_protocol ? " " : "",
                 responses_protocol ? "RESPPROTO" : "",
                 path);
@@ -3790,6 +3987,7 @@ static int kv_cache_try_load_one(ds4_kvstore *kc, ds4_engine *engine,
         free(path);
         return 0;
     }
+tokfp_ok: ;
 
     char err[160] = {0};
     int loaded = 0;
@@ -3835,8 +4033,11 @@ static int kv_cache_try_load_one(ds4_kvstore *kc, ds4_engine *engine,
                 free(pt);
                 if (link_ok) {
                     bool present = false;
-                    link_ok = kv_file_tokfp_ok(pf, ph.payload_bytes, engine,
-                                               &present) && present;
+                    link_ok = kv_file_tokfp_read(pf, ph.ext_flags,
+                                                 ph.payload_bytes,
+                                                 ds4_engine_tokenizer_fingerprint(engine),
+                                                 &present) == DS4_KVSTAMP_MATCH &&
+                              present;
                 }
                 if (link_ok && ph.delta_from > 0 && ph.parent_sha[0] == '\0')
                     link_ok = false;
