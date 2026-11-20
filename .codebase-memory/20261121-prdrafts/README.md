@@ -16,3 +16,10 @@ a code change first — read the gates before sending anything.
 Drafted by subagents on `ds4-qwen`, `qwen-subscription`, `claude-agent/haiku` and reviewed on
 `openai/gpt-6.1-terra#low` and `claude-agent/sonnet#low`; every load-bearing claim was re-checked by the
 coordinator, and the claims that failed re-checking are marked above rather than quietly deleted.
+
+## Update 2026-11-21 after independent review
+`pr1020-FINAL-staged.md` supersedes `w1_1020_replies.md` for posting: threads 1 and 2 are revised because
+the shipped fix is NOT in PR #1020 (head `9cbf7e59` is not an ancestor of `a1f3bd2`), so the old wording
+claimed fail-closed behaviour the PR does not have. Thread 3 (`reply3.md`) is unchanged and approved.
+The #785 ping in `w4_785_1022.md` is **withdrawn on review** - its "decodes to `max_tokens`" claim is only
+the worst case, and the rebase push already surfaced the PR. #1022 is now a code task, not a comment task.
