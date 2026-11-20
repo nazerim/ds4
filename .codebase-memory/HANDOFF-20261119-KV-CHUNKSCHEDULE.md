@@ -51,6 +51,9 @@ Back out: `git revert 7d2a4ec && make ds4-server && ./ds4-server.sh restart-qwen
 - **antirez/ds4#1358** (ours, open, mergeable) — durability barrier:
   <https://github.com/antirez/ds4/pull/1358>. `origin/main` has not moved off `b3f5018`, so there is
   nothing to rebase.
+- **antirez/ds4#1020** (ours, open) carries an **open defect** (store-path restamp); fix is implemented
+  in the fork tree, **uncommitted + undeployed** — no public "fail-closed" wording until verified. Chain:
+  `20261120-TOKFP-RESTAMP.md`; live PR states for #785/#1022/etc: `20261120-PR-SWEEP.md`.
 
 ## 4. Eviction side (settled, third-hand — do not re-file)
 
@@ -94,6 +97,8 @@ it was over-claimed in an earlier draft.
 | `ds4-ab-upstream` worktree (b3f5018, built) | drop whenever; findings already reproduced |
 | ~~Commit signing badge~~ | **NOT an open item** -- measured `verified=true reason=valid` on 11 commits (2026-08-31..HEAD) incl. `dcf77c4`; the earlier "unregistered" claim came from reading `commits[].status` (CI contexts) and from a scope-gated 404. See `20261117-kv/SIGNATURE-NOTE.md` |
 | Signing on a second host (`naz@nazryzen.lan`) | **DONE 2026-11-19**, both directions proven. Keys, config, correct probe, add-a-host steps and the gotchas are in `SIGNING-HOSTS.md` -- do not re-derive them |
+| TOKFP restamp fix verified + deployed (#1020 + fork) | implemented 2026-11-20, **uncommitted**; unblocked by independent review → commit → deploy → `20261118-kvstorm/verify_tokfp_laundering_fix.sh` PASS (engine window) -- `20261120-TOKFP-RESTAMP.md` |
+| #785 rebase + one ping; #1022 default fix (push = notification) | engine-stopped window for the live test + branch push; states, decisions and the three probe mistakes in `20261120-PR-SWEEP.md` -- do not re-derive PR state |
 
 ## 7. Method debt — read before building any probe here
 
@@ -139,3 +144,8 @@ State at hand-off: `dirty=0`, `unpushed=0`, remote `nazerim` only; this file lan
 `SIGNING-HOSTS.md` right after it, so any clean-`main` HEAD from here on contains both. Prod PID 65953
 on the patched binary, port 8002, KV cache untouched at **753 files**. Two worktrees: main +
 `ds4-ab-upstream`. Scratch KV dirs deleted; cache volume 806 GiB free.
+
+**Re-verify, do not trust, the live numbers in the paragraph above** -- they moved on 2026-11-20
+(engine restarted, new PID, KV file count down, on-disk binary newer than the running image; the
+sweep's shutdown-log quote also did not match `log/ds4-qwen.log*`): measured snapshot + recipes in
+`20261120-TOKFP-RESTAMP.md`, section "Live state drift".

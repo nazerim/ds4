@@ -1564,3 +1564,30 @@ rather than being half-handled here.
 tree is exactly upstream's behaviour again. `--disable-kv-cache-cold-stop-parity` is the no-rebuild
 escape hatch. If antirez fixes it upstream, drop this commit and take theirs - the fork carries no
 dependency on it anywhere else.
+
+## TOKFP stamp/restamp — store-path reuse bypasses the fingerprint guard (20261120, fork defect, fix in progress)
+
+**The defect.** The disk-KV load path validates checkpoints against the engine's behavioural
+tokenizer fingerprint (upstream PR **antirez/ds4#1020**, ours), but the **store** path never
+consults it: `ds4_kvstore_existing_compatible()` judges reuse from text sha1 + bytes +
+model/quant/ctx only, and the reuse branch then runs `ds4_kvstore_rewrite_trailer()`, which
+ftruncates just the old trailer and re-stamps it — via the server hooks — with the **current**
+fingerprint over the **untouched stale payload**. The fingerprint call site count says it:
+one on the load side, one in the stamping hook, zero in the judge.
+
+**Why it stays broken.** After a tokenizer-behaviour change, same prompt text: load rejects →
+re-prefill → store hits the shortcut, keeps the stale rows, discards the fresh ones, and
+certifies the stale payload. The first rejection is the **only** one that ever happens — the
+bypass is once, permanent, and reachable live (`--kv-disk-dir` is on in production). Smaller
+second hole: the guard read `pass` when the TOKFP bit was claimed but the TKF section was
+missing/unreadable (load site ignored the `present` flag).
+
+**Status (2026-11-20 late).** Fix **implemented in the fork working tree, uncommitted** — one
+shared stamp verdict (`kv_file_tokfp_verdict_ok`), consulted **before** the reuse decision,
+fail-closed on claims, legacy bit-clear files still trusted; RED (6 failures) → GREEN on the
+new `test_kv_cache_store_compat_rejects_stale_tokfp`. Pending: independent review, commit,
+deploy, live laundering check `20261118-kvstorm/verify_tokfp_laundering_fix.sh` (engine
+window), and any upstream port. Until deployed and verified, **no doc or public text may call
+the fingerprint guard fail-closed**. Full evidence chain (incl. the PR-head-vs-fork-main line
+number trap and the `strings`-probe method limit), the retracted side-claims from the same
+investigation, and the #1343 collision watch: `.codebase-memory/20261120-TOKFP-RESTAMP.md`.
