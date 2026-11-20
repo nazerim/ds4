@@ -27603,6 +27603,56 @@ static void test_kv_tokfp_stub_file(const char *dir, const char *text,
     free(path);
 }
 
+/* Same fixture as test_kv_tokfp_stub_file but written as a VERSION 3 envelope,
+ * so kv_header_extra(3) and the v3 header tail are actually exercised: 693 of
+ * the 713 live production checkpoints are v3, while every other fixture in this
+ * suite is hand-built v2.  The v3 tail must carry a non-empty parent_sha and a
+ * NONZERO delta_from, because ds4_kvstore_read_header rejects a v3 entry whose
+ * delta_from is 0 -- a fixture that forgot that silently degrades to UNREADABLE
+ * and would pass a MISMATCH assertion for the wrong reason. */
+static void test_kv_tokfp_stub_file_v3(const char *dir, const char *text,
+                                       bool claim, int mode, uint64_t fp,
+                                       uint32_t tokens, uint64_t payload_bytes,
+                                       const char *parent_sha,
+                                       uint32_t delta_from) {
+    char sha[41];
+    sha1_bytes_hex(text, strlen(text), sha);
+    char name[44];
+    snprintf(name, sizeof(name), "%.40s.kv", sha);
+    char *path = path_join(dir, name);
+    FILE *f = fopen(path, "wb");
+    TEST_ASSERT(f != NULL);
+    if (!f) {
+        free(path);
+        return;
+    }
+    uint8_t h[KV_CACHE_FIXED_HEADER + DS4_KVSTORE_HEADER_V3_EXTRA];
+    uint32_t bucket = DS4_KVSTORE_DEFAULT_ANCHOR_STEP > 0
+        ? tokens / (uint32_t)DS4_KVSTORE_DEFAULT_ANCHOR_STEP : 0u;
+    uint8_t ext = claim ? (uint8_t)(KV_EXT_TOKFP | KV_EXT_TOOL_MAP) : 0;
+    ds4_kvstore_fill_header_v3(h, 0, 2, KV_REASON_COLD, ext, tokens, 0, 32768,
+                               100, (uint64_t)time(NULL), payload_bytes,
+                               0, 0, bucket, 0, false, parent_sha, delta_from);
+    uint8_t tl[4];
+    le_put32(tl, (uint32_t)strlen(text));
+    TEST_ASSERT(fwrite(h, 1, sizeof(h), f) == sizeof(h));
+    TEST_ASSERT(fwrite(tl, 1, sizeof(tl), f) == sizeof(tl));
+    TEST_ASSERT(fwrite(text, 1, strlen(text), f) == strlen(text));
+    for (uint64_t i = 0; i < payload_bytes; i++)
+        TEST_ASSERT(fputc(7, f) != EOF);
+    if (mode != KV_TOKFP_SEC_ABSENT) {
+        uint8_t sh[8] = {'T', 'K', 'F', 1, 0, 0, 0, 0};
+        le_put32(sh + 4, 8);
+        uint8_t fpb[8];
+        for (int i = 0; i < 8; i++) fpb[i] = (uint8_t)(fp >> (8 * i));
+        TEST_ASSERT(fwrite(sh, 1, sizeof(sh), f) == sizeof(sh));
+        const size_t w = mode == KV_TOKFP_SEC_TRUNC ? 3 : 8;
+        TEST_ASSERT(fwrite(fpb, 1, w, f) == w);
+    }
+    TEST_ASSERT(fclose(f) == 0);
+    free(path);
+}
+
 static size_t test_kv_file_snapshot(const char *path, unsigned char *buf,
                                     size_t cap) {
     FILE *f = fopen(path, "rb");
@@ -27755,6 +27805,89 @@ static void test_kv_cache_compat_rejects_zero_stamp_unknown_engine(void) {
     kv_cache_close(&kc);
     unlink(path);
     free(path);
+    rmdir(dir);
+}
+
+static void test_kv_cache_tokfp_v3_fixture(void) {
+    /* The parser is version-agnostic below the header: it seeks to
+     * payload_start + payload_bytes.  Everything before that seek -- the v3
+     * header tail (parent_sha[40] + delta_from u32) and the text-size word --
+     * is what decides whether that landing point is right, and that is the
+     * layout 96% of the live cache actually uses.  A v2-only suite would not
+     * notice kv_header_extra(3) drifting. */
+    char tmpl[] = "/tmp/ds4-kv-tokfp-v3-test.XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    TEST_ASSERT(dir != NULL);
+    if (!dir) return;
+
+    const uint64_t CUR = 0xFEDCBA9876543210ull;
+    const uint64_t STALE = 0xFEDCBA98765432FFull;
+    const char *parent = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const char *text = "v3 chained checkpoint fingerprint fixture";
+    char sha[41];
+    sha1_bytes_hex(text, strlen(text), sha);
+
+    kv_disk_cache kc = {0};
+    kc.enabled = true;
+    kc.dir = xstrdup(dir);
+    kc.opt = kv_cache_default_options();
+    kc.budget_bytes = 1ull << 30;
+    char *path = test_kv_path_for_text(dir, text);
+    const size_t tl = strlen(text);
+
+    /* 0. The fixture really is v3 with its chain intact.  Without this the
+     *    assertions below could be satisfied by a file that degraded to v1/v2
+     *    or never parsed as a chain at all. */
+    test_kv_tokfp_stub_file_v3(dir, text, true, KV_TOKFP_SEC_FULL, CUR,
+                               1024, 64, parent, 512);
+    ds4_kvstore_entry e;
+    TEST_ASSERT(ds4_kvstore_read_entry_file(path, sha, &e));
+    TEST_ASSERT(e.hdr_version == 3);
+    TEST_ASSERT(e.delta_from == 512);
+    TEST_ASSERT(e.parent_sha[0] == 'a');
+
+    /* 1. MATCH on a v3 envelope: reusable, and the file is left in place.  The
+     *    verdict is asserted as the enum, not just "compatible == true": a
+     *    boolean cannot tell MATCH apart from "the stamp could not be read so
+     *    nothing contradicts us" -- the exact confusion this fix removes. */
+    TEST_ASSERT(ds4_kvstore_existing_stamp_verdict(path, CUR) == DS4_KVSTAMP_MATCH);
+    TEST_ASSERT(ds4_kvstore_existing_compatible_for_tokfp(&kc, CUR, path, sha,
+                                                          text, tl, 0, 2, 32768));
+    TEST_ASSERT(access(path, F_OK) == 0);
+
+    /* 2. MISMATCH on a v3 envelope: refused AND replaced, matching v2 rules. */
+    test_kv_tokfp_stub_file_v3(dir, text, true, KV_TOKFP_SEC_FULL, STALE,
+                               1024, 64, parent, 512);
+    TEST_ASSERT(ds4_kvstore_existing_stamp_verdict(path, CUR) == DS4_KVSTAMP_MISMATCH);
+    TEST_ASSERT(!ds4_kvstore_existing_compatible_for_tokfp(&kc, CUR, path, sha,
+                                                           text, tl, 0, 2, 32768));
+    TEST_ASSERT(access(path, F_OK) != 0);
+
+    /* 3. A v3 file whose claimed stamp cannot be read must be UNREADABLE, i.e.
+     *    refuse without deleting: the payload may still be valid and the next
+     *    atomic store repairs it.  This is the leg that distinguishes a real
+     *    v3 parse from a fixture that failed to parse at all. */
+    test_kv_tokfp_stub_file_v3(dir, text, true, KV_TOKFP_SEC_TRUNC, CUR,
+                               1024, 64, parent, 512);
+    TEST_ASSERT(ds4_kvstore_existing_stamp_verdict(path, CUR) == DS4_KVSTAMP_UNREADABLE);
+    TEST_ASSERT(!ds4_kvstore_existing_compatible_for_tokfp(&kc, CUR, path, sha,
+                                                           text, tl, 0, 2, 32768));
+    TEST_ASSERT(access(path, F_OK) == 0);
+
+    /* 4. The v3 chain fields decide ENTRY validity, not the stamp verdict:
+     *    read_entry_file rejects delta_from == 0, so the file never reaches the
+     *    stamp comparison and is kept as UNVERIFIABLE rather than reported as a
+     *    verified mismatch.  Guard against the fixture trap that would otherwise
+     *    make a broken v3 build look like a passing MISMATCH leg. */
+    test_kv_tokfp_stub_file_v3(dir, text, true, KV_TOKFP_SEC_FULL, STALE,
+                               1024, 64, parent, 0);
+    TEST_ASSERT(ds4_kvstore_existing_stamp_verdict(path, CUR) == DS4_KVSTAMP_UNREADABLE);
+    TEST_ASSERT(!ds4_kvstore_existing_compatible_for_tokfp(&kc, CUR, path, sha,
+                                                           text, tl, 0, 2, 32768));
+    TEST_ASSERT(access(path, F_OK) == 0);
+
+    free(path);
+    free(kc.dir);
     rmdir(dir);
 }
 
@@ -30176,6 +30309,7 @@ static void ds4_server_unit_tests_run(void) {
     test_kv_cache_compat_rejects_stale_tokfp();
     test_kv_cache_compat_keeps_unreadable_stamp();
     test_kv_cache_compat_rejects_zero_stamp_unknown_engine();
+    test_kv_cache_tokfp_v3_fixture();
     test_kv_cache_compat_tokfp_value_form();
     test_kv_cache_compat_replaced_then_reusable();
     test_kv_cache_stamp_verdict_store_gate();
