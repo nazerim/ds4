@@ -23,3 +23,9 @@ the shipped fix is NOT in PR #1020 (head `9cbf7e59` is not an ancestor of `a1f3b
 claimed fail-closed behaviour the PR does not have. Thread 3 (`reply3.md`) is unchanged and approved.
 The #785 ping in `w4_785_1022.md` is **withdrawn on review** - its "decodes to `max_tokens`" claim is only
 the worst case, and the rebase push already surfaced the PR. #1022 is now a code task, not a comment task.
+
+## Update: #1022 implemented
+`w4_785_1022.md`'s #1022 recommendation is executed on fork `main` (`82b57ff`) and live-verified
+(17 images accepted, 257 rejected with "at most 256"); a matching commit `1ddb892` sits on local branch
+`wt1022` **awaiting owner go to push to the PR**. Do not post a #1022 comment: the push is the
+notification. The #785 ping in that file is withdrawn (see HANDOVER §6).
