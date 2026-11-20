@@ -31,7 +31,7 @@ inference engine in C with Metal, CUDA, and ROCm backends. See `AGENT.md`
   density (2026-11-19) → `HANDOFF-20261119-KV-CHUNKSCHEDULE.md`, `.codebase-memory/20261118-kvstorm/`
 - Checkpoint self-healing + session handoff: `.codebase-memory/adr.md`
   (ADR 2026-09-06) and `.codebase-memory/TODO-20260906.md` (PR states,
-  pending #984 port, open questions, proven diagnostics).
+  open questions, proven diagnostics).
 - Vision cache (thinking bridge, multimodal disk KV; embed cache=KEEP since F1 11-10 —
   `.codebase-memory/adr.md` Sep-3 ADRs + amendment, HANDOFF-DECODE-FIX §5; Vision-Exp default, TRACE_PATH=./log/ds4.trace)
 - DSpark: `PLAN-DSPARK-PERF.md`, `PLAN-DSPARK-TEMP-SPEC.md`
