@@ -177,7 +177,9 @@ def parse(path):
     if blob[tok_off:tok_off + 4] == TKF and \
        struct.unpack_from("<I", blob, tok_off + 4)[0] == 8 and \
        tok_off + 16 <= len(blob):
-        stamp = blob[tok_off + 8:tok_off + 16]
+        # hex, not bytes: json.dump cannot serialize bytes, and a TypeError here used to
+        # truncate snap.json mid-write and make every later phase report INCONCLUSIVE.
+        stamp = blob[tok_off + 8:tok_off + 16].hex()
     st = os.stat(path)
     return {"path": path, "version": v, "ht": ht,
             "text_bytes": text_bytes, "payload_bytes": payload_bytes,
@@ -224,7 +226,7 @@ def corrupt(rec):
             continue
         off = cur["ht"] + cur["text_bytes"] + cur["payload_bytes"] + 8
         with open(e["path"], "r+b") as f:
-            f.seek(off); f.write(bytes(b ^ 0xFF for b in cur["stamp"]))
+            f.seek(off); f.write(bytes(b ^ 0xFF for b in bytes.fromhex(cur["stamp"])))
         done += 1
         print("  corrupted parsed-offset stamp:", os.path.basename(e["path"])[:12])
     print("  %d/%d file(s) corrupted" % (done, len(rec)))

@@ -1,5 +1,16 @@
 # 2026-11-20 — TOKFP restamp: store-path reuse bypassed the fingerprint guard
 
+> **STATUS 2026-11-21 01:05 — REVIEWED, DEPLOYED AND VERIFIED.** Fix commit `a1f3bd2`; production PID
+> 38939 runs it. Evidence: verifier `launder` on the pre-fix binary → **LAUNDERED** (same inode, stamp
+> restored over stale rows, i.e. the bug reproduced on real files) and on the fixed binary → **BLOCKED**
+> (checkpoint replaced with a fresh store); `parity` cold+warm greedy output identical PRE vs POST; and a
+> live replay against the untouched 246 GiB production cache returned the same completion sha256 as the
+> pre-fix baseline (`82d85489147d986e…`), logged `kv cache hit … chain=3 load=46.3 ms` with the sentinel
+> file's **inode unchanged** (reused, not rewritten) and **zero** `stamp unreadable` lines. That last
+> result also closes the review's biggest unproven item: the stamp parser positions correctly on real
+> v3 chained checkpoints, not only on the hand-built v2 stubs the unit suite uses. The guard may now be
+> described as fail-closed for the reuse path — with the nuance that an unreadable stamp *declines reuse
+> and keeps the file*, and repair happens via the next atomic store rather than in place.
 **Status: fix implemented 2026-11-20, UNCOMMITTED at this writing** (the working tree carries
 it in `ds4_kvstore.c` / `ds4_kvstore.h` / `ds4_server.c` — that modification is the fix agent's,
 not doc drift). **Pending independent review + deploy.** Not merged: PR antirez/ds4#1020's
