@@ -3895,7 +3895,12 @@ static void log_structural_content_markers(const chat_msgs *msgs) {
  * honest history and the prompt remains a deterministic cache key.  The
  * retained set is always the last N in document order; a hard limit still
  * fails absurd requests fast, before any work. */
-#define DS4_VISION_REJECT_LIMIT 16
+/* The default reject wall follows the request wall: #1245 raised SERVER_MAX_IMAGES to 256,
+ * so a hardcoded 16 would reject, by default, requests that upstream accepts. A rejected
+ * request is unrecoverable for the client while a lossy drop is not; the real bound is the
+ * vision/context budget, not a request count. SERVER_MAX_IMAGES is defined later in this
+ * file, which is fine: a macro body expands at use, and every use is below that define. */
+#define DS4_VISION_REJECT_LIMIT SERVER_MAX_IMAGES
 #define DS4_VISION_HARD_LIMIT 1024
 #define DS4_VISION_OMIT_NOTE "[oldest image omitted to fit the vision budget]"
 
@@ -25005,6 +25010,14 @@ static void test_thinking_state_tracks_prompt_and_generated_tags(void) {
 }
 
 
+/* Reject default must BE the request wall, not a second silent one (#1245 raised
+ * SERVER_MAX_IMAGES to 256). Relationship guard only: the 17/256/257 boundary is not
+ * exercised here because that path needs a loaded engine past the reject branch. */
+static void test_vision_reject_limit_follows_max_images(void) {
+    TEST_ASSERT(DS4_VISION_REJECT_LIMIT == SERVER_MAX_IMAGES);
+    TEST_ASSERT(DS4_VISION_HARD_LIMIT > SERVER_MAX_IMAGES);
+}
+
 static void test_prompt_text_drop_oldest_images(void) {
     server_image_input imgs[3];
     memset(imgs, 0, sizeof(imgs));
@@ -30098,6 +30111,7 @@ static void ds4_server_unit_tests_run(void) {
     test_kv_tool_map_bootstrap_reads_real_trailer_layout();
     test_kv_tool_map_bootstrap_indexes_files_not_rescans();
     test_thinking_checkpoint_canonical_matches_future_prompt();
+    test_vision_reject_limit_follows_max_images();
     test_prompt_text_drop_oldest_images();
     test_normalize_image_text_and_trailer_roundtrip();
     test_canonical_image_markers_keep_literal_text_exact();
