@@ -69,3 +69,6 @@ and we promised to "leave this quiet". Do not post `pr1020-FINAL-staged.md`'s ea
 `reply2-final.md` posted as review-comment reply **4649423282** on thread `4131745125`
 (https://github.com/antirez/ds4/pull/1020#discussion_r4649423282); live body verified byte-identical and
 single. `reply1.md`/`reply3.md` remain dropped; do not post a top-level comment. #1163 remains **no post**.
+
+`pr1020-PORT-PREP.md` (rev 2) = unexecuted prep for the store-side gate, with rev 1's two wrong
+load-bearing claims corrected (test compilation, bit-4 severity). Not a commitment to port.
