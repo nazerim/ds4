@@ -1,3 +1,16 @@
+# #1163 — **DO NOT POST (superseded 2026-11-21, review B)**
+
+Review on `openai/gpt-6.2-sol#low` rejected the comment below and its two load-bearing premises:
+`anthropic_stop_reason` maps *everything* except `tool_calls`/`length` to `end_turn`, so `error` and `stop`
+look identical to an Anthropic client and **the PR changes nothing on that surface** — presenting the
+invisibility as the consequence to highlight implies a fix that does not exist. And "running an equivalent
+fix in production since 2026-09-29" is not verifiable from this repo (it proves the commit, not deployment)
+while "corroborated independently of this PR" reads as puffery. Final position: **leave #1163 open, post
+nothing, rebase only on trigger.** Full record: `../20261121-HANDOVER.md` §14. The rest of this file is kept
+as the reasoning trail, not as guidance.
+
+---
+
 # #1163 — decision: rebase, do NOT withdraw-and-republish. Comment first, rebase later.
 
 Staged, **not posted**. Owner go required for anything on `antirez/ds4`.

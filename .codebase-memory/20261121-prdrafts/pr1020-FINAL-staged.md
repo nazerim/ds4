@@ -43,28 +43,31 @@ checked whether it ports cleanly (the two `ds4_kvstore.c` layouts differ ~3x).
 
     One gap in this PR that I found after your review: the store side still reuses an existing same-text file without checking the stamp (`ds4_kvstore.c:1003`), so after a mismatch the next store can keep the stale payload and re-stamp it. I have a fix that gates reuse on the stamp; say if you want it added here.
 
-## Posting commands (owner go required — never run these without it)
+## Posting commands (current — owner approval required; supersedes the earlier block above)
+
+The three `reply*.md` files now hold the review-A replacements, so post from those directly. This gate pins
+the PR head, refuses empty bodies, and stops for a human read-back before the second and third posts:
 
 ```zsh
-D=$(mktemp -d /tmp/pr1020.XXXXXX) && cd "$D" || exit 1
-cp /Users/naz/Projects/ds4/.codebase-memory/20261121-prdrafts/reply3.md r3.md
-# write r1.md and r2.md from the two blocks above, then:
-wc -c r1.md r2.md r3.md            # all nonzero, before any network call
-gh api repos/antirez/ds4/pulls/1020/comments/4131755372/replies -F body=@r3.md --jq '{id,html_url}'
-# STOP. Open the returned html_url and confirm backticks and non-ASCII survived. Then:
-gh api repos/antirez/ds4/pulls/1020/comments/4131726056/replies -F body=@r1.md --jq '{id,html_url}'
-gh api repos/antirez/ds4/pulls/1020/comments/4131745125/replies -F body=@r2.md --jq '{id,html_url}'
+(
+  set -e
+  d=/Users/naz/Projects/ds4/.codebase-memory/20261121-prdrafts
+  pr=repos/antirez/ds4/pulls/1020
+  [[ -s "$d/reply1.md" && -s "$d/reply2.md" && -s "$d/reply3.md" ]] || exit 1
+  head=$(gh api "$pr" --jq '.head.sha')
+  [[ "$head" == 9cbf7e590c318a421a5ac059fcf9ae68f99fd2d9 ]] || { echo "PR head moved: $head"; exit 1; }
+
+  gh api -X POST "$pr/comments/4131755372/replies" -F "body=@$d/reply3.md" --jq '{id,html_url}'
+  read -r 'confirm?Check the posted rendering, then type yes to post the other two: '
+  [[ "$confirm" == yes ]] || exit 1
+  gh api -X POST "$pr/comments/4131726056/replies" -F "body=@$d/reply1.md" --jq '{id,html_url}'
+  gh api -X POST "$pr/comments/4131745125/replies" -F "body=@$d/reply2.md" --jq '{id,html_url}'
+)
 ```
 
-After posting, re-read the live text of all three via the API and compare to these bodies — the project
-rule is to verify what actually landed, not what was sent.
-
-## Not verified
-Whether `-F body=@file` succeeds in practice; whether GitHub preserves the backticks and non-ASCII
-exactly; whether additive vocab is a supported upstream workflow; whether `a1f3bd2` can port onto the PR
-branch cleanly; and the earlier draft's two claims that "older binaries ignore bit 5" and "bit 4 is free
-at base", which the reviewer did not re-run.
-
+Read-back afterwards must use the **list** endpoint, because
+`GET $pr/comments/{id}` 404s for these ids:
+`gh api "$pr/comments?per_page=100" --jq '.[] | select(.id==<new_id>) | .body'`.
 
 ## Second review 2026-11-21 (`openai/gpt-6.2-sol#low`): all three REVISED again, still UNPOSTED
 
