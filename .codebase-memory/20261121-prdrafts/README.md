@@ -29,3 +29,12 @@ the worst case, and the rebase push already surfaced the PR. #1022 is now a code
 (17 images accepted, 257 rejected with "at most 256"); a matching commit `1ddb892` sits on local branch
 `wt1022` **awaiting owner go to push to the PR**. Do not post a #1022 comment: the push is the
 notification. The #785 ping in that file is withdrawn (see HANDOVER §6).
+
+## Update 2026-11-21 (second reversal): #1163 is NOT obsolete
+`w2_1163.md`'s original **rewrite** verdict stands. The later **withdraw** verdict rested on a claim that the
+fork's production parse passes NULL for the re-parse outputs, so the recovery branch never runs — that is
+**false** (`ds4_server.c:17253` passes all out-params plus `&recovered_tool_parse_failure`), and upstream
+`b3f50180` still sets `finish = "error"` for an unclosed envelope, which is what disables its own recovery.
+Keep the PR open. Its own "fork is a strict superset" argument is *still* retracted for a different reason
+(see `../20261120-TOKFP-RESTAMP.md`), and the fork's independent fix `d097801` is corroboration, not a
+substitute. Full evidence: `../20261121-HANDOVER.md` §12.
