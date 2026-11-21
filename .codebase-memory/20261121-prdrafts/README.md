@@ -57,3 +57,10 @@ Also recorded because it nearly caused a silent bad post: the script that regene
 treated a *blank* line as the end of an indented block and therefore extracted only paragraph 1 of thread 2
 — dropping the sentence that discloses the store-side gap. An assert on expected content caught it. When
 extracting text to post, assert the load-bearing sentences are present; do not trust a clean exit code.
+
+## FINAL (2026-11-21): post ONE reply only
+`reply2-final.md` is the sole posting candidate (byte-locked to `reply2-approved.txt`); post with
+`POST_IT=1 post-1020.sh`, which dry-runs by default and verifies the posted text afterwards.
+`reply1.md` and `reply3.md` are **DROPPED** (kept for the record): not duplicative, but low-value-to-action
+against the cost of adding ~1.2k chars to the 4,257 we already have on a thread where the reviewer wrote 393
+and we promised to "leave this quiet". Do not post `pr1020-FINAL-staged.md`'s earlier "Final texts".
