@@ -38,3 +38,6 @@ fork's production parse passes NULL for the re-parse outputs, so the recovery br
 Keep the PR open. Its own "fork is a strict superset" argument is *still* retracted for a different reason
 (see `../20261120-TOKFP-RESTAMP.md`), and the fork's independent fix `d097801` is corroboration, not a
 substitute. Full evidence: `../20261121-HANDOVER.md` §12.
+
+`pr1163-DECISION.md` is the current word on #1163: keep as filed, one evidence comment staged (UNPOSTED),
+rebase on trigger only. Supersedes both the 'withdraw' idea and 'republish the thorough fork fix'.
