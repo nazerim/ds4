@@ -41,3 +41,19 @@ substitute. Full evidence: `../20261121-HANDOVER.md` §12.
 
 `pr1163-DECISION.md` is the current word on #1163: keep as filed, one evidence comment staged (UNPOSTED),
 rebase on trigger only. Supersedes both the 'withdraw' idea and 'republish the thorough fork fix'.
+
+## Hazard fixed 2026-11-21: the posting-ready files had gone stale
+`reply1.md`/`reply2.md` were the **pre-review** bodies — they still asserted "fail-closed" and "one
+re-prefill, no cascade" / "next prefill rewrites a fresh stamp", the two claims independent review found
+false about PR #1020's actual head. `README.md` meanwhile advertised them as "ready to `cat` into the
+posting command", so the obvious action (cat reply2.md) would have posted a known falsehood to a public
+thread. Both files are now **regenerated from the reviewed blocks in `pr1020-FINAL-staged.md`** and verified
+by grep gate (no posting-ready file contains `fail-closed`, `next prefill rewrites`, or `<｜User｜>`).
+
+`reply3.md` is unchanged — thread 3 was approved as-is. `w1_1020_replies.md` remains the historical draft
+package: **do not post from it**; it is the source of the retracted `<｜User｜>` probe claim.
+
+Also recorded because it nearly caused a silent bad post: the script that regenerated these files first
+treated a *blank* line as the end of an indented block and therefore extracted only paragraph 1 of thread 2
+— dropping the sentence that discloses the store-side gap. An assert on expected content caught it. When
+extracting text to post, assert the load-bearing sentences are present; do not trust a clean exit code.
