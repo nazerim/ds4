@@ -100,3 +100,17 @@ upgrade/downgrade round-trip guarantee.
 endpoint returns them (`path=ds4.c line=65007/65040`, `path=ds4_kvstore.c line=1290`). So the previously
 planned "re-read the live text via the API" step cannot use that route. Verify with the **list** endpoint
 (filtered by id) or by the `html_url` the POST returns.
+
+
+## Round 3 (de-anchored `claude-agent/sonnet#low`) — bodies replaced again
+`reply1/2/3.md` are now round-3 text; this file's earlier "Final texts" blocks are **superseded** prose and
+kept only as history. Do not post from them.
+
+Two deliberate omissions, so nobody re-adds them:
+- **`I'll push a fix for this to the branch.`** — round 3 offered it; omitted because committing to porting
+  `a1f3bd2` is an owner decision (see HANDOVER §8: 9 conflict hunks, +1133 vs the PR's +177, recommended
+  against) and volunteering uncommitted work was already flagged twice. Add only with intent to follow through.
+- **"Was there more you wanted to add about `ext_flags`?"** — read as passive-aggressive against a compliment.
+
+Reviewer's own error, corrected here: it claimed `ds4.c:45939` should be `45938`. `grep -n` at `9cbf7e5` says
+the definition is on **45939**. The suggested correction was wrong; applying it would have broken a good cite.
