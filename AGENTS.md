@@ -17,8 +17,9 @@ inference engine in C with Metal, CUDA, and ROCm backends. See `AGENT.md`
   STOPPED — it holds a process lock, tests refuse mid-suite (Error 2). Runbook:
   `./ds4-server.sh stop` → tests → `start-qwen` (`restart-qwen` = fresh binary).
   `--server` and `--mtp-slice` subsets coexist with a running engine, but
-  `ds4_test --server` does NOT cover server code (it links `ds4.c`); for
-  `ds4_server.c` use `make test-server-logic` → `ds4_server_test`.
+  `ds4_test --server` runs the `#ifdef DS4_SERVER_TEST` tests in `ds4_server.c`
+  (`tests/ds4_test.c` defines it + `#include`s it) and needs a model. Prefer the
+  fork-only model-free `make test-server-logic` (→ `ds4_server_test`).
 - `make clean` — remove build artifacts
 - `make strix-halo` / `make cuda` / `make rocm` — platform builds; `make
   dspark-acceptance`, `dspark-verify-depth`, `mtp-verify-depth` — verification
