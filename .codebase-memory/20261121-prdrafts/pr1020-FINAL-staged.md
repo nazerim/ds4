@@ -4,8 +4,11 @@ Review verdict (`claude-agent/sonnet#low`, 2026-11-21): **thread 3 POST AS-IS**,
 The revised texts below are the review's, adopted.
 
 ## The finding that changed the verdict
-The shipped fix (`a1f3bd2`, deployed and verified) is **not in this PR**. PR head `9cbf7e59` is not an
-ancestor of `a1f3bd2` (`merge-base --is-ancestor` rc=1), and at PR head `ds4_kvstore.c:1003-1010` still
+The shipped fix (`a1f3bd2`, deployed and verified) is **not in this PR**. The load-bearing check is
+`git merge-base --is-ancestor a1f3bd2 9cbf7e5` -> **rc=1**, i.e. our fix commit is not an ancestor of the PR
+head. (An earlier revision of this file asserted the reverse direction, "PR head is not an ancestor of
+`a1f3bd2`"; that is also true but it is the wrong fact to cite — it would equally hold for any unrelated
+commit and proves nothing about inclusion.) At PR head `ds4_kvstore.c:1003-1010` still
 takes the reuse shortcut with no stamp check and then rewrites the trailer — i.e. the laundering defect
 is live in the PR. So the draft's "mismatch → miss, payload untouched, next prefill rewrites a fresh
 stamp" and the flat "fail-closed" were **false about the code that thread defends**. Line-number
@@ -61,3 +64,36 @@ Whether `-F body=@file` succeeds in practice; whether GitHub preserves the backt
 exactly; whether additive vocab is a supported upstream workflow; whether `a1f3bd2` can port onto the PR
 branch cleanly; and the earlier draft's two claims that "older binaries ignore bit 5" and "bit 4 is free
 at base", which the reviewer did not re-run.
+
+
+## Second review 2026-11-21 (`openai/gpt-6.2-sol#low`): all three REVISED again, still UNPOSTED
+
+The bodies in `reply1.md`/`reply2.md`/`reply3.md` are now the reviewer's replacements, not the earlier ones
+described above. What changed and why:
+
+- **Thread 1**: the reviewer asked three things — whether the probes are necessary, *how they were chosen*,
+  and when to update them. The previous draft answered only "when". It now says the list was hand-picked for
+  JoyAI cases (apostrophes beside punctuation, digit runs, indentation, newlines, UTF-8) and to **append**
+  rather than edit/reorder.
+- **Thread 2**: dropped the "author-maintained generation field" prescription (speculative advice the
+  reviewer did not ask for) and **dropped the offer to port our fix** ("say if you want it added here"),
+  which volunteered work and invited a rebase of someone else's PR. The store-side gap disclosure stays,
+  restated as fact with a scope note: `I have a separate fix … it's not part of this PR`.
+- **Thread 3**: **my "the comment trails off mid-sentence" was an inference from an ellipsis.** The actual
+  body is `It's nice the header allows this extension via \`ext_flags\`...` — a statement, not a cut-off
+  question. It no longer asserts anything about truncation, and asks plainly.
+
+Reviewer-verified facts adopted: at PR head, `ds4_kvstore.c:701` tokenises the suffix *after* a cache hit
+(it does not "key the suffix", and does not prove every request passes through it); renumbering token ids
+*does* move the hash via the ID-ordered table; the loader returns a miss on mismatch without deleting
+(`ds4_kvstore.c:1307-1317`); **bit 4 is genuinely unused upstream** (verified independently against
+`b3f5018` and `9cbf7e5`), and the old-reader tool-map behaviour is supported by the *base*, not just the PR
+head — so it must be scoped to "pre-PR base, otherwise-compatible checkpoint", not offered as an
+upgrade/downgrade round-trip guarantee.
+
+## Posting mechanics: the read-back step was broken
+
+`GET /repos/antirez/ds4/pulls/1020/comments/{id}` returns **404** for all three ids even though the list
+endpoint returns them (`path=ds4.c line=65007/65040`, `path=ds4_kvstore.c line=1290`). So the previously
+planned "re-read the live text via the API" step cannot use that route. Verify with the **list** endpoint
+(filtered by id) or by the `html_url` the POST returns.
