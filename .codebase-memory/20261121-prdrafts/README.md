@@ -64,3 +64,8 @@ extracting text to post, assert the load-bearing sentences are present; do not t
 `reply1.md` and `reply3.md` are **DROPPED** (kept for the record): not duplicative, but low-value-to-action
 against the cost of adding ~1.2k chars to the 4,257 we already have on a thread where the reviewer wrote 393
 and we promised to "leave this quiet". Do not post `pr1020-FINAL-staged.md`'s earlier "Final texts".
+
+## DONE 2026-11-21 00:50Z
+`reply2-final.md` posted as review-comment reply **4649423282** on thread `4131745125`
+(https://github.com/antirez/ds4/pull/1020#discussion_r4649423282); live body verified byte-identical and
+single. `reply1.md`/`reply3.md` remain dropped; do not post a top-level comment. #1163 remains **no post**.
